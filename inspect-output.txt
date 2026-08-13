@@ -1,0 +1,366 @@
+=== GEOJSON SAMPLES ===
+
+Elementary School ISD.geojson (362 features)
+  geometry: MultiPolygon
+  property keys: Name, Type, District, TEA Campus Number, Street, City, Zip, County, Phone, Full Address, Latitude, Longitude
+  sample properties: {"Name":"Youngblood ES","Type":"Elementary School","District":"Katy ISD","TEA Campus Number":"101914147","Street":"25600 Longenbaugh Rd","City":"Katy","Zip":"77493","County":"Harris","Phone":"2812346200","Full Address":"25600 Longenbaugh Rd, Katy, TX 77493","Latitude":null,"Longitude":null}
+
+Houston_ISD.geojson (49 features)
+  geometry: MultiPolygon
+  property keys: UNSDLEA, GEOID, GEOIDFQ, NAME
+  sample properties: {"UNSDLEA":"34440","GEOID":"4834440","GEOIDFQ":"9700000US4834440","NAME":"Pearland Independent School District"}
+
+Mapped Subdivisions.geojson (3430 features)
+  geometry: MultiPolygon
+  property keys: NAME, Zip_Code, id
+  sample properties: {"NAME":"ASHFORD COVE AT SILVERLAKE","Zip_Code":77584,"id":1}
+
+Middle School ISD.geojson (102 features)
+  geometry: MultiPolygon
+  property keys: Name, Type, District, TEA Campus Number, Street, City, Zip, County, Phone, Full Address, Latitude, Longtitude
+  sample properties: {"Name":"Haskett MS","Type":"Middle School","District":"Katy ISD","TEA Campus Number":"101914057","Street":"25737 Clay Rd","City":"Katy","Zip":"77493","County":"Harris","Phone":"2813966000","Full Address":"25737 Clay Rd, Katy, TX, 77493","Latitude":null,"Longtitude":null}
+
+Zip.geojson (213 features)
+  geometry: MultiPolygon
+  property keys: fid, Zip_Code, STArea, STLength, Median Insurance Rate
+  sample properties: {"fid":1,"Zip_Code":77510,"STArea":728523064.304147,"STLength":167706.605728566,"Median Insurance Rate":3643}
+
+
+=== CSV SAMPLES ===
+
+34_x_40_displayGrid_nonresponsive_ajax_display_dU35329m_show.csv (4233 rows)
+  headers: false, MLS Number, Address, City/Location, State Or Province, Zip, Subdivision, Area, Market Area, Original List Price, Close Price, Close Price Adj, Lot Size, SF, Prc/SF, Price Sq Ft List, Price Sq Ft Sold, Price Sq Ft Adj Sold, Close Date, Maint Fee Amt, Maint Fee Pay Schedule, YB, BR, FB, HB, DOM, CDOM, Latitude, Longitude, Tax Year, Tax Amount, Tax Rate, School District, School Elementary, School Middle, School High, Pool Private, Ownership, Property Type, Property Sub Type
+  rows: [
+  {
+    "false": "false",
+    "MLS Number": "52827152",
+    "Address": "412 Del Monte Drive",
+    "City/Location": "Huntsville",
+    "State Or Province": "Texas",
+    "Zip": "77320",
+    "Subdivision": "Crown Point Sub",
+    "Area": "43",
+    "Market Area": "Huntsville Area",
+    "Original List Price": "$275,000",
+    "Close Price": "$2,300",
+    "Close Price Adj": "$2,300",
+    "Lot Size": "5,053",
+    "SF": "2,014",
+    "Prc/SF": "$1.14",
+    "Price Sq Ft List": "$1.14",
+    "Price Sq Ft Sold": "$1.14",
+    "Price Sq Ft Adj Sold": "$1.14",
+    "Close Date": "06/20/2026",
+    "Maint Fee Amt": "$305",
+    "Maint Fee Pay Schedule": "Annually",
+    "YB": "2022",
+    "BR": "4",
+    "FB": "2",
+    "HB": "1",
+    "DOM": "127*",
+    "CDOM": "297",
+    "Latitude": "30.745703",
+    "Longitude": 
+
+94_x_40_displayGrid_nonresponsive_ajax_display_dU35329m_show.csv (493 rows)
+  headers: false, MLS Number, Address, City/Location, State Or Province, Zip, Subdivision, Area, Market Area, Original List Price, Close Price, Close Price Adj, Lot Size, SF, Prc/SF, Price Sq Ft List, Price Sq Ft Sold, Price Sq Ft Adj Sold, Close Date, Maint Fee Amt, Maint Fee Pay Schedule, YB, BR, FB, HB, DOM, CDOM, Latitude, Longitude, Tax Year, Tax Amount, Tax Rate, School District, School Elementary, School Middle, School High, Pool Private, Ownership, Property Type, Property Sub Type
+  rows: [
+  {
+    "false": "false",
+    "MLS Number": "36476485",
+    "Address": "310 E Defee Avenue",
+    "City/Location": "Baytown",
+    "State Or Province": "Texas",
+    "Zip": "77520",
+    "Subdivision": "Goose Creek",
+    "Area": "2",
+    "Market Area": "Baytown/Harris County",
+    "Original List Price": "$600",
+    "Close Price": "$600",
+    "Close Price Adj": "$600",
+    "Lot Size": "5,000",
+    "SF": "588",
+    "Prc/SF": "$1.02",
+    "Price Sq Ft List": "$1.02",
+    "Price Sq Ft Sold": "$1.02",
+    "Price Sq Ft Adj Sold": "$1.02",
+    "Close Date": "02/27/2026",
+    "Maint Fee Amt": "",
+    "Maint Fee Pay Schedule": "",
+    "YB": "1940",
+    "BR": "1",
+    "FB": "1",
+    "HB": "0",
+    "DOM": "6",
+    "CDOM": "6",
+    "Latitude": "29.731780",
+    "Longitude": "-94.963909",
+    "Tax Year": 
+
+TEA_Elem_School_Ratings.csv (857 rows)
+  headers: school_name_raw, school_name_clean, tea_campus, tea_campus_number, school_district_clean, Overall Rating, Overall Score, %
+Economically
+Disadvantaged
+  rows: [
+  {
+    "school_name_raw": "A ROBISON ELEMENTARY SCHOOL",
+    "school_name_clean": "A ROBISON ES",
+    "tea_campus": "ROBISON EL",
+    "tea_campus_number": "101907140",
+    "school_district_clean": "CYPRESS FAIRBANKS ISD",
+    "Overall Rating": "A",
+    "Overall Score": "90",
+    "%\nEconomically\nDisadvantaged": "38.7%"
+  },
+  {
+    "school_name_raw": "A.R. TURNER ELEMENTARY SCHOOL",
+    "school_name_clean": "A R TURNER ES",
+    "tea_campus": "TURNER EL",
+    "tea_campus_number": "170904104",
+    "school_district_clean": "WILLIS ISD",
+    "Overall Rating": "A",
+    "Overall Score": "90",
+    "%\nEconomically\nDisadvantaged": "66.5%"
+  },
+  {
+    "school_name_raw": "ADAM ELEMENTARY SCHOOL",
+    "school_name_clean": "ADAM ES",
+    "tea_campus": "ADAM EL",
+    "tea_campus_number": "1019071
+
+TEA_High_School_Ratings.csv (186 rows)
+  headers: school_name_raw, school_name_clean, tea_campus, tea_campus_number, school_district_clean, Overall Rating, Overall Score, %
+Economically
+Disadvantaged
+  rows: [
+  {
+    "school_name_raw": "CARVER H S FOR APPLIED TECH/ENGINEERING/ARTS",
+    "school_name_clean": "CARVER H S FOR APPLIED TECH ENGINEERING ARTS",
+    "tea_campus": "CARVER H S FOR APPLIED TECH/ENGINEERING/ARTS",
+    "tea_campus_number": "101902002",
+    "school_district_clean": "ALDINE ISD",
+    "Overall Rating": "B",
+    "Overall Score": "89",
+    "%\nEconomically\nDisadvantaged": "80.9%"
+  },
+  {
+    "school_name_raw": "ONALASKA JR/SR HIGH SCHOOL",
+    "school_name_clean": "ONALASKA JR SR HS",
+    "tea_campus": "ONALASKA JR/SR HIGH",
+    "tea_campus_number": "187910001",
+    "school_district_clean": "ONALASKA ISD",
+    "Overall Rating": "B",
+    "Overall Score": "83",
+    "%\nEconomically\nDisadvantaged": "58.9%"
+  },
+  {
+    "school_name_raw": "NORTH SHORE SENIOR HIGH SCHOOL",
+    "
+
+TEA_Middle_School_Ratings.csv (288 rows)
+  headers: school_name_raw, school_name_clean, tea_campus, tea_campus_number, school_district_clean, Overall Rating, Overall Score, %
+Economically
+Disadvantaged
+  rows: [
+  {
+    "school_name_raw": "ALDINE MIDDLE SCHOOL",
+    "school_name_clean": "ALDINE MS",
+    "tea_campus": "ALDINE MIDDLE",
+    "tea_campus_number": "101902041",
+    "school_district_clean": "ALDINE ISD",
+    "Overall Rating": "F",
+    "Overall Score": "59",
+    "%\nEconomically\nDisadvantaged": "91.4%"
+  },
+  {
+    "school_name_raw": "DREW ACADEMY",
+    "school_name_clean": "DREW ACADEMY",
+    "tea_campus": "DREW ACADEMY",
+    "tea_campus_number": "101902042",
+    "school_district_clean": "ALDINE ISD",
+    "Overall Rating": "C",
+    "Overall Score": "72",
+    "%\nEconomically\nDisadvantaged": "85.1%"
+  },
+  {
+    "school_name_raw": "GARCIA MIDDLE SCHOOL (ALDINE)",
+    "school_name_clean": "GARCIA MS",
+    "tea_campus": "GARCIA MIDDLE",
+    "tea_campus_number": "101902053",
+    "school_d
+
+Sales Data-20260801T175930Z-1-001\Sales Data\Current for Sale Data\3_x_40_displayGrid_nonresponsive_ajax_display_dU35329m_show.csv (4402 rows)
+  headers: false, MLS Number, Address, City/Location, State Or Province, Zip, Subdivision, Area, Market Area, Original List Price, Close Price, Close Price Adj, Lot Size, SF, Prc/SF, Price Sq Ft List, Price Sq Ft Sold, Price Sq Ft Adj Sold, Close Date, Maint Fee Amt, Maint Fee Pay Schedule, YB, BR, FB, HB, DOM, CDOM, Latitude, Longitude, Tax Year, Tax Amount, Tax Rate, School District, School Elementary, School Middle, School High, Pool Private, Ownership, Property Type, Property Sub Type
+  rows: [
+  {
+    "false": "false",
+    "MLS Number": "71238897",
+    "Address": "5814 Wayne Way",
+    "City/Location": "Rosenberg",
+    "State Or Province": "Texas",
+    "Zip": "77471",
+    "Subdivision": "Kingdom Heights Sec 7",
+    "Area": "30",
+    "Market Area": "Fort Bend County North/Richmond",
+    "Original List Price": "$1",
+    "Close Price": "",
+    "Close Price Adj": "",
+    "Lot Size": "7,414",
+    "SF": "3,142",
+    "Prc/SF": "$0.00",
+    "Price Sq Ft List": "$0.00",
+    "Price Sq Ft Sold": "",
+    "Price Sq Ft Adj Sold": "",
+    "Close Date": "",
+    "Maint Fee Amt": "$665",
+    "Maint Fee Pay Schedule": "Annually",
+    "YB": "2023",
+    "BR": "4",
+    "FB": "3",
+    "HB": "1",
+    "DOM": "10*",
+    "CDOM": "282",
+    "Latitude": "29.600400",
+    "Longitude": "-95.801638",
+    "Tax 
+
+Sales Data-20260801T175930Z-1-001\Sales Data\Current for Rent Data\22_x_40_displayGrid_nonresponsive_ajax_display_dU35329m_show.csv (3321 rows)
+  headers: false, MLS Number, Address, City/Location, State Or Province, Zip, Subdivision, Area, Market Area, Original List Price, Close Price, Close Price Adj, Lot Size, SF, Prc/SF, Price Sq Ft List, Price Sq Ft Sold, Price Sq Ft Adj Sold, Close Date, Maint Fee Amt, Maint Fee Pay Schedule, YB, BR, FB, HB, DOM, CDOM, Latitude, Longitude, Tax Year, Tax Amount, Tax Rate, School District, School Elementary, School Middle, School High, Pool Private, Ownership, Property Type, Property Sub Type
+  rows: [
+  {
+    "false": "false",
+    "MLS Number": "24118702",
+    "Address": "3607#A Luca st Street",
+    "City/Location": "Houston",
+    "State Or Province": "Texas",
+    "Zip": "77021",
+    "Subdivision": "La Salette Place Sec 02",
+    "Area": "4",
+    "Market Area": "University Area",
+    "Original List Price": "$799",
+    "Close Price": "",
+    "Close Price Adj": "",
+    "Lot Size": "7,973",
+    "SF": "1,016",
+    "Prc/SF": "$0.79",
+    "Price Sq Ft List": "$0.79",
+    "Price Sq Ft Sold": "",
+    "Price Sq Ft Adj Sold": "",
+    "Close Date": "",
+    "Maint Fee Amt": "",
+    "Maint Fee Pay Schedule": "",
+    "YB": "1945",
+    "BR": "3",
+    "FB": "1",
+    "HB": "0",
+    "DOM": "39",
+    "CDOM": "39",
+    "Latitude": "29.698291",
+    "Longitude": "-95.365439",
+    "Tax Year": "",
+    "Tax Am
+
+Sales Data-20260801T175930Z-1-001\Sales Data\Sale Data\Sale 2021\12_x_40_displayGrid_nonresponsive_ajax_display_dU35329m_show.csv (3011 rows)
+  headers: false, MLS Number, Address, City/Location, State Or Province, Zip, Subdivision, Area, Market Area, Original List Price, Close Price, Close Price Adj, Lot Size, SF, Prc/SF, Price Sq Ft List, Price Sq Ft Sold, Price Sq Ft Adj Sold, Close Date, Maint Fee Amt, Maint Fee Pay Schedule, YB, BR, FB, HB, DOM, CDOM, Latitude, Longitude, Tax Year, Tax Amount, Tax Rate, School District, School Elementary, School Middle, School High, Pool Private, Ownership, Property Type, Property Sub Type
+  rows: [
+  {
+    "false": "false",
+    "MLS Number": "37015849",
+    "Address": "208 Fawn Trail",
+    "City/Location": "Lake Jackson",
+    "State Or Province": "Texas",
+    "Zip": "77566",
+    "Subdivision": "Buffalo Camp Farms",
+    "Area": "5",
+    "Market Area": "Lake Jackson",
+    "Original List Price": "$439,000",
+    "Close Price": "$410,000",
+    "Close Price Adj": "$410,000",
+    "Lot Size": "45,877",
+    "SF": "3,083",
+    "Prc/SF": "$132.99",
+    "Price Sq Ft List": "$139.15",
+    "Price Sq Ft Sold": "$132.99",
+    "Price Sq Ft Adj Sold": "$132.99",
+    "Close Date": "09/02/2021",
+    "Maint Fee Amt": "",
+    "Maint Fee Pay Schedule": "",
+    "YB": "1995",
+    "BR": "5",
+    "FB": "3",
+    "HB": "1",
+    "DOM": "33",
+    "CDOM": "33",
+    "Latitude": "29.059105",
+    "Longitude": "-95.4
+
+Sales Data-20260801T175930Z-1-001\Sales Data\Rent Data\Rent 2021\100_x_40_displayGrid_nonresponsive_ajax_display_dU35329m_show.csv (4199 rows)
+  headers: false, MLS Number, Address, City/Location, State Or Province, Zip, Subdivision, Area, Market Area, Original List Price, Close Price, Close Price Adj, Lot Size, SF, Prc/SF, Price Sq Ft List, Price Sq Ft Sold, Price Sq Ft Adj Sold, Close Date, Maint Fee Amt, Maint Fee Pay Schedule, YB, BR, FB, HB, DOM, CDOM, Latitude, Longitude, Tax Year, Tax Amount, Tax Rate, School District, School Elementary, School Middle, School High, Pool Private, Ownership, Property Type, Property Sub Type
+  rows: [
+  {
+    "false": "false",
+    "MLS Number": "14834398",
+    "Address": "8430 Holiday Lane Unit#A",
+    "City/Location": "Houston",
+    "State Or Province": "Texas",
+    "Zip": "77075",
+    "Subdivision": "Houston Skyscraper Shadows 02",
+    "Area": "3",
+    "Market Area": "Hobby Area",
+    "Original List Price": "$600",
+    "Close Price": "$600",
+    "Close Price Adj": "$600",
+    "Lot Size": "9,779",
+    "SF": "300",
+    "Prc/SF": "$2.00",
+    "Price Sq Ft List": "$2.00",
+    "Price Sq Ft Sold": "$2.00",
+    "Price Sq Ft Adj Sold": "$2.00",
+    "Close Date": "01/01/2021",
+    "Maint Fee Amt": "",
+    "Maint Fee Pay Schedule": "",
+    "YB": "1978",
+    "BR": "1",
+    "FB": "1",
+    "HB": "0",
+    "DOM": "43",
+    "CDOM": "43",
+    "Latitude": "29.621906",
+    "Longitude": "-95.267322",
+ 
+
+Sales Data-20260801T175930Z-1-001\Sales Data\Rent Data\Rent 2023\data1.csv (4337 rows)
+  headers: false, MLS Number, Address, City/Location, State Or Province, Zip, Subdivision, Area, Market Area, Original List Price, Close Price, Close Price Adj, Lot Size, SF, Prc/SF, Price Sq Ft List, Price Sq Ft Sold, Price Sq Ft Adj Sold, Close Date, Maint Fee Amt, Maint Fee Pay Schedule, YB, BR, FB, HB, DOM, CDOM, Latitude, Longitude, Tax Year, Tax Amount, Tax Rate, School District, School Elementary, School Middle, School High, Pool Private, Ownership, Property Type, Property Sub Type
+  rows: [
+  {
+    "false": "false",
+    "MLS Number": "47014357",
+    "Address": "2300 Hutton Street",
+    "City/Location": "Houston",
+    "State Or Province": "Texas",
+    "Zip": "77026",
+    "Subdivision": "Home",
+    "Area": "2",
+    "Market Area": "Denver Harbor",
+    "Original List Price": "$900",
+    "Close Price": "$500",
+    "Close Price Adj": "$500",
+    "Lot Size": "2,500",
+    "SF": "680",
+    "Prc/SF": "$0.74",
+    "Price Sq Ft List": "$0.74",
+    "Price Sq Ft Sold": "$0.74",
+    "Price Sq Ft Adj Sold": "$0.74",
+    "Close Date": "12/19/2023",
+    "Maint Fee Amt": "",
+    "Maint Fee Pay Schedule": "",
+    "YB": "1940",
+    "BR": "1",
+    "FB": "1",
+    "HB": "0",
+    "DOM": "218",
+    "CDOM": "218",
+    "Latitude": "29.783012",
+    "Longitude": "-95.331472",
+    "Tax Year": "",
+    "Ta
