@@ -281,8 +281,10 @@ function makeDedupeKey(row: Record<string, string>, columns: string[]): string {
 }
 
 function makeEngineDedupeKey(d: PropertyData): string {
-  const mls = (d.mlsNumber ?? '').trim().toLowerCase();
-  return mls || `${(d.address ?? '').trim().toLowerCase()}|${(d.zip ?? '').trim().toLowerCase()}`;
+  return makeDedupeKey(
+    { 'MLS Number': d.mlsNumber, Address: d.address, Zip: d.zip },
+    ['MLS Number', 'Address', 'Zip']
+  );
 }
 
 async function buildDedupeKeySet(

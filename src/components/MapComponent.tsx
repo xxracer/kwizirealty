@@ -9,14 +9,23 @@ import { MousePointer2, Square, Scissors, Trash2, BarChart3, Loader2 } from 'luc
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
 
-const GEOJSON_URLS: Record<BoundaryKey, string> = {
-  subdivisions: '/csv/Mapped Subdivisions.geojson',
-  zipcodes: '/csv/Zip.geojson',
-  highschools: '/csv/Houston_ISD.geojson',
-  elementary: '/csv/Elementary School ISD.geojson',
-  middle: '/csv/Middle School ISD.geojson',
-  neighborhoods: '/csv/Mapped Subdivisions.geojson',
+const BOUNDARY_SOURCES: Record<BoundaryKey, string> = {
+  subdivisions: 'Mapped Subdivisions.geojson',
+  zipcodes: 'Zip.geojson',
+  highschools: 'Houston_ISD.geojson',
+  elementary: 'Elementary School ISD.geojson',
+  middle: 'Middle School ISD.geojson',
+  neighborhoods: 'Mapped Subdivisions.geojson',
 };
+
+const BOUNDARY_KEYS: BoundaryKey[] = [
+  'subdivisions',
+  'zipcodes',
+  'highschools',
+  'elementary',
+  'middle',
+  'neighborhoods',
+];
 
 type RGB = { r: number; g: number; b: number };
 
@@ -208,7 +217,11 @@ export default function MapComponent({
 
   const [tool, setTool] = useState<ToolMode>('select');
   const [geoJsonData, setGeoJsonData] = useState<GeoJSON.FeatureCollection | null>(null);
-  const [isLoadingGeoJson, setIsLoadingGeoJson] = useState(false);
+  const [boundaryLoading, setBoundaryLoading] = useState(false);
+  const [boundarySwitching, setBoundarySwitching] = useState(true);
+  const [areaLayerReady, setAreaLayerReady] = useState(false);
+  const boundaryCacheRef = useRef<Partial<Record<BoundaryKey, GeoJSON.FeatureCollection>>>({});
+  const initialRevealDoneRef = useRef(false);
 
   const multiSelectRef = useRef(multiSelect);
   const selectedRef = useRef(selectedIds);
@@ -713,53 +726,72 @@ export default function MapComponent({
     }
   }, [tool]);
 
-  // Fetch GeoJSON when boundary changes
-  useEffect(() => {
-    const urlPath = GEOJSON_URLS[boundary];
-    if (!urlPath) {
-      setGeoJsonData(null);
+  // Load boundary GeoJSON for the active boundary. We prefer same-domain files in
+  // /geojson so Vercel serves them instantly, and fall back to Firebase CMS only
+  // when the local copy is missing. All loaded boundaries are cached in memory
+  // so switching between them is nearly instant after the first visit.
+  const loadBoundary = async (key: BoundaryKey, { preloadOthers = false } = {}) => {
+    setBoundaryLoading(true);
+    setBoundarySwitching(true);
+    setAreaLayerReady(false);
+
+    const cached = boundaryCacheRef.current[key];
+    if (cached) {
+      setGeoJsonData(cached);
+      setBoundaryLoading(false);
+      if (preloadOthers) preloadRemainingBoundaries(key);
       return;
     }
 
-    let isMounted = true;
-    
-    async function fetchGeoJSON() {
-      setIsLoadingGeoJson(true);
-      // Don't clear geoJsonData immediately if we want a smoother transition, 
-      // but clearing it ensures we don't show wrong boundaries temporarily.
-      setGeoJsonData(null);
-      
-      try {
-        const fileName = urlPath.split('/').pop() || '';
-        
-        // Find it in Firebase instead of relying on local /csv path
-        const allBoundaryFiles = await cmsStore.listFilesMetadataByCategory('boundary');
-        const fileRecord = allBoundaryFiles.find(f => f.name === fileName);
-        
-        if (!fileRecord || !fileRecord.storageUrl) {
-          console.warn(`Could not find ${fileName} in Firebase CMS. Ensure you ran the Migration script.`);
-          throw new Error('Boundary file not found in Firebase');
-        }
-        
-        const res = await fetch(fileRecord.storageUrl);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        
-        if (isMounted) {
-          setGeoJsonData(data);
-          setIsLoadingGeoJson(false);
-        }
-      } catch (err) {
-        console.error('Failed to load GeoJSON for', boundary, err);
-        if (isMounted) setIsLoadingGeoJson(false);
-      }
+    const localPath = `/geojson/${key}.geojson.gz`;
+    try {
+      const data = await engine.fetchGzJson<GeoJSON.FeatureCollection>(localPath);
+      boundaryCacheRef.current[key] = data;
+      setGeoJsonData(data);
+      setBoundaryLoading(false);
+      if (preloadOthers) preloadRemainingBoundaries(key);
+      return;
+    } catch (err) {
+      console.warn(`[Kwizi Map] local GeoJSON missing for ${key}, falling back to CMS`, err);
     }
-    
-    fetchGeoJSON();
 
-    return () => {
-      isMounted = false;
-    };
+    // Fallback to Firebase CMS storage URL.
+    try {
+      const fileName = BOUNDARY_SOURCES[key];
+      const allBoundaryFiles = await cmsStore.listFilesMetadataByCategory('boundary');
+      const fileRecord = allBoundaryFiles.find((f) => f.name === fileName);
+      if (!fileRecord || !fileRecord.storageUrl) {
+        throw new Error(`Boundary file ${fileName} not found in Firebase CMS`);
+      }
+      const res = await fetch(fileRecord.storageUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as GeoJSON.FeatureCollection;
+      boundaryCacheRef.current[key] = data;
+      setGeoJsonData(data);
+    } catch (err) {
+      console.error('[Kwizi Map] failed to load GeoJSON for', key, err);
+      setGeoJsonData(null);
+    } finally {
+      setBoundaryLoading(false);
+    }
+  };
+
+  const preloadRemainingBoundaries = async (current: BoundaryKey) => {
+    const others = BOUNDARY_KEYS.filter((k) => k !== current && !boundaryCacheRef.current[k]);
+    await Promise.all(
+      others.map(async (k) => {
+        try {
+          boundaryCacheRef.current[k] = await engine.fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${k}.geojson.gz`);
+        } catch {
+          // Silent: preloading is optional; the active boundary is already loaded.
+        }
+      })
+    );
+  };
+
+  useEffect(() => {
+    loadBoundary(boundary, { preloadOthers: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boundary]);
 
   const areaLayerJustBuiltRef = useRef(false);
@@ -818,6 +850,7 @@ export default function MapComponent({
 
     console.log('[Kwizi Map] rebuildAreaLayer start', { fitBounds });
     const t0 = performance.now();
+    setAreaLayerReady(false);
 
     if (areaLayerRef.current) {
       areaLayerRef.current.remove();
@@ -880,6 +913,13 @@ export default function MapComponent({
     }).addTo(map);
 
     areaLayerJustBuiltRef.current = true;
+    setAreaLayerReady(true);
+    if (initialRevealDoneRef.current) {
+      setBoundarySwitching(false);
+    } else if (areaFeaturesRef.current.length > 0) {
+      initialRevealDoneRef.current = true;
+      setBoundarySwitching(false);
+    }
 
     if (fitBounds) {
       const pointBounds = computeDataBounds(rawDataRef.current);
@@ -981,10 +1021,24 @@ export default function MapComponent({
     }
   }, [rawData, showSales, showRentals]);
 
+  // Never keep the boundary loading overlay stuck for more than 12 seconds;
+  // if the CSV or boundary genuinely has no data we still want the map usable.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (!initialRevealDoneRef.current) {
+        initialRevealDoneRef.current = true;
+        setBoundarySwitching(false);
+      }
+    }, 12000);
+    return () => clearTimeout(id);
+  }, []);
+
+  const showBoundaryOverlay = boundaryLoading || boundarySwitching;
+
   return (
     <div ref={containerRef} className="h-full w-full relative" aria-label="Interactive real estate market map">
       <AnimatePresence>
-        {isLoadingGeoJson && (
+        {showBoundaryOverlay && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}

@@ -365,7 +365,7 @@ export class RealEstateEngine {
     high: {},
   };
   private cmsOverrides: CMSMetricOverride[] = [];
-  private loadingPromise: Promise<void> | null = null;
+  private loadingPromise: Promise<{ ok: boolean; error?: string; count: number }> | null = null;
 
   private normalizeRows(rows: any[], quality: DataQualitySummary, zipSet: Set<string>): PropertyData[] {
     return rows
@@ -524,11 +524,33 @@ export class RealEstateEngine {
     await this.loadAllCSV(true);
   }
 
+  private get storageBucket(): string {
+    return process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'myreatstat.firebasestorage.app';
+  }
+
+  private directStorageUrl(path: string): string {
+    const encoded = encodeURIComponent(path).replace(/%2F/g, '%2F');
+    return `https://firebasestorage.googleapis.com/v0/b/${this.storageBucket}/o/${encoded}?alt=media`;
+  }
+
+  private async fetchWithTimeout(url: string, timeoutMs = 60000): Promise<Response> {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(id);
+      return res;
+    } catch (err) {
+      clearTimeout(id);
+      throw err;
+    }
+  }
+
   private async loadManifest(): Promise<string[]> {
     try {
       const manifestRef = ref(storage, 'cms_files/csv/property-manifest.json');
       const url = await getDownloadURL(manifestRef);
-      const res = await fetch(url);
+      const res = await this.fetchWithTimeout(url, 30000);
       if (!res.ok) throw new Error(`Firebase manifest fetch failed: ${res.status}`);
       const data = await res.json();
       console.log('[Kwizi Engine] Loaded manifest from Firebase Storage');
@@ -550,18 +572,166 @@ export class RealEstateEngine {
 
   private async findMasterFile(): Promise<{ url: string; path: string } | null> {
     const candidates = [
+      'cms_files/csv/master_cache_slim.csv.gz', // preferred: same data, fewer columns, smaller download
       'cms_files/csv/master_cache.csv.gz',
+      'cms_files/csv/master_cache.json.gz',
+      'cms_files/master_cache_slim.csv.gz',
       'cms_files/master_cache.csv.gz',
+      'cms_files/master_cache.json.gz',
       'cms_files/csv/master_cache.csv',
       'cms_files/master_cache.csv',
       'master_cache/master_cache.json',
       'cms_files/master_cache.json',
     ];
     for (const path of candidates) {
-      const url = await this.getFirebaseDownloadUrl(path);
-      if (url) return { url, path };
+      try {
+        // Prefer Firebase SDK signed URL (handles auth), but fall back to direct public URL.
+        let url = await this.getFirebaseDownloadUrl(path);
+        if (!url) {
+          const direct = this.directStorageUrl(path);
+          const head = await this.fetchWithTimeout(direct, 10000);
+          if (head.ok) url = direct;
+        }
+        if (url) return { url, path };
+      } catch {
+        // ignore candidate errors
+      }
     }
     return null;
+  }
+
+  private async findChunkedCache(): Promise<{ chunks: string[]; totalRows: number; localBase?: string } | null> {
+    const manifestName = 'master_cache_chunks.json';
+
+    // Prefer a build-time copy in /cache so Vercel serves it same-domain and
+    // users avoid the slow cross-origin Firebase Storage download.
+    try {
+      const localRes = await fetch(`/cache/${manifestName}`, { method: 'GET' });
+      if (localRes.ok) {
+        const manifest = await localRes.json();
+        if (Array.isArray(manifest.chunks) && manifest.chunks.length > 0) {
+          return { chunks: manifest.chunks, totalRows: manifest.totalRows || 0, localBase: '/cache/' };
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    const manifestPath = `cms_files/csv/${manifestName}`;
+    try {
+      let url = await this.getFirebaseDownloadUrl(manifestPath);
+      if (!url) {
+        const direct = this.directStorageUrl(manifestPath);
+        const head = await this.fetchWithTimeout(direct, 10000);
+        if (head.ok) url = direct;
+      }
+      if (!url) return null;
+      const res = await this.fetchWithTimeout(url, 30000);
+      if (!res.ok) return null;
+      const manifest = await res.json();
+      if (Array.isArray(manifest.chunks) && manifest.chunks.length > 0) {
+        return { chunks: manifest.chunks, totalRows: manifest.totalRows || 0 };
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  private async resolveChunkUrl(path: string, localBase?: string): Promise<string> {
+    const fileName = path.split('/').pop();
+    if (localBase) {
+      const localUrl = `${localBase}${fileName}`;
+      try {
+        const head = await fetch(localUrl, { method: 'HEAD' });
+        if (head.ok) return localUrl;
+      } catch {
+        // ignore
+      }
+    }
+    let url = await this.getFirebaseDownloadUrl(path);
+    if (!url) {
+      const direct = this.directStorageUrl(path);
+      const head = await this.fetchWithTimeout(direct, 10000);
+      if (head.ok) url = direct;
+    }
+    if (!url) throw new Error(`Could not resolve chunk ${path}`);
+    return url;
+  }
+
+  private async yieldToMain(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  private async loadChunksOnMainThread(
+    chunkPaths: string[],
+    localBase?: string,
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<PropertyData[]> {
+    const ds = (window as any).DecompressionStream as typeof DecompressionStream;
+    if (!ds) throw new Error('Browser does not support gzip decompression.');
+
+    const results = new Array(chunkPaths.length);
+    let completed = 0;
+
+    await Promise.all(
+      chunkPaths.map(async (path, index) => {
+        const url = await this.resolveChunkUrl(path, localBase);
+        const res = await this.fetchWithTimeout(url, 120000);
+        if (!res.ok) throw new Error(`Chunk fetch failed: ${res.status}`);
+
+        const buf = await res.arrayBuffer();
+        let text: string;
+        try {
+          text = new TextDecoder().decode(buf);
+          JSON.parse(text);
+        } catch {
+          const stream = new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(buf));
+              controller.close();
+            },
+          });
+          const decompressed = stream.pipeThrough(new ds('gzip'));
+          text = await new Response(decompressed).text();
+        }
+        const parsed = JSON.parse(text);
+        let rows: PropertyData[];
+        if (Array.isArray(parsed)) {
+          rows = parsed as PropertyData[];
+        } else if (parsed && parsed.header && parsed.rows) {
+          const header = parsed.header as (keyof PropertyData)[];
+          rows = (parsed.rows as any[]).map((arr) => {
+            const obj: any = {};
+            header.forEach((key, i) => (obj[key] = arr[i]));
+            return obj as PropertyData;
+          });
+        } else {
+          throw new Error(`Unrecognized chunk format: ${typeof parsed}`);
+        }
+        results[index] = rows;
+        completed++;
+        onProgress?.(completed, chunkPaths.length);
+        console.log(`[Kwizi Engine] Loaded chunk ${index + 1}/${chunkPaths.length}: ${rows.length.toLocaleString()} rows`);
+        // Yield so React can paint the map (overlay hidden, polygons rendered)
+        // while the remaining chunks are still being parsed.
+        await this.yieldToMain();
+      })
+    );
+
+    return results.flat();
+  }
+
+  private async loadChunkedCache(
+    chunkPaths: string[],
+    localBase?: string,
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<PropertyData[]> {
+    // The chunks are large (~60 MB raw), and transferring parsed rows back from
+    // a Web Worker is slower than parsing on the main thread. We run on the main
+    // thread while a tiny pre-computed metric snapshot lets the map render
+    // instantly in parallel.
+    return this.loadChunksOnMainThread(chunkPaths, localBase, onProgress);
   }
 
   private async parseCsvText(text: string): Promise<Record<string, string>[]> {
@@ -586,13 +756,24 @@ export class RealEstateEngine {
   private async parseMasterResponse(res: Response, url: string): Promise<{ rows?: Record<string, string>[]; normalized?: PropertyData[] }> {
     const pathname = new URL(url).pathname;
     if (pathname.endsWith('.gz')) {
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const decompressed = res.body ? await new Response(res.body.pipeThrough(new ((window as any).DecompressionStream as typeof DecompressionStream)('gzip'))).text() : '';
+        const json = JSON.parse(decompressed);
+        if (Array.isArray(json.data) && json.data.length > 0) {
+          const first = json.data[0];
+          if (first && typeof first.closePrice === 'number' && typeof first.lat === 'number') {
+            return { normalized: json.data as PropertyData[] };
+          }
+        }
+        return { rows: [] };
+      }
       return { rows: await this.parseGzippedResponse(res) };
     }
     if (pathname.endsWith('.json')) {
       const json = await res.json();
       if (Array.isArray(json.data) && json.data.length > 0) {
         const first = json.data[0];
-        // Trust the cache if it looks like normalized PropertyData (has closePrice).
         if (first && typeof first.closePrice === 'number' && typeof first.lat === 'number') {
           return { normalized: json.data as PropertyData[] };
         }
@@ -605,21 +786,26 @@ export class RealEstateEngine {
   public async loadAllCSV(
     forceRefresh = false,
     onProgress?: (loaded: number, total: number) => void
-  ) {
-    if (this.isLoaded && !forceRefresh) return;
+  ): Promise<{ ok: boolean; error?: string; count: number }> {
+    if (this.isLoaded && !forceRefresh) return { ok: true, count: this.data.length };
     if (this.loadingPromise) return this.loadingPromise;
 
     this.loadingPromise = (async () => {
-      // 1. Decide the data source: single master file, or the individual manifest.
-      const masterFile = await this.findMasterFile();
+      // 1. Decide the data source: chunked JSON cache, single master file, or the individual manifest.
+      const chunkedCache = await this.findChunkedCache();
+      const masterFile = chunkedCache ? null : await this.findMasterFile();
       let masterUrl: string | null = masterFile?.url || null;
       let manifestPaths: string[] | null = null;
 
-      if (!masterUrl) {
+      if (!masterUrl && !chunkedCache) {
         manifestPaths = await this.loadManifest();
       }
 
-      const cacheVersionUrls = masterFile?.path ? [masterFile.path] : (manifestPaths || []);
+      const cacheVersionUrls = chunkedCache
+        ? ['cms_files/csv/master_cache_chunks.json']
+        : masterFile?.path
+        ? [masterFile.path]
+        : (manifestPaths || []);
       const version = await cacheVersionFor(cacheVersionUrls);
 
       // 2. Try IndexedDB cache first (avoids any network hit after first load).
@@ -632,7 +818,7 @@ export class RealEstateEngine {
             this.isLoaded = true;
             console.log('[Kwizi Engine] Restored', cached.length, 'properties from IndexedDB cache');
             this.loadSchoolRatings().catch(() => {});
-            return;
+            return { ok: true, count: cached.length };
           }
         } catch (err) {
           console.warn('[Kwizi] Failed to read CSV cache:', err);
@@ -649,13 +835,28 @@ export class RealEstateEngine {
       };
       const zipSet = new Set<string>();
       let allItems: PropertyData[] = [];
+      let loadError: string | undefined;
 
-      // 3. Load from the single Firebase master file if it exists.
-      if (masterUrl) {
+      // 3. Load from the chunked JSON cache (fastest path: skip CSV parse/normalize).
+      if (chunkedCache) {
+        console.log(`[Kwizi Engine] Loading ${chunkedCache.chunks.length} pre-normalized JSON chunks`);
+        onProgress?.(0, chunkedCache.chunks.length);
+        try {
+          allItems = await this.loadChunkedCache(chunkedCache.chunks, chunkedCache.localBase, onProgress);
+          console.log(`[Kwizi Engine] Restored ${allItems.length} properties from chunked JSON cache`);
+        } catch (err) {
+          loadError = err instanceof Error ? err.message : String(err);
+          console.error('[Kwizi] Failed to load chunked JSON cache, will fall back:', err);
+          allItems = [];
+        }
+      }
+
+      // 4. Load from the single Firebase master file if chunked cache is unavailable/failed.
+      if (allItems.length === 0 && masterUrl) {
         console.log('[Kwizi Engine] Loading master file from Firebase Storage');
         onProgress?.(0, 1);
         try {
-          const res = await fetch(masterUrl);
+          const res = await this.fetchWithTimeout(masterUrl, 120000);
           if (!res.ok) throw new Error(`Master fetch failed: ${res.status}`);
           const parsed = await this.parseMasterResponse(res, masterUrl);
           if (parsed.normalized) {
@@ -672,15 +873,16 @@ export class RealEstateEngine {
             console.log(`[Kwizi Engine] Parsed ${rows.length} rows from master CSV (${newItems.length} kept)`);
           }
         } catch (err) {
+          loadError = err instanceof Error ? err.message : String(err);
           console.error('[Kwizi] Failed to load master file, will fall back to manifest:', err);
           allItems = [];
           masterUrl = null;
         }
       }
 
-      // 4. Fallback: download individual CSVs from the Firebase Storage manifest.
+      // 5. Fallback: download individual CSVs from the Firebase Storage manifest.
       if (!masterUrl && manifestPaths) {
-        const bucket = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'myreatstat.firebasestorage.app';
+        const bucket = this.storageBucket;
         const firebaseUrls = manifestPaths
           .filter((p) => p.toLowerCase().endsWith('.csv'))
           .map((p) =>
@@ -697,7 +899,7 @@ export class RealEstateEngine {
             await Promise.all(
               chunk.map(async (url) => {
                 try {
-                  const res = await fetch(url);
+                  const res = await this.fetchWithTimeout(url, 60000);
                   if (!res.ok) return;
                   const rows = await this.parseCsvText(await res.text());
                   quality.totalRowsRead += rows.length;
@@ -712,14 +914,22 @@ export class RealEstateEngine {
               })
             );
           }
+          if (allItems.length === 0 && !loadError) {
+            loadError = 'No CSV files could be loaded from Firebase Storage.';
+          }
         }
       }
 
       this.data = allItems;
-      await this.applyPostLoadSteps(quality, zipSet, version);
+      // Start post-load work in the background; the UI can render as soon as
+      // the data is in memory. applyPostLoadSteps sets this.isLoaded = true.
+      this.applyPostLoadSteps(quality, zipSet, version).catch((err) =>
+        console.error('[Kwizi] Post-load steps failed:', err)
+      );
+      return { ok: this.data.length > 0, error: loadError, count: this.data.length };
     })();
 
-    await this.loadingPromise;
+    return this.loadingPromise;
   }
 
   private async saveCache(cacheVersion: string) {
@@ -1524,6 +1734,36 @@ export class RealEstateEngine {
       l2s,
       moi,
     };
+  }
+
+  /**
+   * Fetch a JSON payload that may be served raw or gzip-compressed. We try to
+   * parse it directly first; if that fails we stream it through
+   * DecompressionStream. This lets us serve pre-compressed `.json.gz` files
+   * from /cache while still working if a CDN transparently decompresses them.
+   */
+  public async fetchGzJson<T>(url: string): Promise<T> {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+
+    const buf = await res.arrayBuffer();
+    let text: string;
+    try {
+      text = new TextDecoder().decode(buf);
+      JSON.parse(text);
+    } catch {
+      const ds = (window as any).DecompressionStream as typeof DecompressionStream;
+      if (!ds) throw new Error('Browser does not support gzip decompression.');
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(buf));
+          controller.close();
+        },
+      });
+      const decompressed = stream.pipeThrough(new ds('gzip'));
+      text = await new Response(decompressed).text();
+    }
+    return JSON.parse(text) as T;
   }
 }
 

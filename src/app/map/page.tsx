@@ -36,6 +36,7 @@ import {
   RotateCcw,
   HelpCircle,
   MousePointer2,
+  AlertTriangle,
   Lock,
   User,
   Save,
@@ -98,6 +99,8 @@ const PERIODS: { key: PropertyFilters['period']; label: string }[] = [
 const FIXED_PALETTE = ['#93c5fd', '#60a5fa', '#3b82f6', '#4f46e5', '#7c3aed'];
 
 const RATING_OPTIONS = ['A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', 'D', 'D-', 'F'];
+
+type InitialMetricsSnapshot = { values: Record<string, number>; counts: Record<string, number> };
 
 function formatMoney(num: number): string {
   if (!num || !isFinite(num)) return '$0';
@@ -168,6 +171,11 @@ export default function MapPage() {
   const [metric, setMetric] = useState<MetricKey>('Close Price');
   const [loadingCSV, setLoadingCSV] = useState(true);
   const [csvProgress, setCsvProgress] = useState<{ loaded: number; total: number } | null>(null);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [initialMetrics, setInitialMetrics] = useState<
+    Partial<Record<BoundaryKey, { values: Record<string, number>; counts: Record<string, number> }>> | null
+  >(null);
+  const csvStartedRef = useRef(false);
 
   const [filters, setFilters] = useState<PropertyFilters>(DEFAULT_FILTERS);
 
@@ -196,11 +204,70 @@ export default function MapPage() {
 
   const isMobile = useMediaQuery('(max-width: 1024px)');
 
-  useEffect(() => {
+  const startCsvLoad = useCallback(() => {
+    if (csvStartedRef.current) return;
+    csvStartedRef.current = true;
     engine
       .loadAllCSV(false, (loaded, total) => setCsvProgress({ loaded, total }))
-      .then(() => setLoadingCSV(false));
+      .then((result) => {
+        setLoadingCSV(false);
+        if (!result.ok) {
+          setCsvError(result.error || 'No se pudieron cargar los datos del mapa.');
+        }
+      })
+      .catch((err) => {
+        setLoadingCSV(false);
+        setCsvError(err?.message || 'Error inesperado cargando datos del mapa.');
+      });
   }, []);
+
+  // Start the heavy CSV load as soon as the active boundary snapshot is ready,
+  // but always fall back to starting it after 2 seconds so a missing snapshot
+  // never blocks the map.
+  const activeMetricsReady = useMemo(
+    () => !!initialMetrics && !!initialMetrics[boundary],
+    [initialMetrics, boundary]
+  );
+
+  useEffect(() => {
+    if (activeMetricsReady) startCsvLoad();
+  }, [activeMetricsReady, startCsvLoad]);
+
+  useEffect(() => {
+    const fallback = setTimeout(() => {
+      if (!csvStartedRef.current) startCsvLoad();
+    }, 2000);
+    return () => clearTimeout(fallback);
+  }, [startCsvLoad]);
+
+  const loadMetricsForBoundary = useCallback(
+    async (key: BoundaryKey) => {
+      if (initialMetrics?.[key]) return;
+      try {
+        const data = await engine.fetchGzJson<InitialMetricsSnapshot>(`/cache/initial_metrics_${key}.json.gz`);
+        setInitialMetrics((prev) => ({ ...(prev || {}), [key]: data }));
+      } catch (err) {
+        console.error(`[Kwizi Map] failed to load initial metrics for ${key}`, err);
+      }
+    },
+    [initialMetrics]
+  );
+
+  useEffect(() => {
+    loadMetricsForBoundary(boundary);
+  }, [boundary, loadMetricsForBoundary]);
+
+  useEffect(() => {
+    // Preload the remaining boundary snapshots in the background once the active
+    // one is available. They are tiny compared to the CSV and make switching
+    // boundaries feel instant.
+    if (!activeMetricsReady) return;
+    for (const b of BOUNDARIES) {
+      if (b.key !== boundary && !initialMetrics?.[b.key]) {
+        loadMetricsForBoundary(b.key);
+      }
+    }
+  }, [activeMetricsReady, boundary, initialMetrics, loadMetricsForBoundary]);
 
   useEffect(() => {
     const seen = typeof window !== 'undefined' ? window.localStorage.getItem('kwizi-tour-seen') : 'true';
@@ -208,6 +275,12 @@ export default function MapPage() {
       const t = setTimeout(() => setShowTour(true), 800);
       return () => clearTimeout(t);
     }
+  }, []);
+
+  useEffect(() => {
+    // Prefetch the map component chunk as early as possible so Leaflet and the
+    // polygon rendering code are ready by the time the initial snapshot arrives.
+    import('@/components/MapComponent');
   }, []);
 
   useEffect(() => {
@@ -234,25 +307,35 @@ export default function MapPage() {
     return engine.getMapValues(filteredData, boundary, metric);
   }, [filteredData, boundary, metric]);
 
+  const dataReady = !loadingCSV && filteredData.length > 0;
+
+  // Use the lightweight pre-computed snapshot for instant map coloring while
+  // the full CSV dataset is still loading in the background.
+  const effectiveMetricValues = dataReady
+    ? metricValues
+    : initialMetrics?.[boundary]?.values ?? {};
+  const effectiveSampleCounts = dataReady
+    ? sampleCounts
+    : initialMetrics?.[boundary]?.counts ?? {};
+  const effectiveNameMap = dataReady ? nameMap : {};
+
   useEffect(() => {
-    const vals = Object.values(metricValues).filter((v) => isFinite(v));
+    const vals = Object.values(effectiveMetricValues).filter((v) => isFinite(v));
     if (vals.length) {
       setCustomMin(Math.min(...vals));
       setCustomMax(Math.max(...vals));
     }
-  }, [metricValues]);
+  }, [effectiveMetricValues]);
 
   const colorStops = useMemo(() => {
     return generateColorStops(
-      metricValues,
+      effectiveMetricValues,
       metric,
       reversePalette,
       autoScale ? undefined : customMin,
       autoScale ? undefined : customMax
     );
-  }, [metricValues, metric, reversePalette, autoScale, customMin, customMax]);
-
-  const dataReady = !loadingCSV && filteredData.length > 0;
+  }, [effectiveMetricValues, metric, reversePalette, autoScale, customMin, customMax]);
 
   const emptyStats = useMemo(() => ({
     count: 0, avgSale: 0, avgSqft: 0, avgDom: 0, totalVolume: 0, avgList: 0, avgLotSize: 0,
@@ -545,6 +628,12 @@ export default function MapPage() {
             <div className="flex items-center gap-2 text-blue-300 text-sm mr-2">
               <div className="w-4 h-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
               <span className="hidden sm:inline">Loading data…</span>
+            </div>
+          )}
+          {csvError && (
+            <div className="flex items-center gap-2 text-red-400 text-xs mr-2 max-w-[240px]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span className="truncate" title={csvError}>{csvError}</span>
             </div>
           )}
           <button
@@ -1126,9 +1215,9 @@ export default function MapPage() {
                   />
                   <MapComponent
                     boundary={boundary}
-                    metricValues={metricValues}
-                    sampleCounts={sampleCounts}
-                    nameMap={nameMap}
+                    metricValues={effectiveMetricValues}
+                    sampleCounts={effectiveSampleCounts}
+                    nameMap={effectiveNameMap}
                     colorStops={colorStops}
                     multiSelect={multiSelect}
                     selectedIds={selectedIds}

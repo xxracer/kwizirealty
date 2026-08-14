@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "prebuild": "node scripts/download-boundaries.js && node scripts/download-chunked-cache.js && node scripts/build-initial-metrics.js"
   },
   "dependencies": {
     "@turf/turf": "^7.3.5",
