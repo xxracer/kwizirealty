@@ -184,6 +184,7 @@ interface MapComponentProps {
   onClear?: () => void;
   onGenerateReport?: () => void;
   reportGenerated?: boolean;
+  isReportLoading?: boolean;
 }
 
 export default function MapComponent({
@@ -203,6 +204,7 @@ export default function MapComponent({
   onClear,
   onGenerateReport,
   reportGenerated,
+  isReportLoading,
 }: MapComponentProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -217,6 +219,8 @@ export default function MapComponent({
 
   const [tool, setTool] = useState<ToolMode>('select');
   const [geoJsonData, setGeoJsonData] = useState<GeoJSON.FeatureCollection | null>(null);
+  const geoJsonDataRef = useRef(geoJsonData);
+  geoJsonDataRef.current = geoJsonData;
   const [boundaryLoading, setBoundaryLoading] = useState(false);
   const [boundarySwitching, setBoundarySwitching] = useState(true);
   const [areaLayerReady, setAreaLayerReady] = useState(false);
@@ -475,11 +479,32 @@ export default function MapComponent({
     // only one reacting to shift/mouse-drag and to avoid event conflicts.
     map.boxZoom.disable();
 
-    // Constrain map to the actual data bounds once data is loaded.
-    // Use an interval watcher to avoid React StrictMode double-effect timing issues.
+    // Constrain map to the data bounds once data is loaded. If the CSV data has
+    // not been requested yet, fall back to the GeoJSON boundary bounds so the
+    // map still frames the Houston metro immediately.
+    const computeGeoJSONBounds = (): L.LatLngBounds | null => {
+      const collection = geoJsonDataRef.current;
+      if (!collection?.features?.length) return null;
+      let minLng = Infinity;
+      let minLat = Infinity;
+      let maxLng = -Infinity;
+      let maxLat = -Infinity;
+      for (const f of collection.features) {
+        const bbox = computeFeatureBBox(f);
+        if (!bbox) continue;
+        const [fMinLng, fMinLat, fMaxLng, fMaxLat] = bbox;
+        if (fMinLng < minLng) minLng = fMinLng;
+        if (fMinLat < minLat) minLat = fMinLat;
+        if (fMaxLng > maxLng) maxLng = fMaxLng;
+        if (fMaxLat > maxLat) maxLat = fMaxLat;
+      }
+      if (!isFinite(minLng)) return null;
+      return L.latLngBounds([minLat, minLng], [maxLat, maxLng]);
+    };
+
     const applyBoundsOnce = () => {
       if (boundsSetRef.current) return;
-      const bounds = computeDataBounds(rawDataRef.current);
+      const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds();
       if (!bounds) return;
       map.invalidateSize();
       // Tight fit with almost no padding so polygons/circles fill the container.
@@ -1053,6 +1078,23 @@ export default function MapComponent({
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {isReportLoading && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-[1001] bg-black/40 flex items-center justify-center backdrop-blur-sm"
+          >
+            <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-4 shadow-2xl max-w-[260px] text-center">
+              <Loader2 className="w-10 h-10 text-emerald-500 animate-spin" />
+              <p className="text-sm text-gray-200 font-medium tracking-wide">Generating Report...</p>
+              <p className="text-xs text-gray-400">Loading property data for the selected areas.</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div data-tour="map-tools" className="absolute top-3 right-3 z-[500] flex flex-col gap-2">
         {([
           { key: 'select', label: 'Select', Icon: MousePointer2 },
@@ -1087,14 +1129,16 @@ export default function MapComponent({
           <motion.button
             initial={{ opacity: 0, scale: 0.5, x: 20 }}
             animate={{
-              opacity: 1,
+              opacity: isReportLoading ? 0.6 : 1,
               scale: 1,
               x: 0,
-              boxShadow: [
-                '0 0 0 0 rgba(37,99,235,0.7)',
-                '0 0 0 10px rgba(37,99,235,0)',
-                '0 0 0 0 rgba(37,99,235,0)',
-              ],
+              boxShadow: isReportLoading
+                ? 'none'
+                : [
+                    '0 0 0 0 rgba(37,99,235,0.7)',
+                    '0 0 0 10px rgba(37,99,235,0)',
+                    '0 0 0 0 rgba(37,99,235,0)',
+                  ],
             }}
             transition={{
               opacity: { duration: 0.3 },
@@ -1102,16 +1146,19 @@ export default function MapComponent({
               x: { type: 'spring', stiffness: 260, damping: 18 },
               boxShadow: { repeat: Infinity, duration: 1.6, ease: 'easeInOut' },
             }}
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={onGenerateReport}
+            whileHover={isReportLoading ? {} : { scale: 1.05 }}
+            whileTap={isReportLoading ? {} : { scale: 0.95 }}
+            onClick={isReportLoading ? undefined : onGenerateReport}
+            disabled={isReportLoading}
             data-tour="generate-report"
-            title="Generate Market Report"
-            className="w-auto h-9 px-3 rounded-lg border shadow bg-gradient-to-r from-blue-600 to-emerald-500 border-transparent text-white hover:from-blue-700 hover:to-emerald-600 flex items-center gap-2 font-bold text-xs whitespace-nowrap"
+            title={isReportLoading ? 'Generating report…' : 'Generate Market Report'}
+            className={`w-auto h-9 px-3 rounded-lg border shadow bg-gradient-to-r from-blue-600 to-emerald-500 border-transparent text-white flex items-center gap-2 font-bold text-xs whitespace-nowrap ${
+              isReportLoading ? 'cursor-not-allowed' : 'hover:from-blue-700 hover:to-emerald-600'
+            }`}
           >
             <BarChart3 className="w-4 h-4" />
-            <span className="hidden sm:inline">Generate Report</span>
-            <span className="sm:hidden">Report</span>
+            <span className="hidden sm:inline">{isReportLoading ? 'Generating…' : 'Generate Report'}</span>
+            <span className="sm:hidden">{isReportLoading ? '…' : 'Report'}</span>
           </motion.button>
         )}
       </div>

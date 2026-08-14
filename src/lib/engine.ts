@@ -347,6 +347,11 @@ async function asyncPool<T>(concurrency: number, items: T[], fn: (item: T) => Pr
   await Promise.all(workers);
 }
 
+interface ChunkAreaIndex {
+  version: number;
+  boundaries: Partial<Record<BoundaryKey, Record<string, number[]>>>;
+}
+
 export class RealEstateEngine {
   public data: PropertyData[] = [];
   public isLoaded = false;
@@ -366,6 +371,11 @@ export class RealEstateEngine {
   };
   private cmsOverrides: CMSMetricOverride[] = [];
   private loadingPromise: Promise<{ ok: boolean; error?: string; count: number }> | null = null;
+
+  // Inverted index built at build time: boundary -> areaKey -> chunk indices.
+  // Lets us fetch only the CSV chunks that contain selected areas when
+  // generating a report, keeping initial page load tiny and memory low.
+  private chunkAreaIndex: ChunkAreaIndex | null = null;
 
   private normalizeRows(rows: any[], quality: DataQualitySummary, zipSet: Set<string>): PropertyData[] {
     return rows
@@ -600,41 +610,55 @@ export class RealEstateEngine {
     return null;
   }
 
-  private async findChunkedCache(): Promise<{ chunks: string[]; totalRows: number; localBase?: string } | null> {
+  private async findChunkedCache(): Promise<
+    | {
+        chunks?: string[];
+        boundaries?: Partial<Record<BoundaryKey, { chunks: string[] }>>;
+        totalRows: number;
+        localBase?: string;
+      }
+    | null
+  > {
     const manifestName = 'master_cache_chunks.json';
 
     // Prefer a build-time copy in /cache so Vercel serves it same-domain and
     // users avoid the slow cross-origin Firebase Storage download.
-    try {
-      const localRes = await fetch(`/cache/${manifestName}`, { method: 'GET' });
-      if (localRes.ok) {
-        const manifest = await localRes.json();
-        if (Array.isArray(manifest.chunks) && manifest.chunks.length > 0) {
-          return { chunks: manifest.chunks, totalRows: manifest.totalRows || 0, localBase: '/cache/' };
-        }
+    const loadManifest = async (): Promise<any | null> => {
+      try {
+        const localRes = await fetch(`/cache/${manifestName}`, { method: 'GET' });
+        if (localRes.ok) return await localRes.json();
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
+
+      const manifestPath = `cms_files/csv/${manifestName}`;
+      try {
+        let url = await this.getFirebaseDownloadUrl(manifestPath);
+        if (!url) {
+          const direct = this.directStorageUrl(manifestPath);
+          const head = await this.fetchWithTimeout(direct, 10000);
+          if (head.ok) url = direct;
+        }
+        if (!url) return null;
+        const res = await this.fetchWithTimeout(url, 30000);
+        if (!res.ok) return null;
+        return await res.json();
+      } catch {
+        return null;
+      }
+    };
+
+    const manifest = await loadManifest();
+    if (!manifest) return null;
+
+    if (manifest.format === 'boundary-chunks' && manifest.boundaries) {
+      return { boundaries: manifest.boundaries, totalRows: manifest.totalRows || 0, localBase: '/cache/' };
     }
 
-    const manifestPath = `cms_files/csv/${manifestName}`;
-    try {
-      let url = await this.getFirebaseDownloadUrl(manifestPath);
-      if (!url) {
-        const direct = this.directStorageUrl(manifestPath);
-        const head = await this.fetchWithTimeout(direct, 10000);
-        if (head.ok) url = direct;
-      }
-      if (!url) return null;
-      const res = await this.fetchWithTimeout(url, 30000);
-      if (!res.ok) return null;
-      const manifest = await res.json();
-      if (Array.isArray(manifest.chunks) && manifest.chunks.length > 0) {
-        return { chunks: manifest.chunks, totalRows: manifest.totalRows || 0 };
-      }
-    } catch {
-      // ignore
+    if (Array.isArray(manifest.chunks) && manifest.chunks.length > 0) {
+      return { chunks: manifest.chunks, totalRows: manifest.totalRows || 0, localBase: '/cache/' };
     }
+
     return null;
   }
 
@@ -674,8 +698,10 @@ export class RealEstateEngine {
     const results = new Array(chunkPaths.length);
     let completed = 0;
 
-    await Promise.all(
-      chunkPaths.map(async (path, index) => {
+    await asyncPool(
+      6,
+      chunkPaths.map((path, index) => ({ path, index })),
+      async ({ path, index }) => {
         const url = await this.resolveChunkUrl(path, localBase);
         const res = await this.fetchWithTimeout(url, 120000);
         if (!res.ok) throw new Error(`Chunk fetch failed: ${res.status}`);
@@ -716,7 +742,7 @@ export class RealEstateEngine {
         // Yield so React can paint the map (overlay hidden, polygons rendered)
         // while the remaining chunks are still being parsed.
         await this.yieldToMain();
-      })
+      }
     );
 
     return results.flat();
@@ -783,6 +809,128 @@ export class RealEstateEngine {
     return { rows: await this.parseCsvText(await res.text()) };
   }
 
+  /**
+   * Load the area -> chunk index generated at build time. Used by
+   * loadDataForSelection() to avoid fetching the entire dataset.
+   */
+  public async loadChunkAreaIndex(): Promise<void> {
+    if (this.chunkAreaIndex) return;
+    try {
+      const index = await this.fetchGzJson<ChunkAreaIndex>('/cache/chunk_area_index.json.gz');
+      this.chunkAreaIndex = index;
+      console.log('[Kwizi Engine] Loaded chunk area index', {
+        version: index.version,
+        boundaries: Object.keys(index.boundaries),
+      });
+    } catch (err) {
+      console.warn('[Kwizi Engine] Could not load chunk area index, will fall back to full chunks:', err);
+      this.chunkAreaIndex = { version: 0, boundaries: {} };
+    }
+  }
+
+  /**
+   * Return the chunk indices that contain any of the selected area keys for the
+   * current boundary. Falls back to all chunks if the index is missing.
+   */
+  private resolveChunkIndicesForSelection(
+    boundary: BoundaryKey,
+    selectedIds: string[],
+    totalChunks: number
+  ): number[] {
+    const boundaryIndex = this.chunkAreaIndex?.boundaries[boundary];
+    if (!boundaryIndex || selectedIds.length === 0) {
+      return Array.from({ length: totalChunks }, (_, i) => i);
+    }
+    const set = new Set<number>();
+    for (const id of selectedIds) {
+      const indices = boundaryIndex[id];
+      if (indices) {
+        for (const idx of indices) set.add(idx);
+      }
+    }
+    const result = Array.from(set);
+    result.sort((a, b) => a - b);
+    return result.length ? result : Array.from({ length: totalChunks }, (_, i) => i);
+  }
+
+  /**
+   * Load only the CSV chunks that contain properties for the selected areas,
+   * then keep just those properties in memory. This keeps initial page load
+   * tiny and avoids holding 700k+ rows in memory unless the user asks for a
+   * broad report.
+   */
+  public async loadDataForSelection(
+    boundary: BoundaryKey,
+    selectedIds: string[],
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<{ ok: boolean; error?: string; count: number }> {
+    if (selectedIds.length === 0) {
+      return { ok: false, error: 'No areas selected', count: 0 };
+    }
+
+    await this.loadChunkAreaIndex();
+    const chunkedCache = await this.findChunkedCache();
+    if (!chunkedCache) {
+      // No chunked cache available; fall back to the full dataset.
+      return this.loadAllCSV(false, onProgress);
+    }
+
+    let chunkPaths: string[];
+    if (chunkedCache.boundaries) {
+      const boundaryInfo = chunkedCache.boundaries[boundary];
+      if (!boundaryInfo || !Array.isArray(boundaryInfo.chunks) || boundaryInfo.chunks.length === 0) {
+        return { ok: false, error: `No chunked data for boundary ${boundary}`, count: 0 };
+      }
+      chunkPaths = boundaryInfo.chunks;
+    } else {
+      chunkPaths = chunkedCache.chunks || [];
+      if (chunkPaths.length === 0) {
+        return { ok: false, error: 'No chunked cache available', count: 0 };
+      }
+    }
+
+    const totalChunks = chunkPaths.length;
+    const indices = this.resolveChunkIndicesForSelection(boundary, selectedIds, totalChunks);
+    const selectedPaths = indices.map((i) => chunkPaths[i]);
+
+    console.log(
+      `[Kwizi Engine] Loading ${selectedPaths.length}/${totalChunks} chunks for ${selectedIds.length} selected ${boundary} areas`
+    );
+    onProgress?.(0, selectedPaths.length);
+
+    try {
+      const rows = await this.loadChunkedCache(selectedPaths, chunkedCache.localBase, onProgress);
+      const selectedSet = new Set(selectedIds);
+      const filtered = rows.filter((d) => selectedSet.has(this.getBoundaryKey(boundary, d)));
+
+      this.data = filtered;
+      this.isLoaded = true;
+
+      // Run post-load steps (overrides, school ratings) in the background.
+      // We intentionally do NOT cache selection data so it never overwrites the
+      // full-dataset IndexedDB cache with a partial subset.
+      this.applyPostLoadSteps(
+        {
+          totalRowsRead: filtered.length,
+          keptRows: filtered.length,
+          missingZip: 0,
+          missingCoordinates: 0,
+          missingPrice: 0,
+          uniqueZips: new Set(filtered.map((d) => d.zip)).size,
+        },
+        new Set(filtered.map((d) => d.zip)),
+        ''
+      ).catch((err) => console.error('[Kwizi] Post-load steps failed for selection:', err));
+
+      console.log(`[Kwizi Engine] Loaded ${filtered.length} properties for selection`);
+      return { ok: filtered.length > 0, count: filtered.length };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[Kwizi Engine] Failed to load selection data:', err);
+      return { ok: false, error: message, count: 0 };
+    }
+  }
+
   public async loadAllCSV(
     forceRefresh = false,
     onProgress?: (loaded: number, total: number) => void
@@ -839,15 +987,29 @@ export class RealEstateEngine {
 
       // 3. Load from the chunked JSON cache (fastest path: skip CSV parse/normalize).
       if (chunkedCache) {
-        console.log(`[Kwizi Engine] Loading ${chunkedCache.chunks.length} pre-normalized JSON chunks`);
-        onProgress?.(0, chunkedCache.chunks.length);
-        try {
-          allItems = await this.loadChunkedCache(chunkedCache.chunks, chunkedCache.localBase, onProgress);
-          console.log(`[Kwizi Engine] Restored ${allItems.length} properties from chunked JSON cache`);
-        } catch (err) {
-          loadError = err instanceof Error ? err.message : String(err);
-          console.error('[Kwizi] Failed to load chunked JSON cache, will fall back:', err);
-          allItems = [];
+        let fullLoadPaths: string[] = [];
+        if (chunkedCache.boundaries) {
+          // The per-boundary format partitions rows by area. Loading all chunks for
+          // the default boundary gives us the full dataset exactly once.
+          const defaultInfo = chunkedCache.boundaries['subdivisions'];
+          if (defaultInfo) fullLoadPaths = defaultInfo.chunks;
+        } else {
+          fullLoadPaths = chunkedCache.chunks || [];
+        }
+
+        if (fullLoadPaths.length === 0) {
+          loadError = 'Chunked cache manifest has no chunks to load.';
+        } else {
+          console.log(`[Kwizi Engine] Loading ${fullLoadPaths.length} pre-normalized JSON chunks`);
+          onProgress?.(0, fullLoadPaths.length);
+          try {
+            allItems = await this.loadChunkedCache(fullLoadPaths, chunkedCache.localBase, onProgress);
+            console.log(`[Kwizi Engine] Restored ${allItems.length} properties from chunked JSON cache`);
+          } catch (err) {
+            loadError = err instanceof Error ? err.message : String(err);
+            console.error('[Kwizi] Failed to load chunked JSON cache, will fall back:', err);
+            allItems = [];
+          }
         }
       }
 
@@ -977,7 +1139,9 @@ export class RealEstateEngine {
     // Mark ready immediately so the UI can render. Cache write and school ratings run in the background.
     this.isLoaded = true;
     this.loadSchoolRatings().catch(() => {});
-    this.saveCache(cacheVersion).catch(() => {});
+    if (cacheVersion) {
+      this.saveCache(cacheVersion).catch(() => {});
+    }
   }
 
   private async loadSchoolRatings() {

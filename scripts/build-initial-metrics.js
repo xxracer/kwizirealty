@@ -52,40 +52,68 @@ function main() {
 
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
   const groups = Object.fromEntries(BOUNDARIES.map((b) => [b, {}]));
+  // area -> Set(chunkIndex) for each boundary, so we can load only the chunks
+  // that contain a selected area when generating a report.
+  const chunkIndex = Object.fromEntries(BOUNDARIES.map((b) => [b, new Map()]));
   let totalRows = 0;
 
-  for (const chunkPath of manifest.chunks) {
-    const fileName = chunkPath.split('/').pop();
-    const chunkFile = path.join(CACHE_DIR, fileName);
-    if (!fs.existsSync(chunkFile)) {
-      throw new Error(`Missing chunk file: ${chunkFile}`);
+  // Support both the legacy flat chunk list and the new per-boundary format.
+  const boundaryChunks = [];
+  if (manifest.format === 'boundary-chunks' && manifest.boundaries) {
+    for (const b of BOUNDARIES) {
+      const chunks = (manifest.boundaries[b] && manifest.boundaries[b].chunks) || [];
+      boundaryChunks.push({ boundary: b, chunks });
     }
-    const raw = zlib.gunzipSync(fs.readFileSync(chunkFile));
-    const parsed = JSON.parse(raw.toString('utf8'));
-    let rows;
-    if (Array.isArray(parsed)) {
-      rows = parsed;
-    } else {
-      const header = parsed.header;
-      rows = parsed.rows.map((arr) => {
-        const obj = {};
-        header.forEach((key, i) => (obj[key] = arr[i]));
-        return obj;
-      });
-    }
-    totalRows += rows.length;
-    for (const row of rows) {
-      for (const b of BOUNDARIES) {
-        const key = b === 'elementary' || b === 'middle' ? cleanSchoolName(row[b]) : cleanBoundaryName(row[b]);
-        if (!key) continue;
-        const bucket = groups[b];
-        if (!bucket[key]) bucket[key] = [];
-        const price = Number(row.closePrice);
-        if (price > 0) bucket[key].push(price);
+  } else if (Array.isArray(manifest.chunks)) {
+    boundaryChunks.push({ boundary: null, chunks: manifest.chunks });
+  } else {
+    throw new Error('Invalid manifest: no chunks or boundaries found');
+  }
+
+  for (const { boundary: currentBoundary, chunks } of boundaryChunks) {
+    for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+      const chunkPath = chunks[chunkIdx];
+      const fileName = chunkPath.split('/').pop();
+      const chunkFile = path.join(CACHE_DIR, fileName);
+      if (!fs.existsSync(chunkFile)) {
+        throw new Error(`Missing chunk file: ${chunkFile}`);
+      }
+      const raw = zlib.gunzipSync(fs.readFileSync(chunkFile));
+      const parsed = JSON.parse(raw.toString('utf8'));
+      let rows;
+      if (Array.isArray(parsed)) {
+        rows = parsed;
+      } else {
+        const header = parsed.header;
+        rows = parsed.rows.map((arr) => {
+          const obj = {};
+          header.forEach((key, i) => (obj[key] = arr[i]));
+          return obj;
+        });
+      }
+      totalRows += rows.length;
+      for (const row of rows) {
+        for (const b of BOUNDARIES) {
+          const key = b === 'elementary' || b === 'middle' ? cleanSchoolName(row[b]) : cleanBoundaryName(row[b]);
+          if (!key) continue;
+          const bucket = groups[b];
+          if (!bucket[key]) bucket[key] = [];
+          const price = Number(row.closePrice);
+          if (price > 0) bucket[key].push(price);
+
+          // With per-boundary chunks, the chunk index only makes sense for the
+          // boundary that owns this chunk list. Legacy flat chunks are global, so
+          // we record the index for every boundary.
+          if (currentBoundary && b !== currentBoundary) continue;
+          const idxMap = chunkIndex[b];
+          if (!idxMap.has(key)) idxMap.set(key, new Set());
+          idxMap.get(key).add(chunkIdx);
+        }
       }
     }
   }
 
+  // Write per-boundary initial metric snapshots.
   for (const b of BOUNDARIES) {
     const values = {};
     const counts = {};
@@ -107,6 +135,29 @@ function main() {
       `[build-initial-metrics] ${b}: ${Object.keys(values).length.toLocaleString()} areas, plain ${(plainSize / 1024 / 1024).toFixed(2)} MB, gzip ${(gzSize / 1024 / 1024).toFixed(2)} MB`
     );
   }
+
+  // Write area -> chunk index so the engine can load only relevant chunks
+  // when generating a report for selected areas.
+  const indexOut = { version: manifest.version || 0, boundaries: {} };
+  for (const b of BOUNDARIES) {
+    const obj = {};
+    for (const [key, set] of chunkIndex[b]) {
+      const arr = Array.from(set);
+      arr.sort((a, b) => a - b);
+      obj[key] = arr;
+    }
+    indexOut.boundaries[b] = obj;
+  }
+  const indexPath = path.join(CACHE_DIR, 'chunk_area_index.json');
+  const indexGzPath = `${indexPath}.gz`;
+  fs.writeFileSync(indexPath, JSON.stringify(indexOut));
+  fs.writeFileSync(indexGzPath, zlib.gzipSync(JSON.stringify(indexOut), { level: 9 }));
+  const indexPlainSize = fs.statSync(indexPath).size;
+  const indexGzSize = fs.statSync(indexGzPath).size;
+  console.log(
+    `[build-initial-metrics] chunk index: ${Object.keys(indexOut.boundaries).length} boundaries, plain ${(indexPlainSize / 1024 / 1024).toFixed(2)} MB, gzip ${(indexGzSize / 1024 / 1024).toFixed(2)} MB`
+  );
+
   console.log(
     `[build-initial-metrics] built snapshots from ${totalRows.toLocaleString()} rows`
   );

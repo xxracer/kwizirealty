@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const zlib = require('zlib');
 const Papa = require('papaparse');
 const { initializeApp } = require('firebase/app');
@@ -12,8 +11,16 @@ const storage = getStorage(app);
 
 const CSV_MASTER_PATH = 'cms_files/csv/master_cache.csv.gz';
 const MANIFEST_PATH = 'cms_files/csv/master_cache_chunks.json';
-const CHUNK_PREFIX = 'cms_files/csv/master_cache_chunk_';
-const ROWS_PER_CHUNK = 200_000;
+const INDEX_PATH = 'cms_files/csv/chunk_area_index.json.gz';
+const TARGET_ROWS_PER_CHUNK = 15_000;
+
+const BOUNDARIES = [
+  { key: 'subdivisions', keyFn: (r) => r.subdivisions },
+  { key: 'zipcodes', keyFn: (r) => r.zipcodes },
+  { key: 'highschools', keyFn: (r) => r.highschools },
+  { key: 'elementary', keyFn: (r) => r.elementary },
+  { key: 'middle', keyFn: (r) => r.middle },
+];
 
 function log(...args) {
   console.log('[build-chunked-json-cache]', ...args);
@@ -161,36 +168,45 @@ function normalizeRow(row) {
   };
 }
 
+function writeChunk(tmpDir, boundaryKey, index, rows) {
+  const header = Object.keys(rows[0]);
+  const compact = { header, rows: rows.map((r) => header.map((k) => r[k])) };
+  const json = JSON.stringify(compact);
+  const gz = zlib.gzipSync(Buffer.from(json, 'utf8'), { level: 6 });
+  const fileName = `boundary_${boundaryKey}_${index}.json.gz`;
+  fs.writeFileSync(path.join(tmpDir, fileName), gz);
+  return fileName;
+}
+
 async function buildChunkedJsonCache() {
   log('Downloading CSV master...');
   const csvUrl = await getDownloadURL(ref(storage, CSV_MASTER_PATH));
   const res = await fetch(csvUrl);
   if (!res.ok) throw new Error(`Failed to fetch CSV master: ${res.status}`);
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kwizi-chunked-json-'));
+  const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'kwizi-boundary-chunks-'));
   const csvBuffer = Buffer.from(await res.arrayBuffer());
   const csvText = zlib.gunzipSync(csvBuffer).toString('utf8');
   log(`Decompressed CSV: ${csvText.length} bytes`);
 
-  // Clean up old chunks first.
+  // Clean up old chunk files first so we don't leave stale boundary_* files behind.
   try {
     const listRef = ref(storage, 'cms_files/csv');
     const listRes = await listAll(listRef);
+    const prefixesToDelete = ['master_cache_chunk_', 'boundary_', 'chunk_area_index'];
     for (const item of listRes.items) {
-      if (item.name.startsWith('master_cache_chunk_')) {
+      if (prefixesToDelete.some((p) => item.name.startsWith(p))) {
         await deleteObject(item);
-        log('Deleted old chunk:', item.name);
+        log('Deleted old file:', item.name);
       }
     }
   } catch (e) {
     log('Could not list/delete old chunks:', e.message);
   }
 
-  const chunkPaths = [];
-  let currentChunk = [];
+  const allRows = [];
   let totalRows = 0;
   let keptRows = 0;
-  let chunkIndex = 0;
   let header = null;
 
   await new Promise((resolve, reject) => {
@@ -207,17 +223,8 @@ async function buildChunkedJsonCache() {
         const item = normalizeRow(cleanedRow);
         totalRows++;
         if (item) {
-          currentChunk.push(item);
+          allRows.push(item);
           keptRows++;
-        }
-
-        if (currentChunk.length >= ROWS_PER_CHUNK) {
-          const chunkPath = `${CHUNK_PREFIX}${chunkIndex}.json.gz`;
-          chunkPaths.push(chunkPath);
-          writeChunk(tmpDir, chunkIndex, currentChunk);
-          log(`Wrote chunk ${chunkIndex}: ${currentChunk.length.toLocaleString()} rows → ${chunkPath}`);
-          currentChunk = [];
-          chunkIndex++;
         }
       },
       complete: () => resolve(),
@@ -225,47 +232,128 @@ async function buildChunkedJsonCache() {
     });
   });
 
-  if (currentChunk.length > 0) {
-    const chunkPath = `${CHUNK_PREFIX}${chunkIndex}.json.gz`;
-    chunkPaths.push(chunkPath);
-    writeChunk(tmpDir, chunkIndex, currentChunk);
-    log(`Wrote chunk ${chunkIndex}: ${currentChunk.length.toLocaleString()} rows → ${chunkPath}`);
+  log(`Parsed ${totalRows.toLocaleString()} rows, kept ${keptRows.toLocaleString()}`);
+
+  // Group rows by boundary area key.
+  const boundaryGroups = Object.fromEntries(BOUNDARIES.map((b) => [b.key, new Map()]));
+  for (const row of allRows) {
+    for (const b of BOUNDARIES) {
+      const key = b.keyFn(row);
+      if (!key) continue;
+      let arr = boundaryGroups[b.key].get(key);
+      if (!arr) {
+        arr = [];
+        boundaryGroups[b.key].set(key, arr);
+      }
+      arr.push(row);
+    }
   }
 
-  log(`Total rows: ${totalRows.toLocaleString()}, kept: ${keptRows.toLocaleString()}, chunks: ${chunkPaths.length}`);
+  const manifestBoundaries = {};
+  const areaIndex = { version: Date.now(), boundaries: {} };
+  const allChunkFileNames = [];
+
+  for (const b of BOUNDARIES) {
+    const groupsMap = boundaryGroups[b.key];
+    // Sort keys for deterministic output.
+    const groups = Array.from(groupsMap.entries()).sort((a, c) => a[0].localeCompare(c[0]));
+    const chunks = [];
+    const boundaryIndex = {};
+    let currentRows = [];
+
+    const flush = () => {
+      if (currentRows.length === 0) return;
+      const chunkIdx = chunks.length;
+      const fileName = writeChunk(tmpDir, b.key, chunkIdx, currentRows);
+      chunks.push(`cms_files/csv/${fileName}`);
+      allChunkFileNames.push(fileName);
+      log(`Wrote ${b.key} chunk ${chunkIdx}: ${currentRows.length.toLocaleString()} rows → ${fileName}`);
+      currentRows = [];
+    };
+
+    for (const [areaKey, rows] of groups) {
+      if (rows.length > TARGET_ROWS_PER_CHUNK) {
+        if (currentRows.length) flush();
+        for (let i = 0; i < rows.length; i += TARGET_ROWS_PER_CHUNK) {
+          const slice = rows.slice(i, i + TARGET_ROWS_PER_CHUNK);
+          const chunkIdx = chunks.length;
+          const fileName = writeChunk(tmpDir, b.key, chunkIdx, slice);
+          chunks.push(`cms_files/csv/${fileName}`);
+          allChunkFileNames.push(fileName);
+          log(`Wrote ${b.key} chunk ${chunkIdx}: ${slice.length.toLocaleString()} rows → ${fileName} (slice for ${areaKey})`);
+          boundaryIndex[areaKey] = boundaryIndex[areaKey] || [];
+          boundaryIndex[areaKey].push(chunkIdx);
+        }
+      } else {
+        if (currentRows.length && currentRows.length + rows.length > TARGET_ROWS_PER_CHUNK) {
+          flush();
+        }
+        const chunkIdx = chunks.length;
+        currentRows.push(...rows);
+        boundaryIndex[areaKey] = boundaryIndex[areaKey] || [];
+        boundaryIndex[areaKey].push(chunkIdx);
+      }
+    }
+    flush();
+
+    manifestBoundaries[b.key] = { chunks };
+    areaIndex.boundaries[b.key] = boundaryIndex;
+    log(`${b.key}: ${groups.length.toLocaleString()} areas → ${chunks.length} chunks`);
+  }
+
+  const manifest = {
+    version: areaIndex.version,
+    totalRows: keptRows,
+    format: 'boundary-chunks',
+    defaultBoundary: 'subdivisions',
+    boundaries: manifestBoundaries,
+  };
+
+  // Write manifest, index, and chunk files locally in public/cache as well.
+  const cacheDir = path.join(__dirname, '..', 'public', 'cache');
+  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+  const localManifestPath = path.join(cacheDir, 'master_cache_chunks.json');
+  fs.writeFileSync(localManifestPath, JSON.stringify(manifest));
+  log('Wrote local manifest:', localManifestPath);
+
+  const indexJson = JSON.stringify(areaIndex);
+  const localIndexPath = path.join(cacheDir, 'chunk_area_index.json');
+  const localIndexGzPath = `${localIndexPath}.gz`;
+  fs.writeFileSync(localIndexPath, indexJson);
+  fs.writeFileSync(localIndexGzPath, zlib.gzipSync(Buffer.from(indexJson, 'utf8'), { level: 9 }));
+  log('Wrote local area index:', localIndexGzPath);
+
+  for (const fileName of allChunkFileNames) {
+    const src = path.join(tmpDir, fileName);
+    const dest = path.join(cacheDir, fileName);
+    fs.copyFileSync(src, dest);
+  }
+  log(`Copied ${allChunkFileNames.length} chunk files to ${cacheDir}`);
 
   // Upload chunks.
-  for (let i = 0; i < chunkPaths.length; i++) {
-    const localPath = path.join(tmpDir, `chunk_${i}.json.gz`);
+  for (const fileName of allChunkFileNames) {
+    const localPath = path.join(tmpDir, fileName);
     const buffer = fs.readFileSync(localPath);
-    const chunkRef = ref(storage, chunkPaths[i]);
+    const chunkRef = ref(storage, `cms_files/csv/${fileName}`);
     await uploadBytes(chunkRef, buffer, { contentType: 'application/json' });
-    log(`Uploaded ${chunkPaths[i]} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+    log(`Uploaded ${fileName} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
   }
 
   // Upload manifest.
-  const manifest = {
-    version: Date.now(),
-    totalRows: keptRows,
-    chunks: chunkPaths,
-  };
   const manifestBuffer = Buffer.from(JSON.stringify(manifest), 'utf8');
   const manifestRef = ref(storage, MANIFEST_PATH);
   await uploadBytes(manifestRef, manifestBuffer, { contentType: 'application/json' });
   log(`Uploaded manifest: ${MANIFEST_PATH}`);
 
+  // Upload area index.
+  const indexBuffer = fs.readFileSync(localIndexGzPath);
+  const indexRef = ref(storage, INDEX_PATH);
+  await uploadBytes(indexRef, indexBuffer, { contentType: 'application/json' });
+  log(`Uploaded area index: ${INDEX_PATH}`);
+
   fs.rmSync(tmpDir, { recursive: true, force: true });
   log('Done.');
-}
-
-function writeChunk(tmpDir, index, rows) {
-  // Store as [header, ...rows] arrays instead of full objects to cut ~50% of
-  // the JSON size and reduce browser parse time.
-  const header = Object.keys(rows[0]);
-  const compact = { header, rows: rows.map((r) => header.map((k) => r[k])) };
-  const json = JSON.stringify(compact);
-  const gz = zlib.gzipSync(Buffer.from(json, 'utf8'), { level: 6 });
-  fs.writeFileSync(path.join(tmpDir, `chunk_${index}.json.gz`), gz);
 }
 
 buildChunkedJsonCache().catch((err) => {

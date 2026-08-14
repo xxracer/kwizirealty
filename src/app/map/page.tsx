@@ -169,13 +169,18 @@ function useMediaQuery(query: string): boolean {
 export default function MapPage() {
   const [boundary, setBoundary] = useState<BoundaryKey>('subdivisions');
   const [metric, setMetric] = useState<MetricKey>('Close Price');
-  const [loadingCSV, setLoadingCSV] = useState(true);
-  const [csvProgress, setCsvProgress] = useState<{ loaded: number; total: number } | null>(null);
-  const [csvError, setCsvError] = useState<string | null>(null);
+  // Property data is no longer loaded on page load. We keep only the tiny
+  // boundary snapshots and GeoJSON in memory for instant map rendering. The full
+  // CSV rows are fetched on demand when the user clicks Generate Report for the
+  // selected areas, so memory stays low and the page loads fast.
+  const [reportPhase, setReportPhase] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [reportProgress, setReportProgress] = useState<{ loaded: number; total: number } | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [reportGeneration, setReportGeneration] = useState(0);
+
   const [initialMetrics, setInitialMetrics] = useState<
     Partial<Record<BoundaryKey, { values: Record<string, number>; counts: Record<string, number> }>> | null
   >(null);
-  const csvStartedRef = useRef(false);
 
   const [filters, setFilters] = useState<PropertyFilters>(DEFAULT_FILTERS);
 
@@ -204,41 +209,6 @@ export default function MapPage() {
 
   const isMobile = useMediaQuery('(max-width: 1024px)');
 
-  const startCsvLoad = useCallback(() => {
-    if (csvStartedRef.current) return;
-    csvStartedRef.current = true;
-    engine
-      .loadAllCSV(false, (loaded, total) => setCsvProgress({ loaded, total }))
-      .then((result) => {
-        setLoadingCSV(false);
-        if (!result.ok) {
-          setCsvError(result.error || 'No se pudieron cargar los datos del mapa.');
-        }
-      })
-      .catch((err) => {
-        setLoadingCSV(false);
-        setCsvError(err?.message || 'Error inesperado cargando datos del mapa.');
-      });
-  }, []);
-
-  // Start the heavy CSV load as soon as the active boundary snapshot is ready,
-  // but always fall back to starting it after 2 seconds so a missing snapshot
-  // never blocks the map.
-  const activeMetricsReady = useMemo(
-    () => !!initialMetrics && !!initialMetrics[boundary],
-    [initialMetrics, boundary]
-  );
-
-  useEffect(() => {
-    if (activeMetricsReady) startCsvLoad();
-  }, [activeMetricsReady, startCsvLoad]);
-
-  useEffect(() => {
-    const fallback = setTimeout(() => {
-      if (!csvStartedRef.current) startCsvLoad();
-    }, 2000);
-    return () => clearTimeout(fallback);
-  }, [startCsvLoad]);
 
   const loadMetricsForBoundary = useCallback(
     async (key: BoundaryKey) => {
@@ -261,13 +231,13 @@ export default function MapPage() {
     // Preload the remaining boundary snapshots in the background once the active
     // one is available. They are tiny compared to the CSV and make switching
     // boundaries feel instant.
-    if (!activeMetricsReady) return;
+    if (!initialMetrics?.[boundary]) return;
     for (const b of BOUNDARIES) {
       if (b.key !== boundary && !initialMetrics?.[b.key]) {
         loadMetricsForBoundary(b.key);
       }
     }
-  }, [activeMetricsReady, boundary, initialMetrics, loadMetricsForBoundary]);
+  }, [boundary, initialMetrics, loadMetricsForBoundary]);
 
   useEffect(() => {
     const seen = typeof window !== 'undefined' ? window.localStorage.getItem('kwizi-tour-seen') : 'true';
@@ -289,8 +259,21 @@ export default function MapPage() {
   }, [isMobile]);
 
   useEffect(() => {
-    if (selectedIds.length === 0) setReportGenerated(false);
+    if (selectedIds.length === 0) {
+      setReportGenerated(false);
+      setReportPhase('idle');
+      setReportProgress(null);
+    }
   }, [selectedIds]);
+
+  useEffect(() => {
+    // Changing boundary invalidates the current selection and report data.
+    setSelectedIds([]);
+    setReportGenerated(false);
+    setReportPhase('idle');
+    setReportProgress(null);
+    setReportError(null);
+  }, [boundary]);
 
   useEffect(() => {
     if (reportGenerated && reportRef.current) {
@@ -299,15 +282,15 @@ export default function MapPage() {
   }, [reportGenerated]);
 
   const filteredData = useMemo(() => {
-    if (loadingCSV) return [];
+    if (reportPhase !== 'ready') return [];
     return engine.filterProperties(filters);
-  }, [loadingCSV, filters]);
+  }, [reportPhase, filters, reportGeneration]);
 
   const { values: metricValues, counts: sampleCounts, names: nameMap } = useMemo(() => {
     return engine.getMapValues(filteredData, boundary, metric);
-  }, [filteredData, boundary, metric]);
+  }, [filteredData, boundary, metric, reportGeneration]);
 
-  const dataReady = !loadingCSV && filteredData.length > 0;
+  const dataReady = reportPhase === 'ready' && filteredData.length > 0;
 
   // Use the lightweight pre-computed snapshot for instant map coloring while
   // the full CSV dataset is still loading in the background.
@@ -443,12 +426,12 @@ export default function MapPage() {
     setSelectedIds(unique);
   }, [searchQuery, filteredData, boundary]);
 
-  const uniquePropertyTypes = useMemo(() => engine.getUniqueValues('propertyType'), [loadingCSV]);
-  const uniqueCities = useMemo(() => engine.getUniqueValues('city').slice(0, 120), [loadingCSV]);
-  const uniqueDistricts = useMemo(() => engine.getUniqueValues('schoolDistrict').slice(0, 80), [loadingCSV]);
-  const uniqueElementary = useMemo(() => engine.getUniqueValues('elementary').slice(0, 80), [loadingCSV]);
-  const uniqueMiddle = useMemo(() => engine.getUniqueValues('middle').slice(0, 80), [loadingCSV]);
-  const uniqueHigh = useMemo(() => engine.getUniqueValues('highschools').slice(0, 80), [loadingCSV]);
+  const uniquePropertyTypes = useMemo(() => engine.getUniqueValues('propertyType'), [reportGeneration]);
+  const uniqueCities = useMemo(() => engine.getUniqueValues('city').slice(0, 120), [reportGeneration]);
+  const uniqueDistricts = useMemo(() => engine.getUniqueValues('schoolDistrict').slice(0, 80), [reportGeneration]);
+  const uniqueElementary = useMemo(() => engine.getUniqueValues('elementary').slice(0, 80), [reportGeneration]);
+  const uniqueMiddle = useMemo(() => engine.getUniqueValues('middle').slice(0, 80), [reportGeneration]);
+  const uniqueHigh = useMemo(() => engine.getUniqueValues('highschools').slice(0, 80), [reportGeneration]);
 
   const selectedNames = useMemo(() => {
     return selectedIds.map((id) => nameMap[id] || id);
@@ -470,19 +453,49 @@ export default function MapPage() {
     setFilters(DEFAULT_FILTERS);
     setSearchQuery('');
     setReportGenerated(false);
+    setReportPhase('idle');
+    setReportError(null);
+    setReportProgress(null);
     setActiveWindows([]);
   }, [setActiveWindows]);
 
   const generateReport = useCallback(() => {
+    if (reportPhase === 'loading') return;
+    if (selectedIds.length === 0) {
+      setReportError('Select one or more areas on the map to generate a report.');
+      setTimeout(() => setReportError(null), 4000);
+      return;
+    }
     setReportGenerated(true);
+    setReportPhase('loading');
+    setReportError(null);
+    setReportProgress(null);
+    engine
+      .loadDataForSelection(boundary, selectedIds, (loaded, total) => setReportProgress({ loaded, total }))
+      .then((result) => {
+        if (result.ok) {
+          setReportPhase('ready');
+          setReportGeneration((g) => g + 1);
+        } else {
+          setReportPhase('error');
+          setReportError(result.error || 'Could not load report data.');
+        }
+      })
+      .catch((err) => {
+        setReportPhase('error');
+        setReportError(err?.message || 'Unexpected error loading report data.');
+      });
     // When no boxes are pinned, default to Quick Stats + Market Health
     if (activeWindows.length === 0) {
       setActiveWindows(['quick-stats', 'market-health']);
     }
-  }, [activeWindows.length, setActiveWindows]);
+  }, [activeWindows.length, boundary, selectedIds, setActiveWindows]);
 
   const clearReport = useCallback(() => {
     setReportGenerated(false);
+    setReportPhase('idle');
+    setReportError(null);
+    setReportProgress(null);
     setActiveWindows([]);
   }, [setActiveWindows]);
 
@@ -610,30 +623,30 @@ export default function MapPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {loadingCSV && csvProgress && (
+          {reportPhase === 'loading' && reportProgress && (
             <div className="flex flex-col gap-1 mr-2 min-w-[140px]">
               <div className="flex items-center justify-between text-[10px] text-blue-300">
-                <span>Loading CSV {csvProgress.loaded}/{csvProgress.total}</span>
-                <span>{Math.round((csvProgress.loaded / csvProgress.total) * 100)}%</span>
+                <span>Loading report data {reportProgress.loaded}/{reportProgress.total}</span>
+                <span>{Math.round((reportProgress.loaded / reportProgress.total) * 100)}%</span>
               </div>
               <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-blue-500 transition-all duration-300"
-                  style={{ width: `${(csvProgress.loaded / csvProgress.total) * 100}%` }}
+                  style={{ width: `${(reportProgress.loaded / reportProgress.total) * 100}%` }}
                 />
               </div>
             </div>
           )}
-          {loadingCSV && !csvProgress && (
+          {reportPhase === 'loading' && !reportProgress && (
             <div className="flex items-center gap-2 text-blue-300 text-sm mr-2">
               <div className="w-4 h-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
-              <span className="hidden sm:inline">Loading data…</span>
+              <span className="hidden sm:inline">Loading report data…</span>
             </div>
           )}
-          {csvError && (
+          {reportError && (
             <div className="flex items-center gap-2 text-red-400 text-xs mr-2 max-w-[240px]">
               <AlertTriangle className="w-4 h-4 shrink-0" />
-              <span className="truncate" title={csvError}>{csvError}</span>
+              <span className="truncate" title={reportError}>{reportError}</span>
             </div>
           )}
           <button
@@ -712,12 +725,12 @@ export default function MapPage() {
         </div>
         <div className="flex-1" />
         <div className="flex items-center gap-3 text-gray-400">
-          {loadingCSV ? (
+          {reportPhase === 'loading' ? (
             <span className="flex items-center gap-2 text-blue-300 text-xs">
               <span className="w-3.5 h-3.5 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
-              {csvProgress && csvProgress.total > 0
-                ? `Loading CSV ${csvProgress.loaded}/${csvProgress.total}…`
-                : 'Loading market data…'}
+              {reportProgress && reportProgress.total > 0
+                ? `Loading report data ${reportProgress.loaded}/${reportProgress.total}…`
+                : 'Loading report data…'}
             </span>
           ) : (
             <>
@@ -1173,10 +1186,10 @@ export default function MapPage() {
                     <TrendingUp className="w-4 h-4" />
                     <span className="text-xs font-bold uppercase tracking-wider">Interactive Map</span>
                     <span className="text-xs text-gray-500 hidden sm:inline">
-                      {loadingCSV ? (
-                        csvProgress && csvProgress.total > 0
-                          ? `Loading CSV ${csvProgress.loaded}/${csvProgress.total}…`
-                          : 'Loading market data…'
+                      {reportPhase === 'loading' ? (
+                        reportProgress && reportProgress.total > 0
+                          ? `Loading report data ${reportProgress.loaded}/${reportProgress.total}…`
+                          : 'Loading report data…'
                       ) : (
                         `${filteredData.length.toLocaleString()} properties · ${Object.keys(metricValues).length} areas`
                       )}
@@ -1231,6 +1244,7 @@ export default function MapPage() {
                     onClear={() => setSelectedIds([])}
                     onGenerateReport={generateReport}
                     reportGenerated={reportGenerated}
+                    isReportLoading={reportPhase === 'loading'}
                   />
                 </div>
               </div>
