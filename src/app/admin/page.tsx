@@ -181,11 +181,12 @@ const SECTION_CONFIG: Record<Exclude<AdminSection, 'dashboard' | 'areas'>, Secti
 interface StagedFile {
   id: string;
   file: File;
+  section: Exclude<AdminSection, 'dashboard' | 'areas'>;
   record: CMSFileRecord;
   stats: {
     total: number;
     new: number;
-    existing: number;
+    duplicate: number;
   };
 }
 
@@ -246,10 +247,69 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+function rowsToCsv(headers: string[], rows: Record<string, string>[]): string {
+  const escapeCell = (v: unknown) => {
+    const s = String(v ?? '').replace(/"/g, '""');
+    return `"${s}"`;
+  };
+  return [headers.join(','), ...rows.map((r) => headers.map((h) => escapeCell(r[h])).join(','))].join('\n');
+}
+
 function validateHeaders(headers: string[] | undefined, required: string[]): { valid: boolean; missing: string[] } {
   const normalized = (headers || []).map((h) => h.trim().toLowerCase());
   const missing = required.filter((h) => !normalized.includes(h.toLowerCase()));
   return { valid: missing.length === 0, missing };
+}
+
+function getDedupeColumns(section: Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>): string[] {
+  switch (section) {
+    case 'sales':
+    case 'rent':
+    case 'current':
+      return ['MLS Number', 'Address', 'Zip'];
+    case 'tax':
+      return ['MLS #', 'Parcel ID', 'Address'];
+    case 'schools':
+      return ['school_name_clean', 'Overall Score'];
+    default:
+      return [];
+  }
+}
+
+function makeDedupeKey(row: Record<string, string>, columns: string[]): string {
+  return columns.map((col) => (row[col] ?? '').trim().toLowerCase()).join('|');
+}
+
+function makeEngineDedupeKey(d: PropertyData): string {
+  const mls = (d.mlsNumber ?? '').trim().toLowerCase();
+  return mls || `${(d.address ?? '').trim().toLowerCase()}|${(d.zip ?? '').trim().toLowerCase()}`;
+}
+
+async function buildDedupeKeySet(
+  section: Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>,
+  eng: ReturnType<typeof getEngine>,
+  includeUploadedFiles = true
+): Promise<Set<string>> {
+  const set = new Set<string>();
+  const columns = getDedupeColumns(section);
+  if (!columns.length) return set;
+
+  if ((section === 'sales' || section === 'rent' || section === 'current') && eng.isLoaded) {
+    for (const d of eng.data) {
+      set.add(makeEngineDedupeKey(d));
+    }
+  }
+
+  if (includeUploadedFiles) {
+    const config = SECTION_CONFIG[section];
+    const cats = Array.isArray(config.category) ? config.category : [config.category];
+    const existingRows = await cmsStore.getUploadedRowsByCategories(cats);
+    for (const row of existingRows) {
+      set.add(makeDedupeKey(row, columns));
+    }
+  }
+
+  return set;
 }
 
 function detectCategory(fileName: string, section: AdminSection): CMSFileCategory {
@@ -283,27 +343,15 @@ type TreeNode = {
   folders: { [key: string]: TreeNode };
 };
 
-function buildTree(files: Omit<CMSFileRecord, 'rows'>[]): TreeNode {
+function buildTree(files: Omit<CMSFileRecord, 'rows'>[], title: string): TreeNode {
   const root: TreeNode = { name: 'Root', files: [], folders: {} };
-  
-  files.forEach(file => {
-    const parts = file.name.split('/');
-    if (parts.length === 1) {
-      root.files.push(file);
-      return;
-    }
-    
-    let current = root;
-    for (let i = 0; i < parts.length - 1; i++) {
-      const folderName = parts[i];
-      if (!current.folders[folderName]) {
-        current.folders[folderName] = { name: folderName, files: [], folders: {} };
-      }
-      current = current.folders[folderName];
-    }
-    current.files.push(file);
-  });
-  
+  root.folders[title] = {
+    name: title,
+    files: files
+      .map((file) => ({ ...file, name: file.name.split('/').pop() || file.name }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    folders: {},
+  };
   return root;
 }
 
@@ -466,7 +514,31 @@ export default function AdminPage() {
     const config = SECTION_CONFIG[section];
     const categories = Array.isArray(config.category) ? config.category : [config.category];
 
+    const eng = getEngine();
+    if (!eng.isLoaded) {
+      try {
+        await reloadEngine();
+      } catch (e) {
+        console.error('Engine preload failed', e);
+      }
+    }
+
+    const dataSection = section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>;
+    const baseKeySet =
+      section !== 'boundaries'
+        ? await buildDedupeKeySet(dataSection, getEngine(), section === 'tax' || section === 'schools')
+        : new Set<string>();
+
+    for (const s of stagedFiles) {
+      if (s.section !== section || section === 'boundaries') continue;
+      const columns = getDedupeColumns(dataSection);
+      for (const row of s.record.rows) {
+        baseKeySet.add(makeDedupeKey(row, columns));
+      }
+    }
+
     const newStaged: StagedFile[] = [];
+    const batchKeySet = new Set<string>();
 
     for (const file of Array.from(fileList)) {
       if (section === 'boundaries') {
@@ -474,12 +546,12 @@ export default function AdminPage() {
           setToast({ type: 'error', message: `${file.name} is not a GeoJSON file.` });
           continue;
         }
-        
+
         try {
           const text = await file.text();
           const geo = JSON.parse(text);
           const featureCount = geo.features ? geo.features.length : 0;
-          
+
           const id = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
           const record: CMSFileRecord = {
             id,
@@ -491,16 +563,17 @@ export default function AdminPage() {
             uploadedAt: Date.now(),
             source: 'upload',
           };
-          
+
           newStaged.push({
             id,
             file,
+            section,
             record,
             stats: {
               total: featureCount,
               new: featureCount,
-              existing: 0
-            }
+              duplicate: 0,
+            },
           });
         } catch (err) {
           console.error('GeoJSON parse error', err);
@@ -522,7 +595,7 @@ export default function AdminPage() {
             dynamicTyping: false,
             worker: true,
             complete: (results) => resolve(results),
-            error: (error) => reject(error)
+            error: (error) => reject(error),
           });
         });
 
@@ -534,14 +607,27 @@ export default function AdminPage() {
 
         const category = detectCategory(file.name, section);
         const actualCategory = categories.includes(category) ? category : categories[0];
-        
+
+        const columns = getDedupeColumns(dataSection);
+        const newRows: Record<string, string>[] = [];
+        let duplicateCount = 0;
+        for (const row of parsed.data) {
+          const key = makeDedupeKey(row, columns);
+          if (baseKeySet.has(key) || batchKeySet.has(key)) {
+            duplicateCount++;
+          } else {
+            newRows.push(row);
+            batchKeySet.add(key);
+          }
+        }
+
         const id = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const record: CMSFileRecord = {
           id,
           name: file.name,
           size: file.size,
           category: actualCategory,
-          rows: parsed.data,
+          rows: newRows,
           headers: parsed.meta.fields || [],
           uploadedAt: Date.now(),
           source: 'upload',
@@ -550,14 +636,14 @@ export default function AdminPage() {
         newStaged.push({
           id,
           file,
+          section,
           record,
           stats: {
             total: parsed.data.length,
-            new: parsed.data.length,
-            existing: 0
-          }
+            new: newRows.length,
+            duplicate: duplicateCount,
+          },
         });
-
       } catch (err) {
         console.error('File read error', err);
         setToast({ type: 'error', message: `Error processing ${file.name}` });
@@ -565,30 +651,62 @@ export default function AdminPage() {
     }
 
     if (newStaged.length > 0) {
-      setStagedFiles(prev => [...prev, ...newStaged]);
-      setToast({ type: 'success', message: `${newStaged.length} file(s) staged for review.` });
+      setStagedFiles((prev) => [...prev, ...newStaged]);
+      const totalNew = newStaged.reduce((sum, s) => sum + s.stats.new, 0);
+      const totalDup = newStaged.reduce((sum, s) => sum + s.stats.duplicate, 0);
+      setToast({
+        type: 'success',
+        message: `${newStaged.length} file(s) staged: ${totalNew.toLocaleString()} new rows, ${totalDup.toLocaleString()} duplicates skipped.`,
+      });
     }
-    
+
     setProcessing(false);
   };
 
   const handleConfirmUpload = async (stagedId: string) => {
-    const staged = stagedFiles.find(s => s.id === stagedId);
+    const staged = stagedFiles.find((s) => s.id === stagedId);
     if (!staged) return;
 
     setProcessing(true);
-    
+
     const existingFile = files.find((f) => f.name === staged.record.name);
-    if (existingFile) {
-      await cmsStore.removeFile(existingFile.id);
+    let rowsToSave = staged.record.rows;
+
+    const dataSection = staged.section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>;
+    const columns = getDedupeColumns(dataSection);
+    if (existingFile && columns.length) {
+      const existingFull = await cmsStore.getFile(existingFile.id);
+      const existingRows = existingFull?.rows || [];
+      const seen = new Set<string>();
+      rowsToSave = [];
+      for (const row of [...existingRows, ...staged.record.rows]) {
+        const key = makeDedupeKey(row, columns);
+        if (!seen.has(key)) {
+          seen.add(key);
+          rowsToSave.push(row);
+        }
+      }
     }
 
+    const rawContent = rowsToCsv(staged.record.headers, rowsToSave);
+    const recordToSave: CMSFileRecord = {
+      ...staged.record,
+      rows: rowsToSave,
+      rawContent,
+      size: new Blob([rawContent]).size,
+      rowCount: staged.record.category === 'boundary' ? 0 : rowsToSave.length,
+    };
+
     try {
-      await cmsStore.saveFile(staged.record);
-      setStagedFiles(prev => prev.filter(s => s.id !== stagedId));
+      await cmsStore.saveFile(recordToSave);
+      if (existingFile) await cmsStore.removeFile(existingFile.id);
+      setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
       await loadData();
       await reloadEngine();
-      setToast({ type: 'success', message: `${staged.record.name} uploaded successfully.` });
+      setToast({
+        type: 'success',
+        message: `${staged.record.name} added successfully (${rowsToSave.length.toLocaleString()} rows).`,
+      });
     } catch (err) {
       console.error('Upload error', err);
       setToast({ type: 'error', message: `Error uploading ${staged.record.name}` });
@@ -1545,7 +1663,7 @@ export default function AdminPage() {
                       className="hidden"
                       onChange={(e) => handleFiles(e.target.files, key)}
                     />
-                    <div className="text-[10px] text-gray-500">Files replace matching rows in the engine instantly.</div>
+                    <div className="text-[10px] text-gray-500">Duplicate rows are detected and skipped; only new rows are uploaded.</div>
                   </div>
                   {processing && (
                     <div className="mt-4 flex items-center gap-2 text-xs text-blue-400">
@@ -1560,10 +1678,10 @@ export default function AdminPage() {
                 {stagedFiles.length > 0 && (
                   <div className="bg-surface border border-blue-500/50 rounded-2xl p-5 mb-6 shadow-[0_0_15px_rgba(59,130,246,0.1)]">
                     <h3 className="text-sm font-bold text-white flex items-center gap-2 mb-4">
-                      <AlertTriangle className="w-4 h-4 text-blue-400" /> Staging Area: Pending Uploads
+                      <AlertTriangle className="w-4 h-4 text-blue-400" /> Staging Area: Review New Rows
                     </h3>
                     <div className="space-y-3">
-                      {stagedFiles.map(staged => (
+                      {stagedFiles.map((staged) => (
                         <div key={staged.id} className="bg-background border border-border-subtle rounded-xl p-4">
                           <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-4 mb-3">
                             <div>
@@ -1572,24 +1690,28 @@ export default function AdminPage() {
                             </div>
                             <div className="flex gap-2 shrink-0">
                               <button onClick={() => handleDiscardStaged(staged.id)} className="px-3 py-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-lg text-xs font-medium transition-colors">Discard</button>
-                              <button onClick={() => handleConfirmUpload(staged.id)} disabled={processing} className="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:opacity-50">
-                                <CheckCircle className="w-3 h-3" /> Confirm Upload
+                              <button
+                                onClick={() => handleConfirmUpload(staged.id)}
+                                disabled={processing || staged.stats.new === 0}
+                                className="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <Plus className="w-3 h-3" /> Add {staged.stats.new.toLocaleString()} new
                               </button>
                             </div>
                           </div>
-                          
+
                           <div className="grid grid-cols-3 gap-2">
                             <div className="bg-white/5 rounded-lg p-2 text-center">
                               <div className="text-[10px] sm:text-xs text-gray-400 mb-1">Total Rows</div>
                               <div className="text-xs sm:text-sm font-bold text-white">{staged.stats.total.toLocaleString()}</div>
                             </div>
                             <div className="bg-blue-500/10 rounded-lg p-2 text-center border border-blue-500/20">
-                              <div className="text-[10px] sm:text-xs text-blue-400 mb-1">New Data</div>
+                              <div className="text-[10px] sm:text-xs text-blue-400 mb-1">New Rows</div>
                               <div className="text-xs sm:text-sm font-bold text-blue-400">{staged.stats.new.toLocaleString()}</div>
                             </div>
                             <div className="bg-amber-500/10 rounded-lg p-2 text-center border border-amber-500/20">
-                              <div className="text-[10px] sm:text-xs text-amber-400 mb-1">Updating Existing</div>
-                              <div className="text-xs sm:text-sm font-bold text-amber-400">{staged.stats.existing.toLocaleString()}</div>
+                              <div className="text-[10px] sm:text-xs text-amber-400 mb-1">Duplicates</div>
+                              <div className="text-xs sm:text-sm font-bold text-amber-400">{staged.stats.duplicate.toLocaleString()}</div>
                             </div>
                           </div>
                         </div>
@@ -1629,7 +1751,7 @@ export default function AdminPage() {
                   ) : (
                     <div className="space-y-2 max-h-[500px] overflow-auto pr-1">
                       {(() => {
-                        const rootNode = buildTree(filteredFiles);
+                        const rootNode = buildTree(filteredFiles, config.title);
                         return Object.values(rootNode.folders).map(folder => (
                           <FolderNode 
                             key={folder.name} 

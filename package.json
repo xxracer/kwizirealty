@@ -13,6 +13,7 @@
     "@types/leaflet": "^1.9.21",
     "dotenv": "^17.4.2",
     "firebase": "^12.16.0",
+    "firebase-admin": "^14.2.0",
     "framer-motion": "^12.43.0",
     "leaflet": "^1.9.4",
     "leaflet-draw": "^1.0.4",

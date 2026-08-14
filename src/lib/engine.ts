@@ -148,9 +148,9 @@ const CSV_FILES = [
 ];
 
 const TEA_FILES: Record<'elementary' | 'middle' | 'high', string> = {
-  elementary: '/csv/TEA_Elem_School_Ratings.csv',
-  middle: '/csv/TEA_Middle_School_Ratings.csv',
-  high: '/csv/TEA_High_School_Ratings.csv',
+  elementary: 'cms_files/csv/TEA_Elem_School_Ratings.csv',
+  middle: 'cms_files/csv/TEA_Middle_School_Ratings.csv',
+  high: 'cms_files/csv/TEA_High_School_Ratings.csv',
 };
 
 function cleanNumber(val: unknown): number {
@@ -365,6 +365,7 @@ export class RealEstateEngine {
     high: {},
   };
   private cmsOverrides: CMSMetricOverride[] = [];
+  private loadingPromise: Promise<void> | null = null;
 
   private normalizeRows(rows: any[], quality: DataQualitySummary, zipSet: Set<string>): PropertyData[] {
     return rows
@@ -519,145 +520,228 @@ export class RealEstateEngine {
     quality.uniqueZips = new Set(this.data.map((d) => d.zip).filter(Boolean)).size;
   }
 
-  public async loadAllCSV(force = false, onProgress?: (loaded: number, total: number) => void) {
-    if (this.isLoaded && !force) return;
-    if (force) {
-      this.data = [];
-      this.etaScoreCache = {};
-      this.isLoaded = false;
+  public async reloadFromCMS() {
+    await this.loadAllCSV(true);
+  }
+
+  private async loadManifest(): Promise<string[]> {
+    try {
+      const manifestRef = ref(storage, 'cms_files/csv/property-manifest.json');
+      const url = await getDownloadURL(manifestRef);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Firebase manifest fetch failed: ${res.status}`);
+      const data = await res.json();
+      console.log('[Kwizi Engine] Loaded manifest from Firebase Storage');
+      return data;
+    } catch (err) {
+      console.warn('[Kwizi] Could not load property manifest from Firebase Storage:', err);
+      return [];
     }
+  }
 
-    const urls = await this.loadManifest();
-    const version = await cacheVersionFor(urls);
+  private async getFirebaseDownloadUrl(storagePath: string): Promise<string | null> {
+    try {
+      const fileRef = ref(storage, storagePath);
+      return await getDownloadURL(fileRef);
+    } catch {
+      return null;
+    }
+  }
 
-    // Try to restore from IndexedDB cache first.
-    if (!force) {
-      try {
-        const cacheResult = await readCache<PropertyData[]>(version);
-        const cached = cacheResult.data;
-        const cachedSignature = cacheResult.syncSignature;
-        
-        if (cached && cached.length > 0) {
-          this.data = cached;
-          this.isLoaded = true;
-          console.log('[Kwizi Engine] Restored', cached.length, 'properties from IndexedDB cache');
-          // Refresh school ratings / CMS overrides in background but do not block map.
-          this.loadSchoolRatings().catch(() => {});
-          this.checkAndRefreshCMS(cachedSignature).catch(() => {});
-          return;
+  private async findMasterFile(): Promise<{ url: string; path: string } | null> {
+    const candidates = [
+      'cms_files/csv/master_cache.csv.gz',
+      'cms_files/master_cache.csv.gz',
+      'cms_files/csv/master_cache.csv',
+      'cms_files/master_cache.csv',
+      'master_cache/master_cache.json',
+      'cms_files/master_cache.json',
+    ];
+    for (const path of candidates) {
+      const url = await this.getFirebaseDownloadUrl(path);
+      if (url) return { url, path };
+    }
+    return null;
+  }
+
+  private async parseCsvText(text: string): Promise<Record<string, string>[]> {
+    const parsed = Papa.parse<Record<string, string>>(text, {
+      header: true,
+      skipEmptyLines: true,
+    });
+    return parsed.data;
+  }
+
+  private async parseGzippedResponse(res: Response): Promise<Record<string, string>[]> {
+    if (!res.body) return [];
+    const ds = (window as any).DecompressionStream as typeof DecompressionStream;
+    if (!ds) {
+      throw new Error('This browser does not support gzip decompression (DecompressionStream).');
+    }
+    const decompressed = res.body.pipeThrough(new ds('gzip'));
+    const text = await new Response(decompressed).text();
+    return this.parseCsvText(text);
+  }
+
+  private async parseMasterResponse(res: Response, url: string): Promise<{ rows?: Record<string, string>[]; normalized?: PropertyData[] }> {
+    const pathname = new URL(url).pathname;
+    if (pathname.endsWith('.gz')) {
+      return { rows: await this.parseGzippedResponse(res) };
+    }
+    if (pathname.endsWith('.json')) {
+      const json = await res.json();
+      if (Array.isArray(json.data) && json.data.length > 0) {
+        const first = json.data[0];
+        // Trust the cache if it looks like normalized PropertyData (has closePrice).
+        if (first && typeof first.closePrice === 'number' && typeof first.lat === 'number') {
+          return { normalized: json.data as PropertyData[] };
         }
-      } catch (err) {
-        console.warn('[Kwizi] Failed to read CSV cache:', err);
       }
-      
-      try {
-        const masterCacheRef = ref(storage, 'cms_files/master_cache.csv');
-        const url = await getDownloadURL(masterCacheRef);
-        console.log('[Kwizi Engine] Downloading master_cache.csv from Firebase...');
-        
-        await new Promise<void>((resolve, reject) => {
-          Papa.parse(url, {
-            download: true,
-            header: true,
-            worker: true, // critical for not freezing the UI
-            skipEmptyLines: true,
-            complete: (results) => {
-              if (results.data && results.data.length > 0) {
-                this.data = results.data as PropertyData[];
-                this.isLoaded = true;
-                const currentSignature = 'firebase-master-csv-cache';
-                writeCache(version, this.data, currentSignature).catch(console.warn);
-                this.loadSchoolRatings().catch(() => {});
-                this.checkAndRefreshCMS(currentSignature).catch(() => {});
-                console.log('[Kwizi Engine] Restored', this.data.length, 'properties from Firebase master_cache.csv');
-                resolve();
-              } else {
-                reject(new Error('Empty CSV data'));
-              }
-            },
-            error: (err) => reject(err)
-          });
-        });
-        return; // Success, exit out of loadAllCSV early!
-      } catch (err) {
-        console.warn('[Kwizi] Failed to read Firebase Master Cache CSV:', err);
+      return { rows: [] };
+    }
+    return { rows: await this.parseCsvText(await res.text()) };
+  }
+
+  public async loadAllCSV(
+    forceRefresh = false,
+    onProgress?: (loaded: number, total: number) => void
+  ) {
+    if (this.isLoaded && !forceRefresh) return;
+    if (this.loadingPromise) return this.loadingPromise;
+
+    this.loadingPromise = (async () => {
+      // 1. Decide the data source: single master file, or the individual manifest.
+      const masterFile = await this.findMasterFile();
+      let masterUrl: string | null = masterFile?.url || null;
+      let manifestPaths: string[] | null = null;
+
+      if (!masterUrl) {
+        manifestPaths = await this.loadManifest();
       }
 
-      try {
-        const localRes = await fetch('/csv/master_cache.json');
-        if (localRes.ok) {
-          const localCache = await localRes.json();
-          if (localCache && localCache.data) {
-            this.data = localCache.data;
+      const cacheVersionUrls = masterFile?.path ? [masterFile.path] : (manifestPaths || []);
+      const version = await cacheVersionFor(cacheVersionUrls);
+
+      // 2. Try IndexedDB cache first (avoids any network hit after first load).
+      if (!forceRefresh) {
+        try {
+          const cacheResult = await readCache<PropertyData[]>(version);
+          const cached = cacheResult.data;
+          if (cached && cached.length > 0) {
+            this.data = cached;
             this.isLoaded = true;
-            const currentSignature = localCache.signature || 'local-fallback';
-            await writeCache(version, this.data, currentSignature);
+            console.log('[Kwizi Engine] Restored', cached.length, 'properties from IndexedDB cache');
             this.loadSchoolRatings().catch(() => {});
-            this.checkAndRefreshCMS(currentSignature).catch(() => {});
-            console.log('[Kwizi Engine] Restored', this.data.length, 'properties from local /csv/master_cache.json');
             return;
           }
+        } catch (err) {
+          console.warn('[Kwizi] Failed to read CSV cache:', err);
         }
-      } catch (err) {
-        console.warn('[Kwizi] Failed to read local master_cache.json fallback:', err);
+      }
+
+      const quality: DataQualitySummary = {
+        totalRowsRead: 0,
+        keptRows: 0,
+        missingZip: 0,
+        missingCoordinates: 0,
+        missingPrice: 0,
+        uniqueZips: 0,
+      };
+      const zipSet = new Set<string>();
+      let allItems: PropertyData[] = [];
+
+      // 3. Load from the single Firebase master file if it exists.
+      if (masterUrl) {
+        console.log('[Kwizi Engine] Loading master file from Firebase Storage');
+        onProgress?.(0, 1);
+        try {
+          const res = await fetch(masterUrl);
+          if (!res.ok) throw new Error(`Master fetch failed: ${res.status}`);
+          const parsed = await this.parseMasterResponse(res, masterUrl);
+          if (parsed.normalized) {
+            allItems = parsed.normalized;
+            onProgress?.(1, 1);
+            console.log(`[Kwizi Engine] Restored ${allItems.length} normalized properties from master JSON`);
+          } else if (parsed.rows) {
+            const rows = parsed.rows;
+            quality.totalRowsRead += rows.length;
+            const newItems = this.normalizeRows(rows, quality, zipSet);
+            quality.keptRows += newItems.length;
+            allItems = newItems;
+            onProgress?.(1, 1);
+            console.log(`[Kwizi Engine] Parsed ${rows.length} rows from master CSV (${newItems.length} kept)`);
+          }
+        } catch (err) {
+          console.error('[Kwizi] Failed to load master file, will fall back to manifest:', err);
+          allItems = [];
+          masterUrl = null;
+        }
+      }
+
+      // 4. Fallback: download individual CSVs from the Firebase Storage manifest.
+      if (!masterUrl && manifestPaths) {
+        const bucket = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'myreatstat.firebasestorage.app';
+        const firebaseUrls = manifestPaths
+          .filter((p) => p.toLowerCase().endsWith('.csv'))
+          .map((p) =>
+            `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/cms_files%2Fcsv%2F${encodeURIComponent(p)}?alt=media`
+          );
+
+        if (firebaseUrls.length > 0) {
+          console.log(`[Kwizi Engine] No master file, downloading ${firebaseUrls.length} CSVs from Firebase Storage...`);
+          const chunkArray = <T, >(arr: T[], size: number): T[][] =>
+            Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, i * size + size));
+          const urlChunks = chunkArray(firebaseUrls, 10);
+          let loadedFiles = 0;
+          for (const chunk of urlChunks) {
+            await Promise.all(
+              chunk.map(async (url) => {
+                try {
+                  const res = await fetch(url);
+                  if (!res.ok) return;
+                  const rows = await this.parseCsvText(await res.text());
+                  quality.totalRowsRead += rows.length;
+                  const newItems = this.normalizeRows(rows, quality, zipSet);
+                  quality.keptRows += newItems.length;
+                  allItems.push(...newItems);
+                  loadedFiles++;
+                  onProgress?.(loadedFiles, firebaseUrls.length);
+                } catch (err) {
+                  console.error('Error loading CSV chunk:', url, err);
+                }
+              })
+            );
+          }
+        }
+      }
+
+      this.data = allItems;
+      await this.applyPostLoadSteps(quality, zipSet, version);
+    })();
+
+    await this.loadingPromise;
+  }
+
+  private async saveCache(cacheVersion: string) {
+    try {
+      const summary = await cmsStore.summary();
+      const currentSignature = `${summary.lastUploadAt}-${summary.overrides}-${summary.propertyOverrides}`;
+      await writeCache(cacheVersion, this.data, currentSignature);
+    } catch (e) {
+      console.warn('Failed to save cache', e);
+      try {
+        await writeCache(cacheVersion, this.data);
+      } catch (e2) {
+        console.warn('Failed to save cache without signature', e2);
       }
     }
+  }
 
-    const quality: DataQualitySummary = {
-      totalRowsRead: 0,
-      keptRows: 0,
-      missingZip: 0,
-      missingCoordinates: 0,
-      missingPrice: 0,
-      uniqueZips: 0,
-    };
-    const zipSet = new Set<string>();
-    const allItems: PropertyData[] = [];
-
-    const teaPromise = this.loadSchoolRatings();
-
-    let loadedFiles = 0;
-    await asyncPool(5, urls, async (url) => {
-      try {
-        const res = await fetch(encodeURI(url));
-        if (!res.ok) {
-          console.error('Failed to fetch CSV:', url, res.status);
-          return;
-        }
-        
-        // Ensure we pass the Blob/File to Papa.parse for web worker support, or pass the text if we can't.
-        // Wait, Papa.parse supports parsing a File or a string. 
-        // If we pass a string to a worker, it works but transfers the string. 
-        // If we pass a Blob, it's better. fetch() provides a blob().
-        const blob = await res.blob();
-        
-        const parsed = await new Promise<Papa.ParseResult<Record<string, string>>>((resolve, reject) => {
-          Papa.parse(blob as any, {
-            header: true,
-            skipEmptyLines: true,
-            worker: true,
-            complete: (results) => resolve(results as any),
-            error: (err) => reject(err)
-          });
-        });
-        
-        const rows = parsed.data as any[];
-        quality.totalRowsRead += rows.length;
-        const newItems = this.normalizeRows(rows, quality, zipSet);
-        quality.keptRows += newItems.length;
-        allItems.push(...newItems);
-        loadedFiles++;
-        onProgress?.(loadedFiles, urls.length);
-      } catch (err) {
-        console.error('Error loading CSV:', url, err);
-      }
-    });
-
-    this.data = allItems;
-    // We now rely solely on the Master Cache to serve property data.
-    // If the user uploads new CSVs via the CMS, they must compile the cache.
-
-
+  private async applyPostLoadSteps(
+    quality: DataQualitySummary,
+    zipSet: Set<string>,
+    cacheVersion: string
+  ) {
     // Apply manual property overrides (single-row edits) from the CMS.
     try {
       const propertyOverrides = await cmsStore.listPropertyOverrides();
@@ -676,85 +760,14 @@ export class RealEstateEngine {
       this.cmsOverrides = [];
     }
 
-    await teaPromise;
-
-    quality.uniqueZips = zipSet.size;
+    quality.uniqueZips = zipSet.size || new Set(this.data.map((d) => d.zip).filter(Boolean)).size;
     this.dataQuality = quality;
+    console.log(`[Kwizi Engine] Loaded ${this.data.length} properties`);
+
+    // Mark ready immediately so the UI can render. Cache write and school ratings run in the background.
     this.isLoaded = true;
-    console.log('[Kwizi Engine] Loaded', this.data.length, 'properties from', urls.length, 'CSV files');
-
-    // Persist to IndexedDB so next load is near-instant.
-    try {
-      const summary = await cmsStore.summary();
-      const currentSignature = `${summary.lastUploadAt}-${summary.overrides}-${summary.propertyOverrides}`;
-      await writeCache(version, this.data, currentSignature);
-      console.log('[Kwizi Engine] Cached', this.data.length, 'properties in IndexedDB');
-      
-      if (force) {
-        await cmsStore.saveMasterCache({ data: this.data, signature: currentSignature }).catch(e => console.warn('Failed to save master cache:', e));
-      }
-    } catch (err) {
-      console.warn('[Kwizi] Failed to write CSV cache:', err);
-    }
-
-    console.log('[Kwizi] Data quality summary:', quality);
-  }
-
-  private async checkAndRefreshCMS(cachedSignature: string | null) {
-    try {
-      const summary = await cmsStore.summary();
-      const currentSignature = `${summary.lastUploadAt}-${summary.overrides}-${summary.propertyOverrides}`;
-      
-      if (cachedSignature !== currentSignature) {
-        console.log('[Kwizi Engine] CMS sync mismatch detected (new files or overrides). Refreshing data...');
-        await this.refreshCMSData();
-        const urls = await this.loadManifest();
-        const version = await cacheVersionFor(urls);
-        await writeCache(version, this.data, currentSignature);
-      } else {
-        console.log('[Kwizi Engine] CMS data is up to date. Skipping heavy refresh.');
-      }
-    } catch (err) {
-      console.warn('[Kwizi] Failed to check CMS sync state:', err);
-    }
-  }
-
-  private async refreshCMSData() {
-    // We now rely solely on the Master Cache to serve property data.
-    // Re-apply CMS overrides (but not raw CSV rows) on top of cached static data.
-
-    try {
-      const propertyOverrides = await cmsStore.listPropertyOverrides();
-      if (propertyOverrides.length) {
-        const quality = { ...this.dataQuality };
-        this.applyPropertyOverrides(propertyOverrides, quality);
-        this.dataQuality = quality;
-      }
-    } catch (err) {
-      console.error('[Kwizi] Failed to merge CMS property overrides from cache:', err);
-    }
-
-    try {
-      this.cmsOverrides = await cmsStore.listOverrides();
-    } catch (err) {
-      console.error('[Kwizi] Failed to load CMS overrides from cache:', err);
-      this.cmsOverrides = [];
-    }
-  }
-
-  public async reloadFromCMS() {
-    await this.loadAllCSV(true);
-  }
-
-  private async loadManifest(): Promise<string[]> {
-    try {
-      const res = await fetch('/csv/property-manifest.json');
-      if (!res.ok) throw new Error(`manifest fetch failed: ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      console.warn('[Kwizi] No local manifest found. Waiting for Firebase cache.');
-      return [];
-    }
+    this.loadSchoolRatings().catch(() => {});
+    this.saveCache(cacheVersion).catch(() => {});
   }
 
   private async loadSchoolRatings() {
@@ -777,18 +790,30 @@ export class RealEstateEngine {
       this.teaScores[level] = map;
     };
 
-    const loadOne = async (level: 'elementary' | 'middle' | 'high', url: string) => {
+    const loadOne = async (level: 'elementary' | 'middle' | 'high', path: string) => {
       try {
+        let url = path;
+        if (!path.startsWith('http') && !path.startsWith('/')) {
+          // Treat as Firebase Storage path.
+          url = (await this.getFirebaseDownloadUrl(path)) || '';
+        }
+        if (!url) return;
         const res = await fetch(url);
         if (!res.ok) {
-          // Fail silently if not found locally; we expect them from Firebase.
+          // Last-resort local fallback for TEA files only.
+          const localUrl = `/csv/${path.split('/').pop()}`;
+          const localRes = await fetch(localUrl);
+          if (!localRes.ok) return;
+          const text = await localRes.text();
+          const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+          loadRows(level, parsed.data as any[]);
           return;
         }
         const text = await res.text();
         const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
         loadRows(level, parsed.data as any[]);
       } catch (err) {
-        console.error('Error loading TEA ratings:', url, err);
+        console.error('Error loading TEA ratings:', path, err);
       }
     };
 
