@@ -14,6 +14,73 @@ interface HommieChatProps {
   selectedIds: string[];
   onAreaSelect?: (queries: string[]) => void;
   onGenerateReport?: () => void;
+  getStatsForChatQueries?: (queries: string[]) => any;
+  setBoundary?: (boundary: BoundaryKey) => void;
+  setMetric?: (metric: string) => void;
+  setFilters?: (filters: any) => void;
+}
+
+function InteractiveQuestion({ toolInvocation, addToolResult }: { toolInvocation: any, addToolResult: any }) {
+  const { question, options, isMultiSelect } = toolInvocation.args;
+  const [selected, setSelected] = useState<string[]>([]);
+
+  if ('result' in toolInvocation) {
+    return (
+      <div className="flex flex-col space-y-3 mt-3 border-t border-gray-100 pt-3">
+        <div className="font-medium text-gray-800">{question}</div>
+        <div className="text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg text-sm border border-indigo-100">
+          ✓ Selected: {toolInvocation.result}
+        </div>
+      </div>
+    );
+  }
+
+  const toggleSelection = (option: string) => {
+    setSelected(prev => 
+      prev.includes(option) ? prev.filter(o => o !== option) : [...prev, option]
+    );
+  };
+
+  return (
+    <div className="flex flex-col space-y-3 mt-3 border-t border-gray-100 pt-3">
+      <div className="font-medium text-gray-800">{question}</div>
+      <div className="flex flex-col space-y-2">
+        {options.map((option: string, idx: number) => (
+          <button
+            key={idx}
+            onClick={() => {
+              if (isMultiSelect) {
+                toggleSelection(option);
+              } else {
+                addToolResult({ toolCallId: toolInvocation.toolCallId, result: option });
+              }
+            }}
+            className={`text-left px-4 py-2.5 rounded-xl border transition-all shadow-sm flex items-center ${
+              selected.includes(option) 
+                ? 'bg-indigo-50 border-indigo-400 text-indigo-800' 
+                : 'bg-white border-gray-200 text-gray-700 hover:bg-indigo-50/50 hover:border-indigo-300 hover:text-indigo-700'
+            }`}
+          >
+            {isMultiSelect && (
+              <div className={`mr-3 w-4 h-4 border rounded flex items-center justify-center shrink-0 ${selected.includes(option) ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'}`}>
+                {selected.includes(option) && <X className="w-3 h-3 text-white" style={{ clipPath: 'polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)' }} />}
+              </div>
+            )}
+            {option}
+          </button>
+        ))}
+      </div>
+      {isMultiSelect && (
+        <button
+          onClick={() => addToolResult({ toolCallId: toolInvocation.toolCallId, result: selected.join(' / ') })}
+          disabled={selected.length === 0}
+          className="mt-2 w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 text-white rounded-xl font-medium transition-colors"
+        >
+          Submit Selection
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function HommieChat({ 
@@ -23,7 +90,11 @@ export default function HommieChat({
   marketHealth,
   selectedIds,
   onAreaSelect,
-  onGenerateReport
+  onGenerateReport,
+  getStatsForChatQueries,
+  setBoundary,
+  setMetric,
+  setFilters
 }: HommieChatProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -46,6 +117,7 @@ export default function HommieChat({
 
   const { messages, input, handleInputChange, handleSubmit, isLoading, setMessages, append, addToolResult } = useChat({
     api: '/api/chat',
+    maxToolRoundtrips: 2,
     body: {
       contextData,
     },
@@ -56,8 +128,12 @@ export default function HommieChat({
         const { areasToSearch, generateReport } = args;
         
         try {
+          let toolResultData = null;
           if (onAreaSelect && areasToSearch && areasToSearch.length > 0) {
             onAreaSelect(areasToSearch);
+            if (getStatsForChatQueries) {
+              toolResultData = getStatsForChatQueries(areasToSearch);
+            }
           }
           
           if (generateReport && onGenerateReport) {
@@ -66,13 +142,32 @@ export default function HommieChat({
 
           addToolResult({
             toolCallId: toolCall.toolCallId,
-            result: { success: true, message: `Successfully matched areas and ${generateReport ? 'generated report' : 'updated selection'}.` },
+            result: { 
+              success: true, 
+              message: `Successfully matched areas and ${generateReport ? 'generated report' : 'updated selection'}.`,
+              data: toolResultData 
+            },
           });
         } catch (error) {
           addToolResult({
             toolCallId: toolCall.toolCallId,
             result: { error: 'Failed to select areas or generate report.' },
           });
+        }
+      } else if (toolCall.toolName === 'setMapBoundary') {
+        if (setBoundary) {
+          setBoundary((toolCall.args as any).boundary);
+          addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map boundary set to ${(toolCall.args as any).boundary}` } });
+        }
+      } else if (toolCall.toolName === 'setMapMetric') {
+        if (setMetric) {
+          setMetric((toolCall.args as any).metric);
+          addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map metric set to ${(toolCall.args as any).metric}` } });
+        }
+      } else if (toolCall.toolName === 'setMapFilters') {
+        if (setFilters) {
+          setFilters((prev: any) => ({ ...prev, ...(toolCall.args as any).filters }));
+          addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map filters updated` } });
         }
       }
     }
@@ -168,7 +263,20 @@ export default function HommieChat({
                         : 'bg-white border border-gray-100 text-gray-800 rounded-tl-none'
                     }`}
                   >
-                    {m.content}
+                    {m.content && <div className="whitespace-pre-wrap">{m.content}</div>}
+                    
+                    {m.toolInvocations?.map((toolInvocation) => {
+                      if (toolInvocation.toolName === 'askInteractiveQuestion') {
+                        return (
+                          <InteractiveQuestion 
+                            key={toolInvocation.toolCallId}
+                            toolInvocation={toolInvocation}
+                            addToolResult={addToolResult}
+                          />
+                        );
+                      }
+                      return null;
+                    })}
                   </div>
 
                   {m.role === 'user' && (
@@ -199,24 +307,24 @@ export default function HommieChat({
               <div className="flex gap-2 overflow-x-auto pb-2 mb-1 scrollbar-hide">
                 <button
                   type="button"
-                  onClick={() => append({ role: 'user', content: 'Generate a report for these areas' })}
-                  className="shrink-0 text-[11px] font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 px-3 py-1.5 rounded-full transition-colors whitespace-nowrap"
+                  onClick={() => append({ role: 'user', content: '[GET_STARTED] Let\'s find my ideal real estate areas' })}
+                  className="shrink-0 text-[11px] font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 px-3 py-1.5 rounded-full transition-colors whitespace-nowrap shadow-sm"
                 >
-                  Generate Report
+                  🚀 Get Started
                 </button>
                 <button
                   type="button"
-                  onClick={() => append({ role: 'user', content: 'What is the pricing trend here?' })}
+                  onClick={() => append({ role: 'user', content: 'Generate a report for Tomball' })}
                   className="shrink-0 text-[11px] font-medium bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200 px-3 py-1.5 rounded-full transition-colors whitespace-nowrap"
                 >
-                  Pricing Trend
+                  Report for Tomball
                 </button>
                 <button
                   type="button"
                   onClick={() => append({ role: 'user', content: 'Compare these areas' })}
                   className="shrink-0 text-[11px] font-medium bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200 px-3 py-1.5 rounded-full transition-colors whitespace-nowrap"
                 >
-                  Compare Areas
+                  Compare Current Selection
                 </button>
               </div>
               <div className="relative flex items-center">

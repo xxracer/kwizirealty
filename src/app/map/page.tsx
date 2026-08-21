@@ -261,7 +261,7 @@ export default function MapPage() {
   const isMobile = useMediaQuery('(max-width: 1024px)');
   const loadMetricsForBoundary = useCallback(
     async (key: BoundaryKey) => {
-      if (initialMetrics?.[key]) return;
+      if (initialMetrics?.[key] || key === 'areas') return;
       try {
         const data = await engine.fetchGzJson<InitialMetricsSnapshot>(`/cache/initial_metrics_${key}.json.gz`);
         setInitialMetrics((prev) => ({ ...(prev || {}), [key]: data }));
@@ -538,6 +538,37 @@ export default function MapPage() {
       setSelectedIds(prev => Array.from(new Set([...prev, ...matchedIds])));
     }
   }, [effectiveNameMap]);
+
+  const getStatsForChatQueries = useCallback((queries: string[]) => {
+    if (!queries || queries.length === 0 || !dataReady) return null;
+    
+    const normalizedQueries = queries.map(q => q.toLowerCase().trim());
+    const matchedIds: string[] = [];
+    const matchedNames: string[] = [];
+
+    Object.entries(effectiveNameMap).forEach(([id, name]) => {
+      const normalizedName = name.toLowerCase();
+      const isMatch = normalizedQueries.some(q => 
+        normalizedName.includes(q) || q.includes(normalizedName)
+      );
+      if (isMatch) {
+        matchedIds.push(id);
+        matchedNames.push(name);
+      }
+    });
+
+    if (matchedIds.length === 0) return null;
+
+    const stats = engine.getStatsForSelection(filteredData, boundary, matchedIds);
+    const isRental =
+      metric === 'Est. Rental Price' ||
+      metric === 'Rental Price per Sqft' ||
+      metric === 'Rental Days On Market' ||
+      metric === 'Rent-to-Sale Ratio';
+    const health = engine.getMarketHealth(filteredData, boundary, matchedIds, isRental ? 'rental' : 'sale');
+    
+    return { stats, health, matchedNames };
+  }, [dataReady, filteredData, boundary, effectiveNameMap, metric]);
 
   const generateReport = useCallback(() => {
     if (reportPhase === 'loading') return;
@@ -1342,6 +1373,7 @@ export default function MapPage() {
                     selectedIds={selectedIds}
                     onAreaSelect={handleAreaSelectFromChat}
                     onGenerateReport={generateReport}
+                    getStatsForChatQueries={getStatsForChatQueries}
                   />
                   <MapComponent
                     boundary={boundary}
@@ -1411,6 +1443,10 @@ export default function MapPage() {
           selectedIds={selectedIds}
           onAreaSelect={handleAreaSelectFromChat}
           onGenerateReport={generateReport}
+          getStatsForChatQueries={getStatsForChatQueries}
+          setBoundary={setBoundary}
+          setMetric={setMetric}
+          setFilters={setFilters}
         />
       </div>
     </div>
