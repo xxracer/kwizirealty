@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   Activity,
   Clock,
@@ -135,6 +135,8 @@ function CardShell({
   pinned,
   onTogglePin,
 }: CardShellProps) {
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20, scale: 0.98 }}
@@ -162,13 +164,34 @@ function CardShell({
           <h3 className={`font-bold uppercase tracking-wider text-gray-200 ${compact ? 'text-[10px]' : 'text-xs'}`}>{title}</h3>
         </div>
         <div className="flex items-center gap-2">
-          {onTogglePin && (
-            <PinHandle pinned={!!pinned} onClick={onTogglePin} />
-          )}
+          {onTogglePin && <PinHandle pinned={!!pinned} onClick={onTogglePin} />}
           {headerExtra}
+          {!compact && (
+            <button
+              onClick={() => setCollapsed(!collapsed)}
+              className="w-6 h-6 rounded bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 transition-colors"
+              title={collapsed ? "Expand" : "Collapse"}
+            >
+              <ArrowDown className={`w-3.5 h-3.5 transition-transform ${collapsed ? 'rotate-180' : ''}`} />
+            </button>
+          )}
         </div>
       </div>
-      <div className={compact ? 'p-3' : 'p-4'}>{children}</div>
+      
+      {/* Content wrapper with collapse animation */}
+      <AnimatePresence initial={false}>
+        {!collapsed && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className={compact ? 'p-3' : 'p-4'}>{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
@@ -307,6 +330,8 @@ export function MarketHealthCard({
   pinned,
   onTogglePin,
   headerExtra,
+  onSet90Days,
+  is90Days,
 }: {
   marketHealth: MarketHealth | null;
   timeSeries: { period: string; value: number; n: number }[];
@@ -316,6 +341,8 @@ export function MarketHealthCard({
   onTogglePin?: () => void;
   headerExtra?: React.ReactNode;
   dragHandle?: React.ReactNode;
+  onSet90Days?: () => void;
+  is90Days?: boolean;
 }) {
   const volumeTrend = useMemo(() => {
     if (timeSeries.length < 2) return null;
@@ -333,7 +360,23 @@ export function MarketHealthCard({
       compact={compact}
       pinned={pinned}
       onTogglePin={onTogglePin}
-      headerExtra={headerExtra}
+      headerExtra={
+        <>
+          {onSet90Days && (
+            <button
+              onClick={onSet90Days}
+              className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                is90Days 
+                  ? 'bg-blue-500/20 border-blue-500/50 text-blue-400' 
+                  : 'bg-white/5 border-white/10 text-gray-400 hover:text-white hover:bg-white/10'
+              }`}
+            >
+              90d
+            </button>
+          )}
+          {headerExtra}
+        </>
+      }
     >
       {isLoading ? (
         <SkeletonPulse className={compact ? 'space-y-2' : 'space-y-3'}>
@@ -827,7 +870,7 @@ export function ForecastComparisonCard({
     URL.revokeObjectURL(url);
   };
 
-  const SortIcon = ({ active, asc }: { active: boolean; asc: boolean }) => {
+  const renderSortIcon = (active: boolean, asc: boolean) => {
     if (!active) return <ArrowUpDown className="w-3 h-3 text-gray-600" />;
     return asc ? <ArrowUp className="w-3 h-3 text-blue-400" /> : <ArrowDown className="w-3 h-3 text-blue-400" />;
   };
@@ -843,10 +886,15 @@ export function ForecastComparisonCard({
       headerExtra={
         <div className="flex items-center gap-2">
           {!compact && lowR2Count > 0 && (
-            <span className="flex items-center gap-1 text-[10px] text-amber-400">
-              <AlertTriangle className="w-3 h-3" />
-              {lowR2Count} low R²
-            </span>
+            <div className="relative group flex items-center">
+              <span className="flex items-center gap-1 text-[10px] text-amber-400 cursor-help">
+                <AlertTriangle className="w-3 h-3" />
+                {lowR2Count} low R²
+              </span>
+              <div className="absolute bottom-full mb-2 right-0 w-48 bg-gray-900 border border-gray-700 text-gray-200 text-xs p-2 rounded shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 font-normal normal-case tracking-normal">
+                A low R² indicates the forecast model may not be statistically reliable for these areas.
+              </div>
+            </div>
           )}
           {!compact && (
             <button
@@ -874,23 +922,23 @@ export function ForecastComparisonCard({
               <tr className="text-gray-400 border-b border-white/[0.06]">
                 <th className="text-left py-1.5 pl-1">Region</th>
                 <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('baseline')}>
-                  <span className="inline-flex items-center gap-1">Base <SortIcon active={forecastSort.key === 'baseline'} asc={forecastSort.asc} /></span>
+                  <span className="inline-flex items-center gap-1">Score {renderSortIcon(forecastSort.key === 'baseline', forecastSort.asc)}</span>
                 </th>
                 <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('annualDelta')}>
-                  <span className="inline-flex items-center gap-1">Δ <SortIcon active={forecastSort.key === 'annualDelta'} asc={forecastSort.asc} /></span>
+                  <span className="inline-flex items-center gap-1">Δ {renderSortIcon(forecastSort.key === 'annualDelta', forecastSort.asc)}</span>
                 </th>
                 {!compact && (
                   <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('annualPct')}>
-                    <span className="inline-flex items-center gap-1">% <SortIcon active={forecastSort.key === 'annualPct'} asc={forecastSort.asc} /></span>
+                    <span className="inline-flex items-center gap-1">% {renderSortIcon(forecastSort.key === 'annualPct', forecastSort.asc)}</span>
                   </th>
                 )}
                 {!compact && (
                   <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('r2')}>
-                    <span className="inline-flex items-center gap-1">R² <SortIcon active={forecastSort.key === 'r2'} asc={forecastSort.asc} /></span>
+                    <span className="inline-flex items-center gap-1">R² {renderSortIcon(forecastSort.key === 'r2', forecastSort.asc)}</span>
                   </th>
                 )}
                 <th className="text-right py-1.5 pr-1 cursor-pointer hover:text-white" onClick={() => handleSort('forecast3yr')}>
-                  <span className="inline-flex items-center gap-1">3-Yr <SortIcon active={forecastSort.key === 'forecast3yr'} asc={forecastSort.asc} /></span>
+                  <span className="inline-flex items-center gap-1">3-Yr {renderSortIcon(forecastSort.key === 'forecast3yr', forecastSort.asc)}</span>
                 </th>
               </tr>
             </thead>
@@ -915,7 +963,17 @@ export function ForecastComparisonCard({
                   )}
                   {!compact && (
                     <td className={`py-1.5 text-right ${row.r2 < 0.4 ? 'text-amber-400 font-semibold' : 'text-gray-300'}`}>
-                      <span className="inline-flex items-center gap-1">{row.r2.toFixed(2)}{row.r2 < 0.4 && <AlertTriangle className="w-3 h-3" />}</span>
+                      <span className="inline-flex items-center gap-1">
+                        {row.r2.toFixed(2)}
+                        {row.r2 < 0.4 && (
+                          <div className="relative group flex items-center cursor-help">
+                            <AlertTriangle className="w-3 h-3" />
+                            <div className="absolute bottom-full mb-2 right-0 w-48 bg-gray-900 border border-gray-700 text-gray-200 text-xs p-2 rounded shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 font-normal text-left tracking-normal">
+                              A low R² indicates the forecast model may not be statistically reliable here.
+                            </div>
+                          </div>
+                        )}
+                      </span>
                     </td>
                   )}
                   <td className="py-1.5 pr-1 text-right text-gray-300">{formatMetricValue(metric, row.forecast3yr)}</td>

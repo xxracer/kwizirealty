@@ -67,36 +67,60 @@ export default function ReportPanel({
 
   const isPinned = (key: WindowType) => pinnedWindows.includes(key);
 
+  const top5ChartData = chartData.slice(0, 5);
+  const top5ForecastComparison = forecastComparison.slice(0, 5);
+
+  const exportPDF = async () => {
+    try {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const element = document.getElementById('report-panel-content');
+      if (!element) return;
+      
+      const opt = {
+        margin:       0.5,
+        filename:     'real-estate-report.pdf',
+        image:        { type: 'jpeg' as const, quality: 0.98 },
+        html2canvas:  { scale: 2, useCORS: true, backgroundColor: '#0f172a' },
+        jsPDF:        { unit: 'in' as const, format: 'letter' as const, orientation: 'portrait' as const }
+      };
+      
+      html2pdf().set(opt).from(element).save();
+    } catch (err) {
+      console.error('Failed to export PDF:', err);
+    }
+  };
+
   return (
     <motion.div
-      className="space-y-4 print:space-y-6 print:bg-white print:text-black"
+      id="report-panel-content"
+      className="space-y-4 bg-[#0f172a] p-4 rounded-xl"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5 }}
     >
       <motion.div
-        className="flex items-center justify-between print:mb-8"
+        className="flex items-center justify-between"
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.05 }}
       >
-        <div className="flex items-center gap-2 text-gray-400 print:text-black">
-          <BarChart3 className="w-4 h-4 text-blue-400 print:text-blue-800" />
-          <h2 className="text-xs font-bold uppercase tracking-wider print:text-lg">Detailed Market Report</h2>
+        <div className="flex items-center gap-2 text-gray-400">
+          <BarChart3 className="w-4 h-4 text-blue-400" />
+          <h2 className="text-xs font-bold uppercase tracking-wider">Detailed Market Report</h2>
         </div>
         <div className="flex items-center gap-4">
-          <div className="text-xs text-gray-500 print:text-gray-800 font-bold">{selectionSummary}</div>
+          <div className="text-xs text-gray-500 font-bold">{selectionSummary}</div>
           {onHide && (
             <button
               onClick={onHide}
-              className="text-xs text-gray-400 hover:text-white underline transition-colors print:hidden"
+              className="text-xs text-gray-400 hover:text-white underline transition-colors"
             >
               Hide report
             </button>
           )}
           <button
-            onClick={() => window.print()}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow print:hidden"
+            onClick={exportPDF}
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow"
             title="Export as PDF"
           >
             <Printer className="w-3.5 h-3.5" />
@@ -153,7 +177,7 @@ export default function ReportPanel({
         />
         <TopAreasCard
           metric={metric}
-          chartData={chartData}
+          chartData={top5ChartData}
           isLoading={isLoading}
           pinned={isPinned('top-areas')}
           onTogglePin={() => onToggleWindow?.('top-areas')}
@@ -163,7 +187,7 @@ export default function ReportPanel({
       {/* Forecast comparison */}
       <ForecastComparisonCard
         metric={metric}
-        forecastComparison={forecastComparison}
+        forecastComparison={top5ForecastComparison}
         boundary={boundary}
         isLoading={isLoading}
         pinned={isPinned('forecast-comparison')}

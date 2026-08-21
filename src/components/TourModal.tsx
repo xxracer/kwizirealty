@@ -74,7 +74,7 @@ const STEPS: TourStep[] = [
     title: 'Select on the map',
     description: 'Click any polygon to select it. With Multi-select checked you can add or remove areas one by one.',
     icon: <MousePointerClick className="w-6 h-6 text-pink-400" />,
-    placement: 'bottom',
+    placement: 'center',
   },
   {
     target: '[data-tour="map-windows"]',

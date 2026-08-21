@@ -7,6 +7,7 @@ import TourModal from '@/components/TourModal';
 import AccountModal from '@/components/AccountModal';
 import CollapsibleFilterSection from '@/components/CollapsibleFilterSection';
 import DraggableMapWindows, { WindowSelector, useDraggableWindows } from '@/components/DraggableMapWindows';
+import HommieChat from '@/components/HommieChat';
 import {
   PropertyData,
   BoundaryKey,
@@ -16,6 +17,10 @@ import {
   engine,
   cleanBoundaryName,
 } from '@/lib/engine';
+import { db } from '@/lib/firebase';
+import { collection, query, where, getDocs, limit } from 'firebase/firestore';
+import type { AdCampaign } from '@/components/admin/AdminAds';
+import { motion, AnimatePresence } from 'framer-motion';
 import dynamic from 'next/dynamic';
 import {
   Search,
@@ -62,6 +67,7 @@ const BOUNDARIES: { key: BoundaryKey; name: string; short: string; premium?: boo
   { key: 'zipcodes', name: 'Zip Codes', short: 'Zip Codes', premium: false },
   { key: 'highschools', name: 'School Districts', short: 'Districts', premium: true },
   { key: 'elementary', name: 'Elementary', short: 'Elementary', premium: true },
+  { key: 'areas', name: 'Custom Areas', short: 'Custom', premium: false },
   { key: 'middle', name: 'Middle Schools', short: 'Middle', premium: true },
   { key: 'neighborhoods', name: 'Neighborhoods', short: 'Neighborhoods', premium: true },
 ];
@@ -166,6 +172,32 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
+const FilterSection = ({
+  icon,
+  title,
+  children,
+  className = '',
+  defaultOpen = true,
+  dataTour,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  children: React.ReactNode;
+  className?: string;
+  defaultOpen?: boolean;
+  dataTour?: string;
+}) => (
+  <CollapsibleFilterSection
+    icon={icon}
+    title={title}
+    className={className}
+    defaultOpen={defaultOpen}
+    dataTour={dataTour}
+  >
+    {children}
+  </CollapsibleFilterSection>
+);
+
 export default function MapPage() {
   const [boundary, setBoundary] = useState<BoundaryKey>('subdivisions');
   const [metric, setMetric] = useState<MetricKey>('Close Price');
@@ -177,6 +209,7 @@ export default function MapPage() {
   const [reportProgress, setReportProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [reportGeneration, setReportGeneration] = useState(0);
+  const [showReportModal, setShowReportModal] = useState(false);
 
   const [initialMetrics, setInitialMetrics] = useState<
     Partial<Record<BoundaryKey, { values: Record<string, number>; counts: Record<string, number> }>> | null
@@ -186,6 +219,7 @@ export default function MapPage() {
 
   const [layerSales, setLayerSales] = useState(false);
   const [layerRentals, setLayerRentals] = useState(false);
+  const [layerFlood, setLayerFlood] = useState(false);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [multiSelect, setMultiSelect] = useState(false);
@@ -201,15 +235,30 @@ export default function MapPage() {
   const [customMin, setCustomMin] = useState<number>(0);
   const [customMax, setCustomMax] = useState<number>(0);
   const [fillOpacity] = useState(0.50);
-  const [showChatbot, setShowChatbot] = useState(false);
+
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [accountModalMode, setAccountModalMode] = useState<'account' | 'save'>('account');
 
   const { active: activeWindows, setActive: setActiveWindows } = useDraggableWindows();
+  const [activeAd, setActiveAd] = useState<AdCampaign | null>(null);
+  const [showAd, setShowAd] = useState(true);
+
+  useEffect(() => {
+    const fetchAd = async () => {
+      try {
+        const q = query(collection(db, 'ads'), where('status', '==', 'active'), limit(1));
+        const snapshot = await getDocs(q);
+        if (!snapshot.empty) {
+          setActiveAd({ id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as AdCampaign);
+        }
+      } catch (err) {
+        console.error('Error fetching ad', err);
+      }
+    };
+    fetchAd();
+  }, []);
 
   const isMobile = useMediaQuery('(max-width: 1024px)');
-
-
   const loadMetricsForBoundary = useCallback(
     async (key: BoundaryKey) => {
       if (initialMetrics?.[key]) return;
@@ -274,12 +323,6 @@ export default function MapPage() {
     setReportProgress(null);
     setReportError(null);
   }, [boundary]);
-
-  useEffect(() => {
-    if (reportGenerated && reportRef.current) {
-      reportRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, [reportGenerated]);
 
   const filteredData = useMemo(() => {
     if (reportPhase !== 'ready') return [];
@@ -351,7 +394,9 @@ export default function MapPage() {
 
   const forecastComparison = useMemo(() => {
     if (!dataReady) return [];
-    return engine.getForecastForSelection(filteredData, boundary, metric, selectedIds);
+    const full = engine.getForecastForSelection(filteredData, boundary, metric, selectedIds);
+    // Sort by baseline descending to get the top 5 areas
+    return full.sort((a, b) => b.baseline - a.baseline).slice(0, 5);
   }, [filteredData, boundary, metric, selectedIds, dataReady]);
 
   const chartData = useMemo(() => {
@@ -360,7 +405,7 @@ export default function MapPage() {
       .filter(([k]) => selectedIds.length === 0 || selectedIds.includes(k))
       .map(([name, value]) => ({ name: cleanBoundaryName(name), value }))
       .sort((a, b) => b.value - a.value)
-      .slice(0, 10);
+      .slice(0, 5);
   }, [metricValues, selectedIds, dataReady]);
 
   const yearBuiltData = useMemo(() => {
@@ -411,20 +456,30 @@ export default function MapPage() {
       return;
     }
     const q = searchQuery.trim().toUpperCase();
-    const matches = filteredData
-      .filter((d) => {
-        const pid = engine.getBoundaryKey(boundary, d);
-        return (
-          pid.includes(q) ||
-          d.address.toUpperCase().includes(q) ||
-          d.zip.includes(q) ||
-          d.city.toUpperCase().includes(q)
-        );
-      })
-      .map((d) => engine.getBoundaryKey(boundary, d));
+    
+    // First, try searching through the currently loaded properties (if a report is generated)
+    let matches: string[] = [];
+    if (filteredData.length > 0) {
+      matches = filteredData
+        .filter((d) => {
+          const pid = engine.getBoundaryKey(boundary, d);
+          return (
+            pid.includes(q) ||
+            d.address.toUpperCase().includes(q) ||
+            d.zip.includes(q) ||
+            d.city.toUpperCase().includes(q)
+          );
+        })
+        .map((d) => engine.getBoundaryKey(boundary, d));
+    } else {
+      // If no properties loaded, search the boundary names directly
+      const availableKeys = Object.keys(initialMetrics?.[boundary]?.values || {});
+      matches = availableKeys.filter(k => k.toUpperCase().includes(q));
+    }
+    
     const unique = Array.from(new Set(matches));
     setSelectedIds(unique);
-  }, [searchQuery, filteredData, boundary]);
+  }, [searchQuery, filteredData, boundary, initialMetrics]);
 
   const uniquePropertyTypes = useMemo(() => engine.getUniqueValues('propertyType'), [reportGeneration]);
   const uniqueCities = useMemo(() => engine.getUniqueValues('city').slice(0, 120), [reportGeneration]);
@@ -459,6 +514,31 @@ export default function MapPage() {
     setActiveWindows([]);
   }, [setActiveWindows]);
 
+  const handleAreaSelectFromChat = useCallback((queries: string[]) => {
+    if (!queries || queries.length === 0) return;
+    
+    // Convert to lowercase for fuzzy matching
+    const normalizedQueries = queries.map(q => q.toLowerCase().trim());
+    const matchedIds: string[] = [];
+
+    // Search through effectiveNameMap
+    Object.entries(effectiveNameMap).forEach(([id, name]) => {
+      const normalizedName = name.toLowerCase();
+      // If the feature name includes the query or vice-versa
+      const isMatch = normalizedQueries.some(q => 
+        normalizedName.includes(q) || q.includes(normalizedName)
+      );
+      if (isMatch) {
+        matchedIds.push(id);
+      }
+    });
+
+    if (matchedIds.length > 0) {
+      // Add the matched IDs to the current selection, without duplicating
+      setSelectedIds(prev => Array.from(new Set([...prev, ...matchedIds])));
+    }
+  }, [effectiveNameMap]);
+
   const generateReport = useCallback(() => {
     if (reportPhase === 'loading') return;
     if (selectedIds.length === 0) {
@@ -466,16 +546,17 @@ export default function MapPage() {
       setTimeout(() => setReportError(null), 4000);
       return;
     }
-    setReportGenerated(true);
     setReportPhase('loading');
     setReportError(null);
     setReportProgress(null);
+    setShowReportModal(true);
     engine
       .loadDataForSelection(boundary, selectedIds, (loaded, total) => setReportProgress({ loaded, total }))
       .then((result) => {
         if (result.ok) {
           setReportPhase('ready');
           setReportGeneration((g) => g + 1);
+          setReportGenerated(true);
         } else {
           setReportPhase('error');
           setReportError(result.error || 'Could not load report data.');
@@ -532,31 +613,7 @@ export default function MapPage() {
     </button>
   );
 
-  const FilterSection = ({
-    icon,
-    title,
-    children,
-    className = '',
-    defaultOpen = true,
-    dataTour,
-  }: {
-    icon: React.ReactNode;
-    title: string;
-    children: React.ReactNode;
-    className?: string;
-    defaultOpen?: boolean;
-    dataTour?: string;
-  }) => (
-    <CollapsibleFilterSection
-      icon={icon}
-      title={title}
-      className={className}
-      defaultOpen={defaultOpen}
-      dataTour={dataTour}
-    >
-      {children}
-    </CollapsibleFilterSection>
-  );
+
 
   const RangeControl = ({
     label,
@@ -797,32 +854,38 @@ export default function MapPage() {
 
           {/* Metric */}
           <FilterSection icon={<BarChart3 className="w-4 h-4 text-emerald-400" />} title="Market Metric" defaultOpen={false} dataTour="metric">
-            <select
-              value={metric}
-              onChange={(e) => setMetric(e.target.value as MetricKey)}
-              className="w-full bg-white/5 border border-white/[0.06] text-white text-sm rounded-xl px-3 py-2.5 outline-none focus:border-blue-500 appearance-none"
-            >
-              {METRICS.map((m) => (
-                <option key={m.key} value={m.key} className="bg-[#121620]">
-                  {m.label}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <select
+                value={metric}
+                onChange={(e) => setMetric(e.target.value as MetricKey)}
+                className="w-full bg-white/5 border border-white/[0.06] text-white text-sm rounded-xl px-3 py-2.5 pr-10 outline-none focus:border-blue-500 appearance-none"
+              >
+                {METRICS.map((m) => (
+                  <option key={m.key} value={m.key} className="bg-[#121620]">
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            </div>
           </FilterSection>
 
           {/* Period */}
           <FilterSection icon={<CalendarDays className="w-4 h-4 text-amber-400" />} title="Close Period" defaultOpen={false}>
-            <select
-              value={filters.period}
-              onChange={(e) => handleFilterChange('period', e.target.value as PropertyFilters['period'])}
-              className="w-full bg-white/5 border border-white/[0.06] text-white text-sm rounded-xl px-3 py-2.5 outline-none focus:border-blue-500 appearance-none"
-            >
-              {PERIODS.map((p) => (
-                <option key={p.key} value={p.key} className="bg-[#121620]">
-                  {p.label}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <select
+                value={filters.period}
+                onChange={(e) => handleFilterChange('period', e.target.value as PropertyFilters['period'])}
+                className="w-full bg-white/5 border border-white/[0.06] text-white text-sm rounded-xl px-3 py-2.5 pr-10 outline-none focus:border-blue-500 appearance-none"
+              >
+                {PERIODS.map((p) => (
+                  <option key={p.key} value={p.key} className="bg-[#121620]">
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            </div>
           </FilterSection>
 
           {/* Quick property filters */}
@@ -941,20 +1004,14 @@ export default function MapPage() {
                 <div>
                   <span className="text-[10px] font-bold uppercase text-gray-400 block mb-1.5">Property Type</span>
                   <select
-                    multiple
-                    value={filters.propertyTypes}
-                    onChange={(e) => {
-                      const opts = Array.from(e.target.selectedOptions).map((o) => o.value);
-                      handleFilterChange('propertyTypes', opts);
-                    }}
-                    className="w-full bg-white/5 border border-white/[0.06] text-white text-xs rounded-lg px-2 py-1.5 outline-none"
-                    size={Math.min(4, uniquePropertyTypes.length || 1)}
+                    value="Single Family, Free Standing"
+                    disabled
+                    onChange={() => {}}
+                    className="w-full bg-white/5 border border-white/[0.06] text-white text-xs rounded-lg px-2 py-1.5 outline-none opacity-50 cursor-not-allowed"
                   >
-                    {uniquePropertyTypes.map((t) => (
-                      <option key={t} value={t} className="bg-[#121620]">
-                        {t}
-                      </option>
-                    ))}
+                    <option value="Single Family, Free Standing" className="bg-[#121620]">
+                      Single Family, Free Standing
+                    </option>
                   </select>
                 </div>
                 <div>
@@ -1163,6 +1220,17 @@ export default function MapPage() {
                 <Building className="w-4 h-4 text-orange-400" />
                 <span className="text-sm font-semibold">Est. Rentals</span>
               </button>
+              <button
+                onClick={() => setLayerFlood(!layerFlood)}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-all ${
+                  layerFlood
+                    ? 'bg-white/15 border-white/20 text-white'
+                    : 'bg-black/40 border-white/[0.06] text-gray-400 hover:bg-white/10'
+                }`}
+              >
+                <MapPin className="w-4 h-4 text-blue-400" />
+                <span className="text-sm font-semibold">Flood Zones</span>
+              </button>
             </div>
           </FilterSection>
 
@@ -1225,6 +1293,55 @@ export default function MapPage() {
                     visible={reportGenerated && selectedIds.length > 0}
                     isLoading={!dataReady}
                     onClose={(key) => setActiveWindows(activeWindows.filter((k) => k !== key))}
+                    onSet90Days={() => handleFilterChange('period', '90d')}
+                    is90Days={filters.period === '90d'}
+                  />
+
+                  <AnimatePresence>
+                    {activeAd && showAd && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 20, scale: 0.95 }}
+                        transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+                        className="fixed bottom-6 left-6 z-[100] w-64 md:w-72 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50"
+                      >
+                        <button
+                          onClick={() => setShowAd(false)}
+                          className="absolute top-2 right-2 z-10 p-1 bg-black/50 hover:bg-black/80 rounded-full text-white backdrop-blur-sm transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                        <a href={activeAd.targetUrl} target="_blank" rel="noreferrer" className="block relative aspect-video bg-black group">
+                          {activeAd.mediaType === 'video' ? (
+                            <video src={activeAd.mediaUrl} className="w-full h-full object-cover" muted loop autoPlay playsInline />
+                          ) : (
+                            <img src={activeAd.mediaUrl} alt={activeAd.title} className="w-full h-full object-cover" />
+                          )}
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-4">
+                            <span className="text-white text-sm font-bold truncate drop-shadow-md">
+                              {activeAd.title}
+                            </span>
+                          </div>
+                        </a>
+                        <div className="bg-slate-900 px-4 py-2 flex items-center justify-between">
+                          <span className="text-xs text-slate-400 font-medium">Sponsored</span>
+                          <a href={activeAd.targetUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300 font-bold transition-colors">
+                            Learn More
+                          </a>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <HommieChat
+                    boundary={boundary}
+                    metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
+                    reportStats={reportStats}
+                    marketHealth={marketHealth}
+                    selectedIds={selectedIds}
+                    onAreaSelect={handleAreaSelectFromChat}
+                    onGenerateReport={generateReport}
                   />
                   <MapComponent
                     boundary={boundary}
@@ -1238,7 +1355,7 @@ export default function MapPage() {
                     rawData={filteredData}
                     showSales={layerSales}
                     showRentals={layerRentals}
-                    showFlood={false}
+                    showFlood={layerFlood}
                     metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
                     fillOpacity={fillOpacity}
                     onClear={() => setSelectedIds([])}
@@ -1284,35 +1401,17 @@ export default function MapPage() {
       <TourModal open={showTour} onClose={() => setShowTour(false)} />
       <AccountModal open={showAccountModal} onClose={() => setShowAccountModal(false)} mode={accountModalMode} />
 
-      {/* AI Chatbot Floating Button */}
-      <div data-tour="chat" className="fixed bottom-6 right-6 z-[1001] flex flex-col items-end print:hidden">
-        {showChatbot && (
-          <div className="mb-4 w-80 h-96 bg-[#1a1f2e] border border-white/[0.06] rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in slide-in-from-bottom-5">
-            <div className="bg-blue-600 p-4 flex items-center justify-between">
-              <span className="text-white font-bold text-sm">Kwizi AI Assistant</span>
-              <button onClick={() => setShowChatbot(false)} className="text-white/80 hover:text-white">&times;</button>
-            </div>
-            <div className="flex-1 p-4 flex flex-col justify-center items-center text-center text-gray-400 gap-3">
-              <MessageSquare className="w-8 h-8 opacity-50" />
-              <p className="text-sm">I can help you filter areas, find trends, and build reports.</p>
-              <span className="text-xs bg-white/5 px-3 py-1 rounded-full border border-white/[0.06]">Coming Soon</span>
-            </div>
-            <div className="p-3 bg-[#121620] border-t border-white/[0.06]">
-              <input
-                disabled
-                type="text"
-                placeholder="Ask a question..."
-                className="w-full bg-[#1a1f2e] border border-white/[0.06] rounded-lg px-3 py-2 text-sm text-white opacity-50 cursor-not-allowed"
-              />
-            </div>
-          </div>
-        )}
-        <button
-          onClick={() => setShowChatbot(!showChatbot)}
-          className="bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full shadow-2xl transition-transform hover:scale-110 flex items-center justify-center"
-        >
-          <MessageSquare className="w-6 h-6" />
-        </button>
+      {/* Floating Chatbot / Assistant */}
+      <div className="print:hidden">
+        <HommieChat
+          boundary={boundary}
+          metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
+          reportStats={reportStats}
+          marketHealth={marketHealth}
+          selectedIds={selectedIds}
+          onAreaSelect={handleAreaSelectFromChat}
+          onGenerateReport={generateReport}
+        />
       </div>
     </div>
   );

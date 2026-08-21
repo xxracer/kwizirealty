@@ -52,7 +52,8 @@ export type BoundaryKey =
   | 'highschools'
   | 'elementary'
   | 'middle'
-  | 'neighborhoods';
+  | 'neighborhoods'
+  | 'areas';
 
 export type MetricKey =
   | 'Close Price'
@@ -1368,6 +1369,9 @@ export class RealEstateEngine {
       case 'middle':
         key = item.middle;
         break;
+      case 'areas':
+        key = item.area;
+        break;
       default:
         key = item.subdivisions;
     }
@@ -1689,7 +1693,7 @@ export class RealEstateEngine {
     baseline: number;
     forecast3yr: number;
   } | null {
-    if (!ts || ts.length < 6) return null;
+    if (!ts || ts.length < 3) return null;
     const x = ts.map((_, i) => i);
     const y = ts.map((d) => d.value);
     const { slope, intercept, r2 } = this.linearRegression(x, y);

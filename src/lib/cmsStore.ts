@@ -16,7 +16,8 @@ export type CMSFileCategory =
   | 'school-elementary'
   | 'school-middle'
   | 'school-high'
-  | 'boundary';
+  | 'boundary'
+  | 'custom-area';
 
 export interface CMSFileRecord {
   id: string;

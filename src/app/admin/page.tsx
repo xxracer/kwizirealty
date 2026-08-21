@@ -12,6 +12,8 @@ import {
   type CMSFileCategory,
 } from '@/lib/cmsStore';
 import { engine, type BoundaryKey, type MetricKey, type PropertyData } from '@/lib/engine';
+import { AdminAds } from '@/components/admin/AdminAds';
+import { AdminUsers } from '@/components/admin/AdminUsers';
 import {
   Upload,
   FileSpreadsheet,
@@ -40,9 +42,11 @@ import {
   ChevronRight,
   Plus,
   ChevronDown,
+  Megaphone,
+  Users,
 } from 'lucide-react';
 
-type AdminSection = 'dashboard' | 'sales' | 'rent' | 'current' | 'tax' | 'schools' | 'boundaries' | 'areas';
+type AdminSection = 'dashboard' | 'sales' | 'rent' | 'current' | 'tax' | 'schools' | 'boundaries' | 'areas' | 'ads' | 'users';
 type DataTab = 'upload' | 'edit';
 type PropertyEditMode = 'edit' | 'create';
 
@@ -92,6 +96,8 @@ const SECTIONS: { id: AdminSection; label: string; icon: React.ReactNode; desc: 
   { id: 'tax', label: 'Tax Records', icon: <FileText className="w-4 h-4" />, desc: 'Assessed values & taxes' },
   { id: 'schools', label: 'School Ratings', icon: <School className="w-4 h-4" />, desc: 'TEA scores' },
   { id: 'areas', label: 'Area Metrics', icon: <Layers className="w-4 h-4" />, desc: 'Manual overrides' },
+  { id: 'ads', label: 'Ads Campaigns', icon: <Megaphone className="w-4 h-4" />, desc: 'Manage advertisements' },
+  { id: 'users', label: 'System Users', icon: <Users className="w-4 h-4" />, desc: 'Manage access' },
 ];
 
 interface SectionConfig {
@@ -103,7 +109,7 @@ interface SectionConfig {
   fileHint: string;
 }
 
-const SECTION_CONFIG: Record<Exclude<AdminSection, 'dashboard' | 'areas'>, SectionConfig> = {
+const SECTION_CONFIG: Record<Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, SectionConfig> = {
   sales: {
     title: 'Sales Data',
     subtitle: 'Manage sold property records.',
@@ -176,12 +182,23 @@ const SECTION_CONFIG: Record<Exclude<AdminSection, 'dashboard' | 'areas'>, Secti
     category: 'boundary',
     fileHint: 'Zip.geojson, Houston_ISD.geojson, etc.',
   },
+  areas: {
+    title: 'Custom Areas',
+    subtitle: 'Manage custom area GeoJSON boundary files.',
+    whatItModifies: [
+      'Custom polygons drawn on the map',
+      'Area metrics for custom areas',
+    ],
+    requiredColumns: [],
+    category: 'custom-area',
+    fileHint: 'Custom_Areas.geojson',
+  },
 };
 
 interface StagedFile {
   id: string;
   file: File;
-  section: Exclude<AdminSection, 'dashboard' | 'areas'>;
+  section: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>;
   record: CMSFileRecord;
   stats: {
     total: number;
@@ -261,7 +278,7 @@ function validateHeaders(headers: string[] | undefined, required: string[]): { v
   return { valid: missing.length === 0, missing };
 }
 
-function getDedupeColumns(section: Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>): string[] {
+function getDedupeColumns(section: Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries' | 'ads' | 'users'>): string[] {
   switch (section) {
     case 'sales':
     case 'rent':
@@ -288,7 +305,7 @@ function makeEngineDedupeKey(d: PropertyData): string {
 }
 
 async function buildDedupeKeySet(
-  section: Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>,
+  section: Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries' | 'ads' | 'users'>,
   eng: ReturnType<typeof getEngine>,
   includeUploadedFiles = true
 ): Promise<Set<string>> {
@@ -303,11 +320,13 @@ async function buildDedupeKeySet(
   }
 
   if (includeUploadedFiles) {
-    const config = SECTION_CONFIG[section];
-    const cats = Array.isArray(config.category) ? config.category : [config.category];
-    const existingRows = await cmsStore.getUploadedRowsByCategories(cats);
-    for (const row of existingRows) {
-      set.add(makeDedupeKey(row, columns));
+    const config = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
+    if (config) {
+      const cats = Array.isArray(config.category) ? config.category : [config.category];
+      const existingRows = await cmsStore.getUploadedRowsByCategories(cats);
+      for (const row of existingRows) {
+        set.add(makeDedupeKey(row, columns));
+      }
     }
   }
 
@@ -509,12 +528,12 @@ export default function AdminPage() {
     setSchoolScore('');
   }, [section]);
 
-  const handleFiles = async (fileList: FileList | null, section: Exclude<AdminSection, 'dashboard' | 'areas'>) => {
+  const handleFiles = async (fileList: FileList | null, section: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>) => {
     if (!fileList?.length) return;
     setProcessing(true);
 
-    const config = SECTION_CONFIG[section];
-    const categories = Array.isArray(config.category) ? config.category : [config.category];
+    const config = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
+    const categories = config ? (Array.isArray(config.category) ? config.category : [config.category]) : [];
 
     const eng = getEngine();
     if (!eng.isLoaded) {
@@ -525,14 +544,14 @@ export default function AdminPage() {
       }
     }
 
-    const dataSection = section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>;
+    const dataSection = section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries' | 'ads' | 'users'>;
     const baseKeySet =
-      section !== 'boundaries'
+      section !== 'boundaries' && section !== 'areas'
         ? await buildDedupeKeySet(dataSection, getEngine(), section === 'tax' || section === 'schools')
         : new Set<string>();
 
     for (const s of stagedFiles) {
-      if (s.section !== section || section === 'boundaries') continue;
+      if (s.section !== section || section === 'boundaries' || section === 'areas') continue;
       const columns = getDedupeColumns(dataSection);
       for (const row of s.record.rows) {
         baseKeySet.add(makeDedupeKey(row, columns));
@@ -543,7 +562,7 @@ export default function AdminPage() {
     const batchKeySet = new Set<string>();
 
     for (const file of Array.from(fileList)) {
-      if (section === 'boundaries') {
+      if (section === 'boundaries' || section === 'areas') {
         if (!file.name.toLowerCase().endsWith('.geojson') && !file.name.toLowerCase().endsWith('.json')) {
           setToast({ type: 'error', message: `${file.name} is not a GeoJSON file.` });
           continue;
@@ -559,7 +578,7 @@ export default function AdminPage() {
             id,
             name: file.name,
             size: file.size,
-            category: 'boundary',
+            category: section === 'areas' ? 'custom-area' : 'boundary',
             rows: [],
             headers: [],
             uploadedAt: Date.now(),
@@ -674,7 +693,7 @@ export default function AdminPage() {
     const existingFile = files.find((f) => f.name === staged.record.name);
     let rowsToSave = staged.record.rows;
 
-    const dataSection = staged.section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries'>;
+    const dataSection = staged.section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries' | 'ads' | 'users'>;
     const columns = getDedupeColumns(dataSection);
     if (existingFile && columns.length) {
       const existingFull = await cmsStore.getFile(existingFile.id);
@@ -696,7 +715,7 @@ export default function AdminPage() {
       rows: rowsToSave,
       rawContent,
       size: new Blob([rawContent]).size,
-      rowCount: staged.record.category === 'boundary' ? 0 : rowsToSave.length,
+      rowCount: staged.record.category === 'boundary' || staged.record.category === 'custom-area' ? 0 : rowsToSave.length,
     };
 
     try {
@@ -884,8 +903,10 @@ export default function AdminPage() {
   };
 
   const sectionFiles = useMemo(() => {
-    if (section === 'dashboard' || section === 'areas') return [];
-    const config = SECTION_CONFIG[section];
+    if (section === 'dashboard' || section === 'ads' || section === 'users') return [];
+    if (section === 'areas') return files.filter((f) => f.category === 'custom-area');
+    const config = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
+    if (!config) return [];
     const cats = Array.isArray(config.category) ? config.category : [config.category];
     return files.filter((f) => cats.includes(f.category));
   }, [files, section]);
@@ -1011,8 +1032,8 @@ export default function AdminPage() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    if (section !== 'dashboard' && section !== 'areas') {
-      handleFiles(e.dataTransfer.files, section);
+    if (section !== 'dashboard' && section !== 'ads' && section !== 'users') {
+      handleFiles(e.dataTransfer.files, section as Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>);
     }
   };
 
@@ -1038,7 +1059,7 @@ export default function AdminPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {SECTIONS.filter((s) => s.id !== 'dashboard').map((s) => {
-          const config = s.id === 'areas' ? null : SECTION_CONFIG[s.id as Exclude<AdminSection, 'dashboard' | 'areas'>];
+          const config = SECTION_CONFIG[s.id as Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>];
           const count = config
             ? files.filter((f) => (Array.isArray(config.category) ? config.category.includes(f.category) : f.category === config.category)).length
             : overrides.length;
@@ -1579,7 +1600,7 @@ export default function AdminPage() {
     </div>
   );
 
-  const renderDataSection = (key: Exclude<AdminSection, 'dashboard' | 'areas'>) => {
+  const renderDataSection = (key: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>) => {
     const config = SECTION_CONFIG[key];
 
     return (
@@ -1660,12 +1681,14 @@ export default function AdminPage() {
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept=".csv"
+                      accept={key === 'boundaries' || key === 'areas' ? '.geojson,.json' : '.csv'}
                       multiple
                       className="hidden"
                       onChange={(e) => handleFiles(e.target.files, key)}
                     />
-                    <div className="text-[10px] text-gray-500">Duplicate rows are detected and skipped; only new rows are uploaded.</div>
+                    <div className="text-[10px] text-gray-500">
+                      {key === 'boundaries' || key === 'areas' ? 'GeoJSON features will be loaded directly.' : 'Duplicate rows are detected and skipped; only new rows are uploaded.'}
+                    </div>
                   </div>
                   {processing && (
                     <div className="mt-4 flex items-center gap-2 text-xs text-blue-400">
@@ -1825,156 +1848,7 @@ export default function AdminPage() {
     );
   };
 
-  const renderAreas = () => (
-    <div className="space-y-6">
-      <div className="bg-gradient-to-r from-purple-900/20 to-transparent border border-purple-500/20 rounded-2xl p-5">
-        <h2 className="text-lg font-bold text-white mb-1">Area Metrics — Manual Override</h2>
-        <p className="text-sm text-gray-400 mb-4">
-          Override any computed value for a ZIP code, subdivision, or school boundary. Use this when you want a specific number on the map without editing the underlying CSVs.
-        </p>
-        <div className="grid md:grid-cols-2 gap-4">
-          <div className="bg-background/60 rounded-xl p-4">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-purple-400 mb-3">This changes on the map</h3>
-            <ul className="space-y-2">
-              {[
-                'Median close price for a ZIP',
-                'Median price per sqft for a subdivision',
-                'School ETA score for a boundary',
-                'Investor index or appreciation rate',
-              ].map((item, i) => (
-                <li key={i} className="text-sm text-gray-300 flex items-start gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-purple-500 mt-1.5 shrink-0" />
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="bg-background/60 rounded-xl p-4 flex flex-col justify-center">
-            <p className="text-sm text-gray-300">
-              Pick a boundary, pick the metric you want to change, and enter the new value. The map updates immediately.
-            </p>
-          </div>
-        </div>
-      </div>
 
-      <div className="grid lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1">
-          <div className="bg-surface border border-border-subtle rounded-2xl p-5 sticky top-4">
-            <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
-              <SlidersHorizontal className="w-4 h-4" /> New Override
-            </h3>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-medium text-gray-400 block mb-1.5">Boundary type</label>
-                <select
-                  value={overrideBoundary}
-                  onChange={(e) => {
-                    setOverrideBoundary(e.target.value as BoundaryKey);
-                    setOverrideBoundaryId('');
-                  }}
-                  className="w-full bg-background border border-border-subtle rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
-                >
-                  {BOUNDARY_OPTIONS.map((b) => (
-                    <option key={b.value} value={b.value}>{b.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-medium text-gray-400 block mb-1.5">Boundary ID / name</label>
-                <input
-                  list="boundary-options"
-                  value={overrideBoundaryId}
-                  onChange={(e) => setOverrideBoundaryId(e.target.value)}
-                  placeholder={overrideBoundary === 'zipcodes' ? 'e.g. 77042' : 'e.g. ASHFORD COVE'}
-                  className="w-full bg-background border border-border-subtle rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                />
-                <datalist id="boundary-options">
-                  {boundaryValueOptions.map((v) => (
-                    <option key={v} value={v} />
-                  ))}
-                </datalist>
-              </div>
-              <div>
-                <label className="text-xs font-medium text-gray-400 block mb-1.5">Metric to change</label>
-                <select
-                  value={overrideMetric}
-                  onChange={(e) => setOverrideMetric(e.target.value as MetricKey)}
-                  className="w-full bg-background border border-border-subtle rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
-                >
-                  {METRIC_OPTIONS.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-medium text-gray-400 block mb-1.5">New value</label>
-                <input
-                  type="number"
-                  value={overrideValue}
-                  onChange={(e) => setOverrideValue(e.target.value)}
-                  placeholder="New median value"
-                  className="w-full bg-background border border-border-subtle rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-gray-400 block mb-1.5">Note (optional)</label>
-                <input
-                  value={overrideNote}
-                  onChange={(e) => setOverrideNote(e.target.value)}
-                  placeholder="Why this override exists"
-                  className="w-full bg-background border border-border-subtle rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                />
-              </div>
-              <button
-                onClick={handleSaveOverride}
-                className="w-full bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg font-semibold text-sm transition-all flex items-center justify-center gap-2"
-              >
-                <Save className="w-4 h-4" /> Save Override
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="lg:col-span-2">
-          <div className="bg-surface border border-border-subtle rounded-2xl p-5">
-            <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
-              <SlidersHorizontal className="w-4 h-4" /> Active Overrides
-            </h3>
-            {overrides.length === 0 ? (
-              <div className="text-sm text-gray-500 py-8 text-center bg-background/40 rounded-xl border border-border-subtle">
-                No manual overrides yet.
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-[600px] overflow-auto pr-1">
-                {overrides.map((o) => (
-                  <div key={o.id} className="bg-background border border-border-subtle rounded-xl p-3 flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-white">
-                        {BOUNDARY_OPTIONS.find((b) => b.value === o.boundary)?.label || o.boundary}{' '}
-                        <span className="text-purple-400">{o.boundaryId}</span>
-                      </div>
-                      <div className="text-[10px] text-gray-400">
-                        {METRIC_OPTIONS.find((m) => m.value === o.metric)?.label || o.metric}: {' '}
-                        <span className="text-white font-medium">{formatNumber(o.value)}</span>
-                        {o.note ? ` · ${o.note}` : ''}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteOverride(o.id)}
-                      className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors shrink-0"
-                      title="Remove override"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 
   return (
     <div className="min-h-screen bg-background text-white flex font-sans">
@@ -2043,12 +1917,9 @@ export default function AdminPage() {
             ) : (
               <>
                 {section === 'dashboard' && renderDashboard()}
-                {section === 'sales' && renderDataSection('sales')}
-                {section === 'rent' && renderDataSection('rent')}
-                {section === 'current' && renderDataSection('current')}
-                {section === 'tax' && renderDataSection('tax')}
-                {section === 'schools' && renderDataSection('schools')}
-                {section === 'areas' && renderAreas()}
+                {section !== 'dashboard' && section !== 'ads' && section !== 'users' && renderDataSection(section as Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>)}
+                {section === 'ads' && <AdminAds />}
+                {section === 'users' && <AdminUsers />}
               </>
             )}
           </div>

@@ -10,12 +10,15 @@
     "prebuild": "node scripts/download-boundaries.js && node scripts/download-chunked-cache.js && node scripts/build-initial-metrics.js"
   },
   "dependencies": {
+    "@ai-sdk/google": "^0.0.26",
     "@turf/turf": "^7.3.5",
     "@types/leaflet": "^1.9.21",
+    "ai": "^3.4.15",
     "dotenv": "^17.4.2",
     "firebase": "^12.16.0",
     "firebase-admin": "^14.2.0",
     "framer-motion": "^12.43.0",
+    "html2pdf.js": "^0.14.0",
     "leaflet": "^1.9.4",
     "leaflet-draw": "^1.0.4",
     "lucide-react": "^1.27.0",

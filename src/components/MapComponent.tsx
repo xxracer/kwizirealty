@@ -5,7 +5,7 @@ import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import * as turf from '@turf/turf';
 import { PropertyData, BoundaryKey, engine, cleanBoundaryName, cleanSchoolName } from '@/lib/engine';
-import { MousePointer2, Square, Scissors, Trash2, BarChart3, Loader2 } from 'lucide-react';
+import { MousePointer2, Square, PenTool, Trash2, BarChart3, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
 
@@ -16,6 +16,7 @@ const BOUNDARY_SOURCES: Record<BoundaryKey, string> = {
   elementary: 'Elementary School ISD.geojson',
   middle: 'Middle School ISD.geojson',
   neighborhoods: 'Mapped Subdivisions.geojson',
+  areas: '',
 };
 
 const BOUNDARY_KEYS: BoundaryKey[] = [
@@ -199,6 +200,7 @@ export default function MapComponent({
   rawData,
   showSales,
   showRentals,
+  showFlood,
   metricLabel,
   fillOpacity,
   onClear,
@@ -211,6 +213,7 @@ export default function MapComponent({
   const areaLayerRef = useRef<L.GeoJSON | null>(null);
   const salesLayerRef = useRef<L.GeoJSON | null>(null);
   const rentalsLayerRef = useRef<L.GeoJSON | null>(null);
+  const floodLayerRef = useRef<L.TileLayer.WMS | null>(null);
   const popupRef = useRef<L.Popup | null>(null);
   const areaFeaturesRef = useRef<GeoJSON.Feature[]>([]);
   const boundsSetRef = useRef(false);
@@ -603,42 +606,62 @@ export default function MapComponent({
 
     // --- Lasso select ---
     let lassoPoints: L.LatLng[] = [];
-    let lassoLayer: L.Polygon | null = null;
+    let lassoLayer: L.Polyline | null = null;
+    let isLassoDrawing = false;
 
-    const addLassoPoint = (latlng: L.LatLng) => {
-      const log = { points: lassoPoints.length + 1, lat: latlng.lat, lng: latlng.lng };
-      console.log('[Kwizi Lasso] click', log);
-      serverLog('Kwizi Lasso click', log);
-      lassoPoints.push(latlng);
-      if (!lassoLayer) {
-        lassoLayer = L.polygon(lassoPoints, {
-          color: '#00d4ff',
-          weight: 2,
-          fillOpacity: 0.05,
-          dashArray: '4 4',
-        }).addTo(map);
-      } else {
-        lassoLayer.setLatLngs(lassoPoints);
+    const startLasso = (latlng: L.LatLng) => {
+      isLassoDrawing = true;
+      lassoPoints = [latlng];
+      if (lassoLayer) {
+        lassoLayer.remove();
+        lassoLayer = null;
       }
+      lassoLayer = L.polyline(lassoPoints, {
+        color: '#00d4ff',
+        weight: 2,
+        dashArray: '4 4',
+      }).addTo(map);
+    };
+
+    let lassoRaf = 0;
+    const moveLasso = (latlng: L.LatLng) => {
+      if (!isLassoDrawing || !lassoLayer) return;
+      if (lassoRaf) return;
+      lassoRaf = requestAnimationFrame(() => {
+        lassoRaf = 0;
+        if (!isLassoDrawing || !lassoLayer) return;
+        lassoPoints.push(latlng);
+        lassoLayer.setLatLngs(lassoPoints);
+      });
     };
 
     const finishLasso = () => {
+      if (!isLassoDrawing) return;
+      isLassoDrawing = false;
+      
       if (toolRef.current !== 'lasso' || lassoPoints.length < 3) {
-        const skipLog = { points: lassoPoints.length };
-        console.log('[Kwizi Lasso] finish skipped', skipLog);
-        serverLog('Kwizi Lasso finish skipped', skipLog);
+        lassoLayer?.remove();
+        lassoLayer = null;
+        lassoPoints = [];
         return;
       }
+      
       const finishLog = { points: lassoPoints.length };
       console.log('[Kwizi Lasso] finish', finishLog);
       serverLog('Kwizi Lasso finish', finishLog);
       const coords = lassoPoints.map((p) => [p.lng, p.lat]);
       (coords as number[][]).push([lassoPoints[0].lng, lassoPoints[0].lat]);
-      const poly = turf.polygon([coords as number[][]]);
+      
+      try {
+        const poly = turf.polygon([coords as number[][]]);
+        selectFromPolygon(poly);
+      } catch (err) {
+        console.error('[Kwizi Lasso] invalid polygon', err);
+      }
+      
       lassoLayer?.remove();
       lassoLayer = null;
       lassoPoints = [];
-      selectFromPolygon(poly);
       setTool('select');
       updateOverlayPointerEvents();
     };
@@ -650,7 +673,7 @@ export default function MapComponent({
       target.setPointerCapture(e.pointerId);
       const latlng = map.mouseEventToLatLng(e);
       if (toolRef.current === 'box') startBox(latlng);
-      else if (toolRef.current === 'lasso') addLassoPoint(latlng);
+      else if (toolRef.current === 'lasso') startLasso(latlng);
       e.preventDefault();
       e.stopPropagation();
     };
@@ -660,6 +683,9 @@ export default function MapComponent({
       if (toolRef.current === 'box' && isBoxDrawing) {
         const latlng = map.mouseEventToLatLng(e);
         moveBox(latlng);
+      } else if (toolRef.current === 'lasso' && isLassoDrawing) {
+        const latlng = map.mouseEventToLatLng(e);
+        moveLasso(latlng);
       }
       e.preventDefault();
       e.stopPropagation();
@@ -674,6 +700,7 @@ export default function MapComponent({
         // capture may already be released
       }
       if (toolRef.current === 'box' && isBoxDrawing) finishBox();
+      else if (toolRef.current === 'lasso' && isLassoDrawing) finishLasso();
       e.preventDefault();
       e.stopPropagation();
     };
@@ -1046,6 +1073,32 @@ export default function MapComponent({
     }
   }, [rawData, showSales, showRentals]);
 
+  // Flood layer toggles a FEMA WMS tile layer
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    
+    if (showFlood) {
+      if (!floodLayerRef.current) {
+        floodLayerRef.current = L.tileLayer.wms(
+          'https://hazards.fema.gov/gis/nfhl/services/public/NFHLWMS/MapServer/WMSServer',
+          {
+            layers: '4,28', // Flood Hazard Zones
+            format: 'image/png',
+            transparent: true,
+            opacity: 0.6,
+            attribution: 'FEMA NFHL'
+          }
+        ).addTo(map);
+      }
+    } else {
+      if (floodLayerRef.current) {
+        floodLayerRef.current.remove();
+        floodLayerRef.current = null;
+      }
+    }
+  }, [showFlood]);
+
   // Never keep the boundary loading overlay stuck for more than 12 seconds;
   // if the CSV or boundary genuinely has no data we still want the map usable.
   useEffect(() => {
@@ -1095,11 +1148,26 @@ export default function MapComponent({
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {tool !== 'select' && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: -20, x: '-50%' }}
+            className="absolute top-4 left-1/2 z-[1001] bg-blue-600/90 backdrop-blur text-white px-5 py-2.5 rounded-full text-sm font-semibold shadow-2xl pointer-events-none border border-white/20 whitespace-nowrap"
+          >
+            {tool === 'box'
+              ? 'Click and drag on the map to draw a selection box'
+              : 'Click to add points. Double-click or press Enter to finish shape.'}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div data-tour="map-tools" className="absolute top-3 right-3 z-[500] flex flex-col gap-2">
         {([
           { key: 'select', label: 'Select', Icon: MousePointer2 },
           { key: 'box', label: 'Box', Icon: Square },
-          { key: 'lasso', label: 'Lasso', Icon: Scissors },
+          { key: 'lasso', label: 'Lasso', Icon: PenTool },
         ] as { key: ToolMode; label: string; Icon: any }[]).map(({ key, label, Icon }) => (
           <button
             key={key}
