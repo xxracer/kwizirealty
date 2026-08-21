@@ -12,6 +12,13 @@ import {
   type CMSFileCategory,
 } from '@/lib/cmsStore';
 import { engine, type BoundaryKey, type MetricKey, type PropertyData } from '@/lib/engine';
+import {
+  csvToFeatureCollection,
+  diffAgainstExisting,
+  getFeatureName,
+  mergeFeaturesReplacing,
+  type GeoJsonFeatureCollection,
+} from '@/lib/geojsonUpload';
 import { AdminAds } from '@/components/admin/AdminAds';
 import { AdminUsers } from '@/components/admin/AdminUsers';
 import {
@@ -205,6 +212,14 @@ interface StagedFile {
     new: number;
     duplicate: number;
   };
+  /** Set only for Area Metrics uploads; holds the parsed FeatureCollection. */
+  geoJson?: GeoJsonFeatureCollection;
+  /** Names of duplicate features detected against the existing custom-area set. */
+  duplicateNames?: string[];
+  /** Names of new features detected against the existing custom-area set. */
+  newNames?: string[];
+  /** CSV rows that were skipped during conversion (with reason). */
+  csvSkipped?: { row: number; reason: string }[];
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -563,15 +578,80 @@ export default function AdminPage() {
 
     for (const file of Array.from(fileList)) {
       if (section === 'boundaries' || section === 'areas') {
-        if (!file.name.toLowerCase().endsWith('.geojson') && !file.name.toLowerCase().endsWith('.json')) {
+        const lowerName = file.name.toLowerCase();
+        const isGeoJson = lowerName.endsWith('.geojson') || lowerName.endsWith('.json');
+        const isCsv = lowerName.endsWith('.csv');
+
+        // Boundaries section still only accepts GeoJSON. Areas (custom areas)
+        // accepts GeoJSON or CSV so the admin can upload either format.
+        if (section === 'boundaries' && !isGeoJson) {
           setToast({ type: 'error', message: `${file.name} is not a GeoJSON file.` });
+          continue;
+        }
+        if (!isGeoJson && !isCsv) {
+          setToast({ type: 'error', message: `${file.name} must be a GeoJSON or CSV file.` });
           continue;
         }
 
         try {
-          const text = await file.text();
-          const geo = JSON.parse(text);
-          const featureCount = geo.features ? geo.features.length : 0;
+          let stagedGeo: GeoJsonFeatureCollection | null = null;
+          let csvSkipped: { row: number; reason: string }[] = [];
+          let featureCount = 0;
+
+          if (isCsv) {
+            const text = await file.text();
+            const converted = csvToFeatureCollection(text);
+            csvSkipped = converted.skipped.map((s) => ({ row: s.row, reason: s.reason }));
+            if (converted.featureCollection.features.length === 0) {
+              const reason = converted.skipped[0]?.reason || 'CSV has no valid rows.';
+              setToast({
+                type: 'error',
+                message: `${file.name}: ${reason}`,
+              });
+              continue;
+            }
+            stagedGeo = converted.featureCollection;
+            featureCount = stagedGeo.features.length;
+          } else {
+            const text = await file.text();
+            const parsed = JSON.parse(text);
+            if (!parsed || parsed.type !== 'FeatureCollection' || !Array.isArray(parsed.features)) {
+              setToast({ type: 'error', message: `${file.name} is not a valid FeatureCollection.` });
+              continue;
+            }
+            stagedGeo = parsed as GeoJsonFeatureCollection;
+            featureCount = stagedGeo.features.length;
+          }
+
+          // For Area Metrics we compare against all existing custom-area files
+          // already in Firebase so the admin can see what's new vs. duplicate.
+          let newCount = featureCount;
+          let duplicateCount = 0;
+          let duplicateNames: string[] = [];
+          let newNames: string[] = [];
+
+          if (section === 'areas') {
+            const existingFiles = files.filter((f) => f.category === 'custom-area');
+            const existingFeatures: GeoJsonFeatureCollection = { type: 'FeatureCollection', features: [] };
+            for (const f of existingFiles) {
+              if (!f.storageUrl) continue;
+              try {
+                const r = await fetch(f.storageUrl);
+                if (!r.ok) continue;
+                const json = await r.json();
+                if (json && Array.isArray(json.features)) {
+                  for (const feat of json.features) existingFeatures.features.push(feat);
+                }
+              } catch {
+                // ignore fetch failures for existing files
+              }
+            }
+            const diff = diffAgainstExisting(stagedGeo, existingFeatures);
+            newCount = diff.newFeatures.length;
+            duplicateCount = diff.duplicateFeatures.length;
+            duplicateNames = diff.duplicateFeatures.map((f) => getFeatureName(f)).filter(Boolean);
+            newNames = diff.newFeatures.map((f) => getFeatureName(f)).filter(Boolean);
+          }
 
           const id = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
           const record: CMSFileRecord = {
@@ -583,6 +663,7 @@ export default function AdminPage() {
             headers: [],
             uploadedAt: Date.now(),
             source: 'upload',
+            rawContent: JSON.stringify(stagedGeo),
           };
 
           newStaged.push({
@@ -592,12 +673,16 @@ export default function AdminPage() {
             record,
             stats: {
               total: featureCount,
-              new: featureCount,
-              duplicate: 0,
+              new: newCount,
+              duplicate: duplicateCount,
             },
+            geoJson: stagedGeo,
+            duplicateNames,
+            newNames,
+            csvSkipped,
           });
         } catch (err) {
-          console.error('GeoJSON parse error', err);
+          console.error('GeoJSON/CSV parse error', err);
           setToast({ type: 'error', message: `Error processing ${file.name}` });
         }
         continue;
@@ -684,13 +769,114 @@ export default function AdminPage() {
     setProcessing(false);
   };
 
-  const handleConfirmUpload = async (stagedId: string) => {
+  const handleConfirmUpload = async (stagedId: string, mode: 'new' | 'replace' = 'new') => {
     const staged = stagedFiles.find((s) => s.id === stagedId);
     if (!staged) return;
 
     setProcessing(true);
 
     const existingFile = files.find((f) => f.name === staged.record.name);
+
+    // Area Metrics: handle the GeoJSON flow separately. We use the parsed
+    // FeatureCollection from the staging step, optionally merging with the
+    // existing custom-area file in Storage.
+    if (staged.section === 'areas' && staged.geoJson) {
+      try {
+        let featuresToSave = staged.geoJson.features;
+        if (mode === 'new') {
+          const existingFeatures: GeoJsonFeatureCollection = { type: 'FeatureCollection', features: [] };
+          for (const f of files.filter((f) => f.category === 'custom-area')) {
+            if (!f.storageUrl) continue;
+            try {
+              const r = await fetch(f.storageUrl);
+              if (!r.ok) continue;
+              const j = await r.json();
+              if (j && Array.isArray(j.features)) {
+                for (const feat of j.features) existingFeatures.features.push(feat);
+              }
+            } catch {
+              // ignore
+            }
+          }
+          const diff = diffAgainstExisting(staged.geoJson, existingFeatures);
+          featuresToSave = diff.newFeatures;
+          if (featuresToSave.length === 0) {
+            setToast({ type: 'error', message: `${staged.record.name}: no new areas to upload.` });
+            setProcessing(false);
+            return;
+          }
+        }
+
+        const merged = mergeFeaturesReplacing(
+          existingFile
+            ? { type: 'FeatureCollection', features: [] } // start fresh in merge (we already passed new features)
+            : { type: 'FeatureCollection', features: [] },
+          featuresToSave
+        );
+
+        // When an existing file with the same name is in Storage, fetch it so
+        // mergeFeaturesReplacing replaces only the duplicates rather than
+        // dropping pre-existing features.
+        let combined = merged;
+        if (existingFile?.storageUrl && mode === 'replace') {
+          try {
+            const r = await fetch(existingFile.storageUrl);
+            if (r.ok) {
+              const j = await r.json();
+              if (j && Array.isArray(j.features)) {
+                combined = mergeFeaturesReplacing(
+                  { type: 'FeatureCollection', features: j.features },
+                  featuresToSave
+                );
+              }
+            }
+          } catch {
+            // ignore
+          }
+        } else if (existingFile?.storageUrl && mode === 'new') {
+          try {
+            const r = await fetch(existingFile.storageUrl);
+            if (r.ok) {
+              const j = await r.json();
+              if (j && Array.isArray(j.features)) {
+                combined = mergeFeaturesReplacing(
+                  { type: 'FeatureCollection', features: j.features },
+                  featuresToSave
+                );
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        const json = JSON.stringify(combined);
+        const recordToSave: CMSFileRecord = {
+          ...staged.record,
+          rows: [],
+          headers: [],
+          rawContent: json,
+          size: new Blob([json]).size,
+          rowCount: 0,
+        };
+
+        await cmsStore.saveFile(recordToSave);
+        setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
+        await loadData();
+        await reloadEngine();
+        setToast({
+          type: 'success',
+          message: `${staged.record.name} uploaded (${combined.features.length.toLocaleString()} areas).`,
+        });
+      } catch (err) {
+        console.error('Upload error', err);
+        setToast({ type: 'error', message: `Error uploading ${staged.record.name}` });
+      }
+      setProcessing(false);
+      return;
+    }
+
+    // Generic CSV/section upload (sales, rent, current, tax, schools, boundaries).
     let rowsToSave = staged.record.rows;
 
     const dataSection = staged.section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries' | 'ads' | 'users'>;
@@ -1681,13 +1867,23 @@ export default function AdminPage() {
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept={key === 'boundaries' || key === 'areas' ? '.geojson,.json' : '.csv'}
+                      accept={
+                        key === 'boundaries'
+                          ? '.geojson,.json'
+                          : key === 'areas'
+                          ? '.geojson,.json,.csv'
+                          : '.csv'
+                      }
                       multiple
                       className="hidden"
                       onChange={(e) => handleFiles(e.target.files, key)}
                     />
                     <div className="text-[10px] text-gray-500">
-                      {key === 'boundaries' || key === 'areas' ? 'GeoJSON features will be loaded directly.' : 'Duplicate rows are detected and skipped; only new rows are uploaded.'}
+                      {key === 'boundaries'
+                        ? 'GeoJSON features will be loaded directly.'
+                        : key === 'areas'
+                        ? 'GeoJSON or CSV with name/area + lat + lng columns. Duplicates vs. existing custom areas are detected.'
+                        : 'Duplicate rows are detected and skipped; only new rows are uploaded.'}
                     </div>
                   </div>
                   {processing && (
@@ -1713,32 +1909,91 @@ export default function AdminPage() {
                               <div className="text-sm font-medium text-white break-all">{staged.record.name}</div>
                               <div className="text-xs text-gray-400">{formatBytes(staged.record.size)}</div>
                             </div>
-                            <div className="flex gap-2 shrink-0">
+                            <div className="flex gap-2 shrink-0 flex-wrap">
                               <button onClick={() => handleDiscardStaged(staged.id)} className="px-3 py-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-lg text-xs font-medium transition-colors">Discard</button>
-                              <button
-                                onClick={() => handleConfirmUpload(staged.id)}
-                                disabled={processing || staged.stats.new === 0}
-                                className="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:opacity-50"
-                              >
-                                <Plus className="w-3 h-3" /> Add {staged.stats.new.toLocaleString()} new
-                              </button>
+                              {staged.section === 'areas' ? (
+                                <>
+                                  <button
+                                    onClick={() => handleConfirmUpload(staged.id, 'new')}
+                                    disabled={processing || staged.stats.new === 0}
+                                    className="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:opacity-50"
+                                  >
+                                    <Plus className="w-3 h-3" /> Add {staged.stats.new.toLocaleString()} new
+                                  </button>
+                                  <button
+                                    onClick={() => handleConfirmUpload(staged.id, 'replace')}
+                                    disabled={processing || staged.stats.total === 0}
+                                    className="px-3 py-1.5 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 border border-amber-500/20 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:opacity-50"
+                                    title="Upload the full file (overwrites existing entries with the same area name)"
+                                  >
+                                    <Layers className="w-3 h-3" /> Replace all ({staged.stats.total.toLocaleString()})
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  onClick={() => handleConfirmUpload(staged.id)}
+                                  disabled={processing || staged.stats.new === 0}
+                                  className="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:opacity-50"
+                                >
+                                  <Plus className="w-3 h-3" /> Add {staged.stats.new.toLocaleString()} new
+                                </button>
+                              )}
                             </div>
                           </div>
 
                           <div className="grid grid-cols-3 gap-2">
                             <div className="bg-white/5 rounded-lg p-2 text-center">
-                              <div className="text-[10px] sm:text-xs text-gray-400 mb-1">Total Rows</div>
+                              <div className="text-[10px] sm:text-xs text-gray-400 mb-1">Total Areas</div>
                               <div className="text-xs sm:text-sm font-bold text-white">{staged.stats.total.toLocaleString()}</div>
                             </div>
                             <div className="bg-blue-500/10 rounded-lg p-2 text-center border border-blue-500/20">
-                              <div className="text-[10px] sm:text-xs text-blue-400 mb-1">New Rows</div>
+                              <div className="text-[10px] sm:text-xs text-blue-400 mb-1">New Areas</div>
                               <div className="text-xs sm:text-sm font-bold text-blue-400">{staged.stats.new.toLocaleString()}</div>
                             </div>
                             <div className="bg-amber-500/10 rounded-lg p-2 text-center border border-amber-500/20">
-                              <div className="text-[10px] sm:text-xs text-amber-400 mb-1">Duplicates</div>
+                              <div className="text-[10px] sm:text-xs text-amber-400 mb-1">Already Exists</div>
                               <div className="text-xs sm:text-sm font-bold text-amber-400">{staged.stats.duplicate.toLocaleString()}</div>
                             </div>
                           </div>
+
+                          {staged.section === 'areas' && (staged.duplicateNames?.length || staged.newNames?.length || staged.csvSkipped?.length) ? (
+                            <details className="mt-3 bg-white/[0.03] border border-border-subtle rounded-lg p-3 text-xs">
+                              <summary className="cursor-pointer text-gray-300 hover:text-white">
+                                View diff details
+                                {staged.csvSkipped?.length ? ` (${staged.csvSkipped.length} CSV row(s) skipped)` : ''}
+                              </summary>
+                              <div className="mt-2 space-y-2">
+                                {staged.newNames && staged.newNames.length > 0 ? (
+                                  <div>
+                                    <div className="text-blue-400 font-semibold mb-1">New areas ({staged.newNames.length})</div>
+                                    <div className="text-gray-300 max-h-24 overflow-auto break-words">
+                                      {staged.newNames.slice(0, 50).join(', ')}
+                                      {staged.newNames.length > 50 ? ` … (+${staged.newNames.length - 50} more)` : ''}
+                                    </div>
+                                  </div>
+                                ) : null}
+                                {staged.duplicateNames && staged.duplicateNames.length > 0 ? (
+                                  <div>
+                                    <div className="text-amber-400 font-semibold mb-1">Already in Firebase ({staged.duplicateNames.length})</div>
+                                    <div className="text-gray-300 max-h-24 overflow-auto break-words">
+                                      {staged.duplicateNames.slice(0, 50).join(', ')}
+                                      {staged.duplicateNames.length > 50 ? ` … (+${staged.duplicateNames.length - 50} more)` : ''}
+                                    </div>
+                                  </div>
+                                ) : null}
+                                {staged.csvSkipped && staged.csvSkipped.length > 0 ? (
+                                  <div>
+                                    <div className="text-red-400 font-semibold mb-1">Skipped CSV rows ({staged.csvSkipped.length})</div>
+                                    <div className="text-gray-300 max-h-24 overflow-auto break-words">
+                                      {staged.csvSkipped.slice(0, 20).map((s, i) => (
+                                        <div key={i}>Row {s.row}: {s.reason}</div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                            </details>
+                          ) : null}
                         </div>
                       ))}
                     </div>

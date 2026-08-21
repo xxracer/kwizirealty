@@ -368,5 +368,64 @@ export const cmsStore = {
       console.warn('[CMS Store] No master cache found or failed to load:', err);
       return null;
     }
+  },
+
+  /**
+   * Merge `newFeatures` into an existing custom-area GeoJSON file, replacing
+   * any features that share a normalized name. When `newFeatures` is empty
+   * (or `replaceAll` is true) the entire file is overwritten with the input.
+   * Returns the updated FeatureCollection that was written.
+   */
+  async mergeCustomAreaFeatures(
+    fileName: string,
+    newFeatures: { type: 'Feature'; geometry: any; properties: any }[],
+    options: { replaceAll?: boolean } = {}
+  ): Promise<{ type: 'FeatureCollection'; features: any[] } | null> {
+    const { replaceAll = false } = options;
+    const safeName = fileName.replace(/[^a-zA-Z0-9.\-_ /]/g, '');
+    const storagePath = `cms_files/${safeName}`;
+    const storageRef = ref(storage, storagePath);
+
+    let merged: { type: 'FeatureCollection'; features: any[] } | null = null;
+    try {
+      const downloadUrl = await getDownloadURL(storageRef);
+      const res = await fetch(downloadUrl);
+      if (res.ok) {
+        const parsed = await res.json();
+        if (parsed && parsed.type === 'FeatureCollection' && Array.isArray(parsed.features)) {
+          merged = parsed;
+        }
+      }
+    } catch {
+      // File does not exist yet; will be created below.
+    }
+
+    const replaceFeatures = replaceAll ? [] : newFeatures;
+    if (merged && !replaceAll) {
+      const byName = new Map<string, any>();
+      const norm = (f: any) => String(
+        f?.properties?.name ||
+          f?.properties?.NAME ||
+          f?.properties?.area ||
+          f?.properties?.AREA ||
+          ''
+      ).toUpperCase().trim();
+      for (const feat of merged.features) {
+        const key = norm(feat);
+        if (key) byName.set(key, feat);
+      }
+      for (const feat of replaceFeatures) {
+        const key = norm(feat);
+        if (key) byName.set(key, feat);
+      }
+      merged.features = Array.from(byName.values());
+    } else {
+      merged = { type: 'FeatureCollection', features: [...replaceFeatures] };
+    }
+
+    const blob = new Blob([JSON.stringify(merged)], { type: 'application/geo+json' });
+    await uploadBytes(storageRef, blob, { contentType: 'application/geo+json' });
+
+    return merged;
   }
 };
