@@ -16,8 +16,8 @@ interface HommieChatProps {
   onGenerateReport?: () => void;
   getStatsForChatQueries?: (queries: string[]) => any;
   setBoundary?: (boundary: BoundaryKey) => void;
-  setMetric?: (metric: string) => void;
-  setFilters?: (filters: any) => void;
+  setMetric?: any;
+  setFilters?: any;
 }
 
 function InteractiveQuestion({ toolInvocation, addToolResult }: { toolInvocation: any, addToolResult: any }) {
