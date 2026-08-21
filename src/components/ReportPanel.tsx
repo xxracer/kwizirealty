@@ -109,7 +109,7 @@ export default function ReportPanel({
       cursorY += 30;
 
       const formatVal = (val: number) => 
-        metric === 'dom' || metric === 'moi' || metric === 'total_sales' 
+        (metric as string) === 'dom' || (metric as string) === 'moi' || (metric as string) === 'total_sales' 
           ? val.toLocaleString() 
           : val.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 
