@@ -69,8 +69,15 @@ async function main() {
       const size = fs.statSync(gzDest).size;
       console.log(`✓ ${key}.geojson.gz <- ${name} (${(size / 1024 / 1024).toFixed(2)} MB)`);
     } catch (err) {
-      console.error(`✗ ${key}.geojson.gz failed:`, err.message);
-      process.exitCode = 1;
+      // The file may have been removed from Firebase Storage (e.g. re-upload
+      // pending). If a previously-generated copy is already committed in
+      // public/geojson, keep it instead of failing the whole build.
+      if (fs.existsSync(gzDest) && fs.statSync(gzDest).size > 0) {
+        console.warn(`⚠ ${key}.geojson.gz kept from repo (download failed: ${err.message})`);
+      } else {
+        console.error(`✗ ${key}.geojson.gz failed:`, err.message);
+        process.exitCode = 1;
+      }
     }
   }
 

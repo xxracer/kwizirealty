@@ -55,10 +55,23 @@ async function main() {
     fs.mkdirSync(outDir, { recursive: true });
   }
 
-  const manifestUrl = await getDownloadURL(ref(storage, MANIFEST_PATH));
-  const manifestRes = await fetch(manifestUrl);
-  if (!manifestRes.ok) throw new Error(`Could not fetch manifest: ${manifestRes.status}`);
-  const manifest = await manifestRes.json();
+  let manifest;
+  try {
+    const manifestUrl = await getDownloadURL(ref(storage, MANIFEST_PATH));
+    const manifestRes = await fetch(manifestUrl);
+    if (!manifestRes.ok) throw new Error(`Could not fetch manifest: ${manifestRes.status}`);
+    manifest = await manifestRes.json();
+  } catch (err) {
+    // Manifest may be missing from Storage (e.g. data re-upload pending).
+    // If a manifest is already committed in public/cache, reuse it and skip
+    // the downloads instead of failing the build.
+    const localManifest = path.join(outDir, 'master_cache_chunks.json');
+    if (fs.existsSync(localManifest)) {
+      console.warn(`⚠ Using committed master_cache_chunks.json (download failed: ${err.message})`);
+      return;
+    }
+    throw err;
+  }
 
   const manifestDest = path.join(outDir, 'master_cache_chunks.json');
   fs.writeFileSync(manifestDest, JSON.stringify(manifest));
@@ -79,13 +92,16 @@ async function main() {
   for (const chunkPath of chunkPaths) {
     const fileName = chunkPath.split('/').pop();
     const dest = path.join(outDir, fileName);
-    const ok = await downloadOne(storage, chunkPath, dest);
+    const ok = (await downloadOne(storage, chunkPath, dest)) || fs.existsSync(dest);
     if (!ok) failed = true;
+    else if (!fs.statSync(dest).size) failed = true;
   }
 
   // Also download the area->chunk index used by the engine for selective loading.
   const indexDest = path.join(outDir, 'chunk_area_index.json.gz');
-  const indexOk = await downloadOne(storage, INDEX_PATH, indexDest);
+  const indexOk =
+    (await downloadOne(storage, INDEX_PATH, indexDest)) ||
+    (fs.existsSync(indexDest) && fs.statSync(indexDest).size > 0);
   if (!indexOk) {
     // The index is required for fast selection; fail if missing.
     console.error('Area index download failed; selective chunk loading will not work.');
