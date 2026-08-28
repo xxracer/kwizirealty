@@ -107,7 +107,7 @@ You have access to several powerful tools to control the application interface:
 1. **\`selectMapAreas\`**: Use this tool ONLY when the user explicitly asks you to select, highlight, or find specific areas on the map, or asks you to generate a report for specific areas. The system will return a \`data\` object containing real-time statistics. You MUST read this data to construct your response. Pass display names AND ZIPs in \`areasToSearch\`.
 2. **\`setMapBoundary\`**: Changes the Geographic Boundary. Options: 'subdivisions', 'zipcodes', 'counties', 'cities', 'school_districts'.
 3. **\`setMapMetric\`**: Changes the active Market Metric being displayed on the map (e.g., 'Close Price', 'DOM', 'MOI').
-4. **\`setMapFilters\`**: Modifies the Property Filters (e.g., minPrice, maxPrice, beds, baths, yearBuilt).
+4. **\`setMapFilters\`**: Modifies the Property Filters. Uses these EXACT keys: \`saleMin\`/\`saleMax\` (sale price), \`rentMin\`/\`rentMax\` (rental price), \`bedsMin\`/\`bedsMax\`, \`bathsMin\`/\`bathsMax\`, \`sqftMin\`/\`sqftMax\`, \`yearMin\`/\`yearMax\`, \`pool\` ('any'|'yes'|'no'). Example: 4-bedroom homes under $500k → \`{ bedsMin: 4, saleMax: 500000 }\`.
 
 When answering, reference the specific metrics provided to support your conclusions.
 ${aliasHintBlock}
@@ -150,12 +150,20 @@ ${aliasHintBlock}
         description: 'Updates the property filters (budget, beds, baths) on the map interface.',
         parameters: z.object({
           filters: z.object({
-            minPrice: z.number().optional(),
-            maxPrice: z.number().optional(),
-            beds: z.number().optional(),
-            baths: z.number().optional(),
-            yearBuilt: z.number().optional(),
-          }).describe('The filters to apply to the map data.'),
+            saleMin: z.number().optional().describe('Minimum sale price in USD.'),
+            saleMax: z.number().optional().describe('Maximum sale price in USD (e.g. 500000 for "under $500k").'),
+            rentMin: z.number().optional().describe('Minimum monthly rent in USD.'),
+            rentMax: z.number().optional().describe('Maximum monthly rent in USD.'),
+            bedsMin: z.number().optional().describe('Minimum number of bedrooms.'),
+            bedsMax: z.number().optional().describe('Maximum number of bedrooms.'),
+            bathsMin: z.number().optional().describe('Minimum number of bathrooms.'),
+            bathsMax: z.number().optional().describe('Maximum number of bathrooms.'),
+            sqftMin: z.number().optional().describe('Minimum square footage.'),
+            sqftMax: z.number().optional().describe('Maximum square footage.'),
+            yearMin: z.number().optional().describe('Minimum year built.'),
+            yearMax: z.number().optional().describe('Maximum year built.'),
+            pool: z.enum(['any', 'yes', 'no']).optional().describe('Whether the property must have a pool.'),
+          }).describe('The filters to apply to the map data. Only send the keys you want to change — they are merged into the current filters.'),
         }),
       }),
     },
