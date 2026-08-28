@@ -112,9 +112,20 @@ export default function DraggableMapWindows({
   const [constraints, setConstraints] = useState({ left: 0, top: 0, right: 0, bottom: 0 });
 
   useEffect(() => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    setConstraints({ left: 0, top: 0, right: rect.width - 80, bottom: rect.height - 80 });
+    const updateConstraints = () => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      // Keep the window's top-left handle visible; allow it to slide but stay on screen.
+      setConstraints({
+        left: -rect.left + 8,
+        top: -rect.top + 8,
+        right: rect.width - 80,
+        bottom: rect.height - 80,
+      });
+    };
+    updateConstraints();
+    window.addEventListener('resize', updateConstraints);
+    return () => window.removeEventListener('resize', updateConstraints);
   }, []);
 
   const ordered = useMemo(
@@ -139,7 +150,7 @@ export default function DraggableMapWindows({
             key={def.key}
             drag
             dragMomentum={false}
-            dragConstraints={containerRef}
+            dragConstraints={constraints}
             dragElastic={0.05}
             initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}

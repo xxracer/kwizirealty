@@ -1,7 +1,7 @@
 'use client';
 
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
-import { ref, uploadString, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { ref, uploadString, uploadBytes, getDownloadURL, deleteObject, listAll, getMetadata, type StorageReference } from 'firebase/storage';
 import { db, storage } from './firebase';
 import type { BoundaryKey, MetricKey } from './engine';
 import Papa from 'papaparse';
@@ -68,6 +68,31 @@ const OVERRIDES_STORE = 'cms_overrides';
 const PROPERTY_OVERRIDES_STORE = 'cms_property_overrides';
 
 const listeners = new Set<() => void>();
+
+/** Files that live in Storage only as engine caches — never shown as uploads. */
+const STORAGE_SKIP_PATTERN = /(master_cache|property-manifest|manifest|chunk|\.gz$)/i;
+
+/** Detect the CMS category of a Storage file from its path/name. */
+function detectStorageCategory(name: string, fallback?: CMSFileCategory): CMSFileCategory {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.geojson')) {
+    return lower.includes('boundar') ? 'boundary' : 'custom-area';
+  }
+  if (lower.includes('tax')) return 'tax';
+  if (lower.includes('school') || lower.includes('tea')) {
+    if (lower.includes('elem')) return 'school-elementary';
+    if (lower.includes('middle')) return 'school-middle';
+    if (lower.includes('high')) return 'school-high';
+    return 'school-elementary';
+  }
+  if (lower.includes('current')) {
+    if (lower.includes('rent')) return 'current-rent';
+    if (lower.includes('sale')) return 'current-sale';
+  }
+  if (lower.includes('rent')) return 'rent';
+  if (lower.includes('sale') || lower.includes('sold')) return 'sales';
+  return fallback ?? 'property';
+}
 
 function emit() {
   listeners.forEach((fn) => fn());
@@ -195,6 +220,109 @@ export const cmsStore = {
   async listFilesMetadataByCategory(category: CMSFileCategory): Promise<Omit<CMSFileRecord, 'rows'>[]> {
     const all = await this.listFilesMetadata();
     return all.filter((f) => f.category === category);
+  },
+
+  /**
+   * Discover files that already exist in Firebase Storage under `cms_files/`
+   * but have no metadata document in Firestore (e.g. uploaded outside the CMS)
+   * and register them so they appear in the admin file lists. Idempotent —
+   * files that already have metadata (matched by storagePath or doc id) are skipped.
+   *
+   * Fast path: only lists Storage objects and writes metadata (no downloads),
+   * so the file list appears immediately. Row counts are then filled in
+   * gradually in the background (see countRowsInBackground).
+   */
+  async importExistingStorageFiles(options: { fallbackCategory?: CMSFileCategory } = {}): Promise<{
+    imported: Omit<CMSFileRecord, 'rows'>[];
+    skipped: number;
+  }> {
+    // Recursively list every object under cms_files/
+    const items: StorageReference[] = [];
+    const walk = async (dir: StorageReference): Promise<void> => {
+      const res = await listAll(dir);
+      items.push(...res.items);
+      for (const prefix of res.prefixes) await walk(prefix);
+    };
+    await walk(ref(storage, 'cms_files'));
+
+    const existingSnap = await getDocs(collection(db, FILES_STORE));
+    const knownPaths = new Set<string>();
+    const knownIds = new Set<string>();
+    existingSnap.docs.forEach((d) => {
+      knownIds.add(d.id);
+      const p = (d.data() as { storagePath?: string }).storagePath;
+      if (p) knownPaths.add(p);
+    });
+
+    const imported: Omit<CMSFileRecord, 'rows'>[] = [];
+    let skipped = 0;
+
+    for (const item of items) {
+      const storagePath = item.fullPath;
+      const name = storagePath.replace(/^cms_files\//, '');
+      const docId = storagePath.replace(/\//g, '__');
+
+      if (STORAGE_SKIP_PATTERN.test(name) || knownPaths.has(storagePath) || knownIds.has(docId)) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const [downloadUrl, meta] = await Promise.all([getDownloadURL(item), getMetadata(item)]);
+        const metadata: Omit<CMSFileRecord, 'rows'> = {
+          id: docId,
+          name,
+          size: Number(meta.size) || 0,
+          category: detectStorageCategory(name, options.fallbackCategory),
+          headers: [],
+          uploadedAt: Date.parse(meta.timeCreated) || Date.now(),
+          source: 'manual',
+          storageUrl: downloadUrl,
+          storagePath,
+          rowCount: 0,
+        };
+        imported.push(metadata);
+      } catch (err) {
+        console.warn('[CMS Store] Could not import storage file:', storagePath, err);
+        skipped += 1;
+      }
+    }
+
+    if (imported.length > 0) {
+      const batch = writeBatch(db);
+      imported.forEach((m) => batch.set(doc(db, FILES_STORE, m.id), m));
+      await batch.commit();
+      emit();
+
+      // Fill in row counts / headers without blocking the UI.
+      void this.countRowsInBackground(imported);
+    }
+
+    return { imported, skipped };
+  },
+
+  /**
+   * Background pass that downloads each registered CSV (one at a time, small
+   * files only) to compute rowCount + headers, updating the metadata doc.
+   */
+  async countRowsInBackground(files: Omit<CMSFileRecord, 'rows'>[]): Promise<void> {
+    for (const metadata of files) {
+      const name = metadata.name.toLowerCase();
+      const isCsv = name.endsWith('.csv');
+      const isGeo = metadata.category === 'boundary' || metadata.category === 'custom-area';
+      if (!isCsv || isGeo || metadata.size > 30 * 1024 * 1024) continue;
+      try {
+        const response = await fetch(metadata.storageUrl || '');
+        const csvText = await response.text();
+        const parsed = Papa.parse<Record<string, string>>(csvText, { header: true, skipEmptyLines: true });
+        const rowCount = parsed.data.length;
+        const headers = parsed.data.length > 0 ? Object.keys(parsed.data[0]) : [];
+        await setDoc(doc(db, FILES_STORE, metadata.id), { rowCount, headers }, { merge: true });
+        emit();
+      } catch (err) {
+        console.warn('[CMS Store] Background row count failed for:', metadata.name, err);
+      }
+    }
   },
 
   async clearFiles(): Promise<void> {

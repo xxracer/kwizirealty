@@ -1,12 +1,35 @@
 import { google } from '@ai-sdk/google';
 import { streamText, tool } from 'ai';
 import { z } from 'zod';
+import { AREA_ALIASES, resolveQueriesToZips } from '@/lib/areaAliases';
 
 export async function POST(req: Request) {
   const { messages, contextData } = await req.json();
 
+  // Pre-resolve the latest user message against the Houston-area alias map so
+  // the model doesn't have to guess ZIP codes (and we don't have to rely on
+  // its training-data knowledge of the Houston metro).
+  const lastUserMessage =
+    [...(messages || [])].reverse().find((m: any) => m.role === 'user')?.content || '';
+  const tokens =
+    typeof lastUserMessage === 'string'
+      ? lastUserMessage.split(/[,;]\s*|\s+and\s+/i)
+      : [];
+  const aliasResult = resolveQueriesToZips(tokens);
+  const aliasHintBlock = aliasResult.matched.length
+    ? `\n\n### PRE-RESOLVED AREAS for the user's latest message\nThe user mentioned these areas which were already mapped to ZIP codes on the server. Use these ZIPs in your \`selectMapAreas\` call alongside the canonical display names so the frontend can match the right boundary features:\n${aliasResult.matched
+        .map((a) => `- "${a.displayName}" → [${a.zips.join(', ')}]${a.region ? ` (${a.region})` : ''}`)
+        .join('\n')}\n\nPass the union of display names AND ZIPs as the \`areasToSearch\` array (e.g. \`areasToSearch: ["Tomball", "77375", "77377"]\`). Do NOT invent ZIP codes from memory — always use the ones above.`
+    : '';
+
+  // Inject the full alias map into the system prompt so the model can also
+  // resolve any area the user mentions in follow-up turns.
+  const aliasContext = AREA_ALIASES.map(
+    (a) => `- ${a.displayName} → ZIPs [${a.zips.join(', ')}]${a.region ? ` (${a.region})` : ''}`,
+  ).join('\n');
+
   const systemPrompt = `
-You are Hommie, a friendly, intelligent Houston real estate AI assistant. 
+You are Hommie, a friendly, intelligent Houston real estate AI assistant.
 Your primary goal is to help users understand the real estate market using the provided internal map data.
 
 ### 1. Data Source & Context
@@ -30,7 +53,19 @@ Market Health Indicators for Selected Areas:
 - Days on Market (DOM): ${contextData?.marketHealth?.dom?.toFixed(0) || 'N/A'}
 - List-to-Sale Ratio: ${contextData?.marketHealth?.l2s ? contextData.marketHealth.l2s.toFixed(1) + '%' : 'N/A'}
 
-### 2. Operating Rules
+### 2. Known Area Aliases (Houston metro → ZIP codes)
+The internal database is indexed by ZIP code. When the user mentions a city,
+suburb, or neighborhood, use this authoritative mapping to identify the right
+ZIP codes. ALWAYS prefer this table over your own training-data knowledge.
+
+${aliasContext}
+
+When calling \`selectMapAreas\`, pass BOTH the canonical display name AND the
+matching ZIP codes in the \`areasToSearch\` array so the frontend can match
+either subdivisions or ZIP features. Example:
+  selectMapAreas({ areasToSearch: ["Tomball", "77375", "77377"], generateReport: false })
+
+### 3. Operating Rules
 1. You may only answer questions using the authorized internal context data provided above.
 2. DO NOT use external knowledge, search engines, or third-party information to supplement missing data.
 3. If a question requires data you do not have in the context above, politely state that the requested information is not available in the current database.
@@ -39,13 +74,13 @@ Market Health Indicators for Selected Areas:
 6. Distinguish between provided values and your own calculations derived from them.
 7. Be concise, friendly, and professional.
 
-### 3. Interactive Onboarding ("Get Started" Flow)
+### 4. Interactive Onboarding ("Get Started" Flow)
 - If the user sends a message like [GET_STARTED] or asks to "Get Started", you MUST follow this EXACT sequence of steps.
 - **CRITICAL**: When you call \`askInteractiveQuestion\`, DO NOT generate ANY conversational text response. Just call the tool and stop. Do not say "Got it! Here is the next question...". The UI will handle displaying the question.
 
 **STATE 1: Budget Selection**
 - **Trigger**: User initiates the "Get Started" flow.
-- **Action**: Call \`askInteractiveQuestion\` to ask for their budget. 
+- **Action**: Call \`askInteractiveQuestion\` to ask for their budget.
 - Example options: "Under $300k", "$300k - $500k", "$500k - $1M", "$1M+".
 
 **STATE 2: Apply Filters and Ask Location**
@@ -56,28 +91,31 @@ Market Health Indicators for Selected Areas:
 
 **STATE 3: Select Areas and Ask Report**
 - **Trigger**: User answers the location question.
-- **Action 1**: IMMEDIATELY call \`selectMapAreas\` with the areas they selected. If they chose city names but the boundary is zipcodes, use your knowledge to map cities to zipcodes (e.g., Katy -> ["77494", "77493"]).
+- **Action 1**: IMMEDIATELY call \`selectMapAreas\` with the areas they selected. Pass BOTH the display names AND the matching ZIPs from the alias table so the frontend can match the active boundary layer.
 - **Action 2**: In the SAME TURN, call \`askInteractiveQuestion\` to ask if they want to generate a detailed report.
 - Example options: "Yes, generate report", "No, just browse", "Change areas".
 
 **STATE 4: Generate Report**
 - **Trigger**: User selects "Yes, generate report".
-- **Action**: Call \`selectMapAreas\` with the previously selected areas AND \`generateReport: true\`. Then, you may finally speak using conversational text to summarize the report data that is returned to you.
+- **Action**: Call \`selectMapAreas\` with the previously selected areas AND \`generateReport: true\`. Then, ALWAYS follow up with a brief conversational confirmation (1-2 sentences) acknowledging the report is ready and inviting the next question. Example: "Your report for Tomball is ready! Let me know if you'd like to compare it with another area or dig into any specific metric."
 
-### 4. Tool Capabilities
+**General rule after any tool call**: When you call \`selectMapAreas\` (regardless of \`generateReport\`), you MUST end your turn with a short text response summarizing what you just did. Never leave the user in silence after a tool call.
+
+### 5. Tool Capabilities
 You have access to several powerful tools to control the application interface:
 
-1. **\`selectMapAreas\`**: Use this tool ONLY when the user explicitly asks you to select, highlight, or find specific areas on the map, or asks you to generate a report for specific areas. The system will return a \`data\` object containing real-time statistics. You MUST read this data to construct your response.
+1. **\`selectMapAreas\`**: Use this tool ONLY when the user explicitly asks you to select, highlight, or find specific areas on the map, or asks you to generate a report for specific areas. The system will return a \`data\` object containing real-time statistics. You MUST read this data to construct your response. Pass display names AND ZIPs in \`areasToSearch\`.
 2. **\`setMapBoundary\`**: Changes the Geographic Boundary. Options: 'subdivisions', 'zipcodes', 'counties', 'cities', 'school_districts'.
 3. **\`setMapMetric\`**: Changes the active Market Metric being displayed on the map (e.g., 'Close Price', 'DOM', 'MOI').
 4. **\`setMapFilters\`**: Modifies the Property Filters (e.g., minPrice, maxPrice, beds, baths, yearBuilt).
 
 When answering, reference the specific metrics provided to support your conclusions.
+${aliasHintBlock}
   `.trim();
 
   const result = await streamText({
     // @ts-expect-error type incompatibility between ai and ai-sdk/google versions
-    model: google('models/gemini-3.6-flash'),
+    model: google('models/gemini-3.5-flash-lite'),
     system: systemPrompt,
     messages,
     tools: {

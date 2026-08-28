@@ -140,15 +140,16 @@ export default function TourModal({ open, onClose }: TourModalProps) {
     if (!current.target) return;
     const el = document.querySelector(current.target);
     if (!el) return;
-    const rect = el.getBoundingClientRect();
+    // Always scroll the target into view so the tooltip has room, not just when off-screen.
+    // Floating windows (map-windows) and small toolbar buttons are easy to scroll past.
     const placement = current.placement || 'center';
-    const isOffScreen = rect.bottom > window.innerHeight || rect.top < 0 || rect.right > window.innerWidth || rect.left < 0;
-    if (isOffScreen) {
-      // Scroll the target so the tooltip has room based on requested placement.
-      let block: ScrollLogicalPosition = 'center';
-      if (placement === 'bottom') block = 'start';
-      if (placement === 'top') block = 'end';
+    let block: ScrollLogicalPosition = 'center';
+    if (placement === 'bottom') block = 'start';
+    if (placement === 'top') block = 'end';
+    try {
       el.scrollIntoView({ behavior: 'smooth', block, inline: 'nearest' });
+    } catch {
+      // older browsers — ignore
     }
   }, [open, step]);
 
@@ -254,7 +255,7 @@ export default function TourModal({ open, onClose }: TourModalProps) {
 
   return (
     <AnimatePresence>
-      <div className="fixed inset-0 z-[2000]">
+      <div className="fixed inset-0 z-[3000]">
         {/* Dark overlay with cutout spotlight */}
         <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={finish} />
         {hasTarget && rect && (

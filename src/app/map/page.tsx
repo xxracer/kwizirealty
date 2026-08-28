@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import SimpleSelect from '@/components/SimpleSelect';
 import Link from 'next/link';
 import ReportPanel from '@/components/ReportPanel';
 import TourModal from '@/components/TourModal';
@@ -8,6 +9,7 @@ import AccountModal from '@/components/AccountModal';
 import CollapsibleFilterSection from '@/components/CollapsibleFilterSection';
 import DraggableMapWindows, { WindowSelector, useDraggableWindows } from '@/components/DraggableMapWindows';
 import HommieChat from '@/components/HommieChat';
+import { RequireAuth } from '@/components/RequireAuth';
 import {
   PropertyData,
   BoundaryKey,
@@ -17,6 +19,7 @@ import {
   engine,
   cleanBoundaryName,
 } from '@/lib/engine';
+import { resolveQueriesToZips } from '@/lib/areaAliases';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, limit } from 'firebase/firestore';
 import type { AdCampaign } from '@/components/admin/AdminAds';
@@ -28,6 +31,7 @@ import {
   Map as MapIcon,
   CalendarDays,
   Bed,
+  X,
   Bath,
   ChevronDown,
   DollarSign,
@@ -47,8 +51,6 @@ import {
   Save,
   MessageSquare,
   PanelLeft,
-  Printer,
-  X,
   Check,
   Star,
 } from 'lucide-react';
@@ -199,6 +201,14 @@ const FilterSection = ({
 );
 
 export default function MapPage() {
+  return (
+    <RequireAuth redirectTo="/map">
+      <MapPageInner />
+    </RequireAuth>
+  );
+}
+
+function MapPageInner() {
   const [boundary, setBoundary] = useState<BoundaryKey>('subdivisions');
   const [metric, setMetric] = useState<MetricKey>('Close Price');
   // Property data is no longer loaded on page load. We keep only the tiny
@@ -207,6 +217,17 @@ export default function MapPage() {
   // selected areas, so memory stays low and the page loads fast.
   const [reportPhase, setReportPhase] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [reportProgress, setReportProgress] = useState<{ loaded: number; total: number } | null>(null);
+  // When the chat asks us to generate a report right after selecting areas,
+  // we set this flag. A useEffect below watches selectedIds and fires the
+  // report once the selection state has actually been committed to React.
+  const [pendingReport, setPendingReport] = useState(false);
+  // Ref mirrored from pendingReport — generateReport() reads this when it
+  // finishes so we only announce "report ready" in the chat when the report
+  // was triggered from the chat (not when the user clicked the button).
+  const reportFromChatRef = useRef(false);
+  // Bumped when a chat-triggered report finishes, prompting HommieChat to
+  // append a local "your report is ready" message.
+  const [reportReadyMsg, setReportReadyMsg] = useState<{ id: number; text: string } | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [reportGeneration, setReportGeneration] = useState(0);
   const [showReportModal, setShowReportModal] = useState(false);
@@ -214,6 +235,15 @@ export default function MapPage() {
   const [initialMetrics, setInitialMetrics] = useState<
     Partial<Record<BoundaryKey, { values: Record<string, number>; counts: Record<string, number> }>> | null
   >(null);
+
+  // Names + ZIPs per boundary feature, loaded directly from the GeoJSON so the
+  // chatbot can resolve queries like "Tomball" → TOMBALL TERRACE / TOMBALL
+  // HEIGHTS even when the CSV hasn't been loaded yet (dataReady=false). Without
+  // this fallback, effectiveNameMap is {} until a report has been generated
+  // and the chat can't match anything.
+  const [boundaryLookup, setBoundaryLookup] = useState<
+    Partial<Record<BoundaryKey, Record<string, { name: string; zip?: string }>>>
+  >({});
 
   const [filters, setFilters] = useState<PropertyFilters>(DEFAULT_FILTERS);
 
@@ -225,6 +255,9 @@ export default function MapPage() {
   const [multiSelect, setMultiSelect] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  /** Bumped when the search finds a match so the map flies to the selection. */
+  const [searchFocusTick, setSearchFocusTick] = useState(0);
   const [showTour, setShowTour] = useState(false);
   const [reportGenerated, setReportGenerated] = useState(false);
   const reportRef = useRef<HTMLDivElement>(null);
@@ -275,6 +308,49 @@ export default function MapPage() {
   useEffect(() => {
     loadMetricsForBoundary(boundary);
   }, [boundary, loadMetricsForBoundary]);
+
+  // Load the active boundary's GeoJSON and build an id → {name, zip} lookup so
+  // the chat can resolve city/area names even before the CSV report is ready.
+  useEffect(() => {
+    if (!boundary || boundary === 'areas') return;
+    if (boundaryLookup[boundary]) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const fc = await engine.fetchGzJson<GeoJSON.FeatureCollection>(
+          `/geojson/${boundary}.geojson.gz`
+        );
+        if (cancelled || !fc?.features) return;
+        const lookup: Record<string, { name: string; zip?: string }> = {};
+        for (const feat of fc.features) {
+          const props = (feat.properties || {}) as Record<string, unknown>;
+          const rawName =
+            (props.NAME as string) ||
+            (props.Name as string) ||
+            (props.name as string) ||
+            (props.Subdivision as string) ||
+            (props.id as string) ||
+            '';
+          const key = cleanBoundaryName(rawName);
+          if (!key) continue;
+          const zipRaw =
+            (props.Zip_Code as number | string) ??
+            (props.zipcode as number | string) ??
+            (props.ZIP as number | string);
+          const zip = zipRaw != null ? String(zipRaw).padStart(5, '0') : undefined;
+          lookup[key] = { name: rawName || key, zip };
+        }
+        setBoundaryLookup((prev) => ({ ...prev, [boundary]: lookup }));
+      } catch (err) {
+        // Silent — chat will just fall back to the empty map if the GeoJSON
+        // can't be loaded.
+        console.warn(`[Kwizi Map] failed to load boundary GeoJSON for ${boundary}`, err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [boundary, boundaryLookup]);
 
   useEffect(() => {
     // Preload the remaining boundary snapshots in the background once the active
@@ -450,36 +526,104 @@ export default function MapPage() {
     []
   );
 
-  const applySearch = useCallback(() => {
-    if (!searchQuery.trim()) {
+  const applySearch = useCallback((override?: string) => {
+    const query = (override ?? searchQuery).trim();
+    if (!query) {
       setSelectedIds([]);
       return;
     }
-    const q = searchQuery.trim().toUpperCase();
-    
-    // First, try searching through the currently loaded properties (if a report is generated)
-    let matches: string[] = [];
+    const q = query.toUpperCase();
+    const isZipQuery = /^\d{5}$/.test(q);
+
+    // 1) Loaded property rows (after a report): match address / ZIP / city /
+    //    subdivision and map back to the active boundary's keys.
     if (filteredData.length > 0) {
-      matches = filteredData
+      const matches = filteredData
         .filter((d) => {
           const pid = engine.getBoundaryKey(boundary, d);
+          const subdivs = Array.isArray(d.subdivisions)
+            ? d.subdivisions.join(' ').toUpperCase()
+            : String(d.subdivisions || '').toUpperCase();
           return (
-            pid.includes(q) ||
+            (!!pid && String(pid).toUpperCase().includes(q)) ||
             d.address.toUpperCase().includes(q) ||
-            d.zip.includes(q) ||
-            d.city.toUpperCase().includes(q)
+            d.zip.toUpperCase().includes(q) ||
+            d.city.toUpperCase().includes(q) ||
+            subdivs.includes(q)
           );
         })
-        .map((d) => engine.getBoundaryKey(boundary, d));
-    } else {
-      // If no properties loaded, search the boundary names directly
-      const availableKeys = Object.keys(initialMetrics?.[boundary]?.values || {});
-      matches = availableKeys.filter(k => k.toUpperCase().includes(q));
+        .map((d) => engine.getBoundaryKey(boundary, d))
+        .filter((k): k is string => !!k);
+      if (matches.length > 0) {
+        setSelectedIds(Array.from(new Set(matches)));
+        setSearchFocusTick((t) => t + 1);
+        return;
+      }
     }
-    
-    const unique = Array.from(new Set(matches));
-    setSelectedIds(unique);
-  }, [searchQuery, filteredData, boundary, initialMetrics]);
+
+    // 2) Boundary features by name — boundaryLookup is loaded from the GeoJSON
+    //    and works even before any report has been generated.
+    const nameSource: Record<string, string> = {};
+    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+      nameSource[id] = info.name;
+    }
+    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+      if (!nameSource[id]) nameSource[id] = name;
+    }
+    const matched = new Set<string>();
+    for (const [id, name] of Object.entries(nameSource)) {
+      const n = (name || '').toUpperCase();
+      if (n && (n.includes(q) || q.includes(n))) matched.add(id);
+    }
+
+    // 3) ZIP code query: match features by their stored ZIP on any boundary
+    //    (subdivisions/schools carry a Zip_Code prop), or by id when the
+    //    active boundary is ZIP codes.
+    if (isZipQuery) {
+      for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+        if (info.zip === q) matched.add(id);
+        else if (boundary === 'zipcodes' && id === q) matched.add(id);
+      }
+      if (boundary === 'zipcodes' && nameSource[q]) matched.add(q);
+    }
+
+    // 4) City / area name ("katy", "tomball", "sugar land"): resolve through
+    //    the alias map and match features by ZIP, same as the chat does.
+    if (matched.size === 0) {
+      const aliasResult = resolveQueriesToZips([query]);
+      if (aliasResult.zips.length > 0) {
+        const zipSet = new Set(aliasResult.zips);
+        for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+          if ((info.zip && zipSet.has(info.zip)) || (boundary === 'zipcodes' && zipSet.has(id))) {
+            matched.add(id);
+          }
+        }
+        if (matched.size > 0) {
+          console.info(
+            '[applySearch] resolved via alias map:',
+            aliasResult.matched.map((a) => `${a.displayName} → [${a.zips.join(', ')}]`),
+          );
+        }
+      }
+    }
+
+    if (matched.size > 0) {
+      setSelectedIds(Array.from(matched));
+      setSearchFocusTick((t) => t + 1);
+    } else {
+      setSelectedIds([]);
+    }
+  }, [searchQuery, filteredData, boundary, effectiveNameMap, boundaryLookup]);
+
+  // Live search: debounce the input so we filter as the user types.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setSearchQuery(searchInput);
+      applySearch(searchInput);
+    }, 200);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput]);
 
   const uniquePropertyTypes = useMemo(() => engine.getUniqueValues('propertyType'), [reportGeneration]);
   const uniqueCities = useMemo(() => engine.getUniqueValues('city').slice(0, 120), [reportGeneration]);
@@ -514,18 +658,38 @@ export default function MapPage() {
     setActiveWindows([]);
   }, [setActiveWindows]);
 
-  const handleAreaSelectFromChat = useCallback((queries: string[]) => {
+  const handleAreaSelectFromChat = useCallback((queries: string[], generateReportAfter?: boolean) => {
     if (!queries || queries.length === 0) return;
-    
+
+    // If the chat asked us to also generate a report after selecting these
+    // areas, remember it. A useEffect below will fire generateReport() once
+    // the selection state has actually been committed to React.
+    if (generateReportAfter) {
+      reportFromChatRef.current = true;
+      setPendingReport(true);
+    }
+
+    // Combine the post-report name map with the always-available boundary
+    // lookup (loaded from the GeoJSON). effectiveNameMap is empty until a
+    // report has been generated, so the lookup is what makes chat work
+    // before that point.
+    const nameSource: Record<string, string> = {};
+    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+      nameSource[id] = info.name;
+    }
+    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+      if (!nameSource[id]) nameSource[id] = name;
+    }
+
     // Convert to lowercase for fuzzy matching
     const normalizedQueries = queries.map(q => q.toLowerCase().trim());
     const matchedIds: string[] = [];
 
-    // Search through effectiveNameMap
-    Object.entries(effectiveNameMap).forEach(([id, name]) => {
-      const normalizedName = name.toLowerCase();
+    // Search through the combined name source
+    Object.entries(nameSource).forEach(([id, name]) => {
+      const normalizedName = (name || '').toLowerCase();
       // If the feature name includes the query or vice-versa
-      const isMatch = normalizedQueries.some(q => 
+      const isMatch = normalizedQueries.some(q =>
         normalizedName.includes(q) || q.includes(normalizedName)
       );
       if (isMatch) {
@@ -533,22 +697,68 @@ export default function MapPage() {
       }
     });
 
+    // Fallback: when the active boundary is subdivisions/cities and the user
+    // mentions a city name, the per-feature names rarely match the city
+    // directly. Match by resolved ZIP code on each feature's stored ZIP.
+    if (matchedIds.length === 0 && boundary !== 'zipcodes') {
+      const aliasResult = resolveQueriesToZips(queries);
+      if (aliasResult.zips.length > 0) {
+        const zipSet = new Set(aliasResult.zips);
+        Object.entries(boundaryLookup[boundary] || {}).forEach(([id, info]) => {
+          if (info.zip && zipSet.has(info.zip)) matchedIds.push(id);
+        });
+        if (matchedIds.length > 0) {
+          console.info(
+            '[handleAreaSelectFromChat] resolved via alias map (ZIPs):',
+            aliasResult.matched.map((a) => `${a.displayName} → [${a.zips.join(', ')}]`),
+          );
+        }
+      }
+    }
+
+    // Fallback: when the active boundary is ZIP codes and the user mentions a
+    // city name ("Katy", "Tomball"), the names won't match — but the resolved
+    // ZIPs do. Use the alias resolver to widen the match.
+    if (matchedIds.length === 0 && boundary === 'zipcodes') {
+      const aliasResult = resolveQueriesToZips(queries);
+      if (aliasResult.zips.length > 0) {
+        const zipSet = new Set(aliasResult.zips);
+        Object.entries(nameSource).forEach(([id]) => {
+          if (zipSet.has(id)) matchedIds.push(id);
+        });
+        if (aliasResult.matched.length > 0) {
+          console.info(
+            '[handleAreaSelectFromChat] resolved via alias map:',
+            aliasResult.matched.map((a) => `${a.displayName} → [${a.zips.join(', ')}]`),
+          );
+        }
+      }
+    }
+
     if (matchedIds.length > 0) {
       // Add the matched IDs to the current selection, without duplicating
       setSelectedIds(prev => Array.from(new Set([...prev, ...matchedIds])));
     }
-  }, [effectiveNameMap]);
+  }, [effectiveNameMap, boundary, boundaryLookup]);
 
   const getStatsForChatQueries = useCallback((queries: string[]) => {
     if (!queries || queries.length === 0 || !dataReady) return null;
-    
+
+    const nameSource: Record<string, string> = {};
+    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+      nameSource[id] = info.name;
+    }
+    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+      if (!nameSource[id]) nameSource[id] = name;
+    }
+
     const normalizedQueries = queries.map(q => q.toLowerCase().trim());
     const matchedIds: string[] = [];
     const matchedNames: string[] = [];
 
-    Object.entries(effectiveNameMap).forEach(([id, name]) => {
-      const normalizedName = name.toLowerCase();
-      const isMatch = normalizedQueries.some(q => 
+    Object.entries(nameSource).forEach(([id, name]) => {
+      const normalizedName = (name || '').toLowerCase();
+      const isMatch = normalizedQueries.some(q =>
         normalizedName.includes(q) || q.includes(normalizedName)
       );
       if (isMatch) {
@@ -556,6 +766,32 @@ export default function MapPage() {
         matchedNames.push(name);
       }
     });
+
+    if (matchedIds.length === 0 && boundary !== 'zipcodes') {
+      const aliasResult = resolveQueriesToZips(queries);
+      if (aliasResult.zips.length > 0) {
+        const zipSet = new Set(aliasResult.zips);
+        Object.entries(boundaryLookup[boundary] || {}).forEach(([id, info]) => {
+          if (info.zip && zipSet.has(info.zip)) {
+            matchedIds.push(id);
+            matchedNames.push(info.name);
+          }
+        });
+      }
+    }
+
+    if (matchedIds.length === 0 && boundary === 'zipcodes') {
+      const aliasResult = resolveQueriesToZips(queries);
+      if (aliasResult.zips.length > 0) {
+        const zipSet = new Set(aliasResult.zips);
+        Object.entries(nameSource).forEach(([id, name]) => {
+          if (zipSet.has(id)) {
+            matchedIds.push(id);
+            matchedNames.push(name);
+          }
+        });
+      }
+    }
 
     if (matchedIds.length === 0) return null;
 
@@ -566,9 +802,9 @@ export default function MapPage() {
       metric === 'Rental Days On Market' ||
       metric === 'Rent-to-Sale Ratio';
     const health = engine.getMarketHealth(filteredData, boundary, matchedIds, isRental ? 'rental' : 'sale');
-    
+
     return { stats, health, matchedNames };
-  }, [dataReady, filteredData, boundary, effectiveNameMap, metric]);
+  }, [dataReady, filteredData, boundary, effectiveNameMap, metric, boundaryLookup]);
 
   const generateReport = useCallback(() => {
     if (reportPhase === 'loading') return;
@@ -603,6 +839,29 @@ export default function MapPage() {
     }
   }, [activeWindows.length, boundary, selectedIds, setActiveWindows]);
 
+  // When the chat sets pendingReport=true alongside a selection, fire
+  // generateReport() once the selection state has been committed to React.
+  // This is more reliable than a setTimeout: the effect runs after the DOM is
+  // updated, so selectedIds is guaranteed to reflect the latest selection.
+  useEffect(() => {
+    if (!pendingReport) return;
+    if (selectedIds.length === 0) return; // selection didn't actually land
+    setPendingReport(false);
+    generateReport();
+  }, [pendingReport, selectedIds, generateReport]);
+
+  // Announce in the chat when a chat-triggered report finishes generating.
+  // Deterministic — doesn't rely on the model saying anything.
+  useEffect(() => {
+    if (reportPhase !== 'ready' || !reportFromChatRef.current) return;
+    reportFromChatRef.current = false;
+    setReportReadyMsg({
+      id: Date.now(),
+      text:
+        "Your report is ready! 🎉 I've highlighted the areas on the map and generated the full report. Let me know if you need anything else — I can compare areas, switch metrics, or dig into any specific number.",
+    });
+  }, [reportPhase]);
+
   const clearReport = useCallback(() => {
     setReportGenerated(false);
     setReportPhase('idle');
@@ -610,13 +869,6 @@ export default function MapPage() {
     setReportProgress(null);
     setActiveWindows([]);
   }, [setActiveWindows]);
-
-  const handleExportPDF = useCallback(() => {
-    if (reportRef.current) {
-      reportRef.current.scrollIntoView({ behavior: 'instant', block: 'start' });
-    }
-    setTimeout(() => window.print(), 150);
-  }, []);
 
   const BoundaryButton = ({ b }: { b: (typeof BOUNDARIES)[number] }) => (
     <button
@@ -746,14 +998,6 @@ export default function MapPage() {
             <span className="hidden sm:inline">Tour</span>
           </button>
           <button
-            onClick={handleExportPDF}
-            className="bg-blue-600 hover:bg-blue-700 text-white p-2 sm:px-3 sm:py-2 rounded-lg shadow flex items-center gap-2 font-semibold text-sm transition-all"
-            title="Export report as PDF"
-          >
-            <Printer className="w-4 h-4" />
-            <span className="hidden sm:inline">PDF</span>
-          </button>
-          <button
             onClick={() => {
               setAccountModalMode('save');
               setShowAccountModal(true);
@@ -855,18 +1099,45 @@ export default function MapPage() {
         >
           {/* Search */}
           <FilterSection icon={<Search className="w-4 h-4" />} title="Search" defaultOpen={false} dataTour="search">
-            <div className="flex items-center gap-2 bg-white/5 border border-white/[0.06] rounded-xl px-3 py-2">
+            <div className="flex items-center gap-2 bg-white/5 border border-white/[0.06] rounded-xl px-3 py-2 focus-within:border-blue-500/40 transition-colors">
               <Search className="w-4 h-4 text-gray-400" />
               <input
                 type="text"
                 placeholder="Area, address or ZIP…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && applySearch()}
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    setSearchQuery(searchInput);
+                    applySearch(searchInput);
+                  }
+                  if (e.key === 'Escape') {
+                    setSearchInput('');
+                    setSearchQuery('');
+                    setSelectedIds([]);
+                  }
+                }}
                 className="flex-1 bg-transparent border-none outline-none text-sm text-white placeholder-gray-500"
               />
+              {searchInput && (
+                <button
+                  onClick={() => {
+                    setSearchInput('');
+                    setSearchQuery('');
+                    setSelectedIds([]);
+                  }}
+                  className="text-gray-500 hover:text-white transition-colors"
+                  aria-label="Clear search"
+                  title="Clear"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
-                onClick={applySearch}
+                onClick={() => {
+                  setSearchQuery(searchInput);
+                  applySearch(searchInput);
+                }}
                 className="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-md font-medium transition-colors"
               >
                 Go
@@ -885,38 +1156,28 @@ export default function MapPage() {
 
           {/* Metric */}
           <FilterSection icon={<BarChart3 className="w-4 h-4 text-emerald-400" />} title="Market Metric" defaultOpen={false} dataTour="metric">
-            <div className="relative">
-              <select
-                value={metric}
-                onChange={(e) => setMetric(e.target.value as MetricKey)}
-                className="w-full bg-white/5 border border-white/[0.06] text-white text-sm rounded-xl px-3 py-2.5 pr-10 outline-none focus:border-blue-500 appearance-none"
-              >
-                {METRICS.map((m) => (
-                  <option key={m.key} value={m.key} className="bg-[#121620]">
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-            </div>
+            <SimpleSelect
+              value={metric}
+              onChange={(v) => setMetric(v as MetricKey)}
+              options={METRICS.map((m) => ({ key: m.key, label: m.label }))}
+            />
+            <p className="text-[10px] text-gray-500 mt-1.5 flex items-center gap-1">
+              <ChevronDown className="w-3 h-3" />
+              {METRICS.length} metrics available
+            </p>
           </FilterSection>
 
           {/* Period */}
           <FilterSection icon={<CalendarDays className="w-4 h-4 text-amber-400" />} title="Close Period" defaultOpen={false}>
-            <div className="relative">
-              <select
-                value={filters.period}
-                onChange={(e) => handleFilterChange('period', e.target.value as PropertyFilters['period'])}
-                className="w-full bg-white/5 border border-white/[0.06] text-white text-sm rounded-xl px-3 py-2.5 pr-10 outline-none focus:border-blue-500 appearance-none"
-              >
-                {PERIODS.map((p) => (
-                  <option key={p.key} value={p.key} className="bg-[#121620]">
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-            </div>
+            <SimpleSelect
+              value={filters.period}
+              onChange={(v) => handleFilterChange('period', v as PropertyFilters['period'])}
+              options={PERIODS.map((p) => ({ key: p.key, label: p.label }))}
+            />
+            <p className="text-[10px] text-gray-500 mt-1.5 flex items-center gap-1">
+              <ChevronDown className="w-3 h-3" />
+              {PERIODS.length} time periods available
+            </p>
           </FilterSection>
 
           {/* Quick property filters */}
@@ -1035,14 +1296,15 @@ export default function MapPage() {
                 <div>
                   <span className="text-[10px] font-bold uppercase text-gray-400 block mb-1.5">Property Type</span>
                   <select
-                    value="Single Family, Free Standing"
-                    disabled
-                    onChange={() => {}}
-                    className="w-full bg-white/5 border border-white/[0.06] text-white text-xs rounded-lg px-2 py-1.5 outline-none opacity-50 cursor-not-allowed"
+                    value={filters.propertyTypes[0] || 'any'}
+                    onChange={(e) => handleFilterChange('propertyTypes', e.target.value === 'any' ? [] : [e.target.value])}
+                    disabled={uniquePropertyTypes.length === 0}
+                    className="w-full bg-white/5 border border-white/[0.06] text-white text-xs rounded-lg px-2 py-1.5 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <option value="Single Family, Free Standing" className="bg-[#121620]">
-                      Single Family, Free Standing
-                    </option>
+                    <option value="any" className="bg-[#121620]">All Types</option>
+                    {uniquePropertyTypes.map((t: string) => (
+                      <option key={t} value={t} className="bg-[#121620]">{t}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -1262,6 +1524,11 @@ export default function MapPage() {
                 <MapPin className="w-4 h-4 text-blue-400" />
                 <span className="text-sm font-semibold">Flood Zones</span>
               </button>
+              {layerFlood && (
+                <p className="text-[10px] text-gray-500 leading-relaxed px-1">
+                  Flood Hazard Areas via FEMA NFHL (hazards.geoplatform.gov).
+                </p>
+              )}
             </div>
           </FilterSection>
 
@@ -1324,7 +1591,7 @@ export default function MapPage() {
                     visible={reportGenerated && selectedIds.length > 0}
                     isLoading={!dataReady}
                     onClose={(key) => setActiveWindows(activeWindows.filter((k) => k !== key))}
-                    onSet90Days={() => handleFilterChange('period', '90d')}
+                    onSet90Days={() => handleFilterChange('period', filters.period === '90d' ? '30d' : '90d')}
                     is90Days={filters.period === '90d'}
                   />
 
@@ -1335,7 +1602,15 @@ export default function MapPage() {
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 20, scale: 0.95 }}
                         transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-                        className="fixed bottom-6 left-6 z-[100] w-64 md:w-72 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50"
+                        className={
+                          activeAd.placement === 'top'
+                            ? 'absolute top-3 inset-x-0 mx-auto z-[100] w-64 md:w-80 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
+                            : activeAd.placement === 'bottom'
+                              ? 'absolute bottom-3 inset-x-0 mx-auto z-[100] w-64 md:w-80 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
+                              : activeAd.placement === 'right'
+                                ? 'absolute right-3 top-3 z-[100] w-32 md:w-40 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
+                                : 'fixed bottom-6 left-6 z-[100] w-64 md:w-72 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
+                        }
                       >
                         <button
                           onClick={() => setShowAd(false)}
@@ -1343,7 +1618,14 @@ export default function MapPage() {
                         >
                           <X className="w-3 h-3" />
                         </button>
-                        <a href={activeAd.targetUrl} target="_blank" rel="noreferrer" className="block relative aspect-video bg-black group">
+                        <a
+                          href={activeAd.targetUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={`block relative bg-black group ${
+                            activeAd.placement === 'right' ? 'aspect-[9/16]' : 'aspect-video'
+                          }`}
+                        >
                           {activeAd.mediaType === 'video' ? (
                             <video src={activeAd.mediaUrl} className="w-full h-full object-cover" muted loop autoPlay playsInline />
                           ) : (
@@ -1374,6 +1656,7 @@ export default function MapPage() {
                     onAreaSelect={handleAreaSelectFromChat}
                     onGenerateReport={generateReport}
                     getStatsForChatQueries={getStatsForChatQueries}
+                    reportReadyMsg={reportReadyMsg}
                   />
                   <MapComponent
                     boundary={boundary}
@@ -1394,6 +1677,7 @@ export default function MapPage() {
                     onGenerateReport={generateReport}
                     reportGenerated={reportGenerated}
                     isReportLoading={reportPhase === 'loading'}
+                    focusSelectionTick={searchFocusTick}
                   />
                 </div>
               </div>
@@ -1447,6 +1731,7 @@ export default function MapPage() {
           setBoundary={setBoundary}
           setMetric={setMetric}
           setFilters={setFilters}
+          reportReadyMsg={reportReadyMsg}
         />
       </div>
     </div>

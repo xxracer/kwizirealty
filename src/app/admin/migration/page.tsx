@@ -5,8 +5,17 @@ import { cmsStore, CMSFileRecord, CMSFileCategory } from '@/lib/cmsStore';
 import { collection, getDocs } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { db, storage } from '@/lib/firebase';
+import { RequireAdmin } from '@/components/RequireAuth';
 
 export default function MigrationPage() {
+  return (
+    <RequireAdmin>
+      <MigrationPageInner />
+    </RequireAdmin>
+  );
+}
+
+function MigrationPageInner() {
   const [status, setStatus] = useState<string>('Ready to migrate local files to Firebase');
   const [progress, setProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
   const [isMigrating, setIsMigrating] = useState(false);

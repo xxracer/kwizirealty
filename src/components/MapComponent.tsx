@@ -5,9 +5,19 @@ import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import * as turf from '@turf/turf';
 import { PropertyData, BoundaryKey, engine, cleanBoundaryName, cleanSchoolName } from '@/lib/engine';
-import { MousePointer2, Square, PenTool, Trash2, BarChart3, Loader2 } from 'lucide-react';
+import { MousePointer2, Square, Trash2, BarChart3, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
+
+function LassoIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 14c0-4.5 4-7 8-7s8 2.5 8 6-3.5 6-8 6c-2 0-3.7-.5-5-1.4" />
+      <circle cx="8" cy="16.5" r="0.8" fill="currentColor" />
+      <path d="M6 19l-1.5 2" />
+    </svg>
+  );
+}
 
 const BOUNDARY_SOURCES: Record<BoundaryKey, string> = {
   subdivisions: 'Mapped Subdivisions.geojson',
@@ -186,6 +196,8 @@ interface MapComponentProps {
   onGenerateReport?: () => void;
   reportGenerated?: boolean;
   isReportLoading?: boolean;
+  /** Incremented by the parent (e.g. after a search) to fly the map to the current selection. */
+  focusSelectionTick?: number;
 }
 
 export default function MapComponent({
@@ -207,6 +219,7 @@ export default function MapComponent({
   onGenerateReport,
   reportGenerated,
   isReportLoading,
+  focusSelectionTick,
 }: MapComponentProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -1026,6 +1039,31 @@ export default function MapComponent({
     });
   }, [selectedIds]);
 
+  // Fly the map to the selected features when the parent signals a focus
+  // event (e.g. the sidebar search found a match) so the user actually sees
+  // what was selected instead of a distant highlight.
+  useEffect(() => {
+    if (!focusSelectionTick) return;
+    const map = mapRef.current;
+    if (!map || selectedIds.length === 0) return;
+    const bounds = L.latLngBounds([]);
+    let found = 0;
+    areaLayerRef.current?.eachLayer((layer: any) => {
+      const feature = layer.feature as GeoJSON.Feature | undefined;
+      if (!feature) return;
+      const props = (feature.properties || {}) as Record<string, any>;
+      const id = String(props.id ?? feature.id ?? '');
+      if (selectedIds.includes(id) && typeof layer.getBounds === 'function') {
+        bounds.extend(layer.getBounds());
+        found++;
+      }
+    });
+    if (found > 0 && bounds.isValid()) {
+      map.flyToBounds(bounds, { padding: [48, 48], maxZoom: 13 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusSelectionTick]);
+
   // Sales / rental point layers update only when data or visibility toggles.
   useEffect(() => {
     const map = mapRef.current;
@@ -1073,30 +1111,48 @@ export default function MapComponent({
     }
   }, [rawData, showSales, showRentals]);
 
-  // Flood layer toggles a FEMA WMS tile layer
+  // Flood layer toggles a FEMA ArcGIS MapServer. We use the geoplatform host which
+  // proxies FEMA NFHL — it's faster and more reliable than the legacy NFHL WMS
+  // endpoint and exposes the same OGC WMS interface.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    
-    if (showFlood) {
-      if (!floodLayerRef.current) {
-        floodLayerRef.current = L.tileLayer.wms(
-          'https://hazards.fema.gov/gis/nfhl/services/public/NFHLWMS/MapServer/WMSServer',
-          {
-            layers: '4,28', // Flood Hazard Zones
-            format: 'image/png',
-            transparent: true,
-            opacity: 0.6,
-            attribution: 'FEMA NFHL'
-          }
-        ).addTo(map);
-      }
-    } else {
+
+    const cleanup = () => {
       if (floodLayerRef.current) {
         floodLayerRef.current.remove();
         floodLayerRef.current = null;
       }
+    };
+
+    if (!showFlood) {
+      cleanup();
+      return;
     }
+
+    if (floodLayerRef.current) return;
+
+    const wms = L.tileLayer.wms(
+      'https://hazards.geoplatform.gov/server/services/FEMA/FEMA_FLOODPLAIN/MapServer/WMSServer',
+      {
+        layers: '0', // FEMA Flood Hazard Areas
+        format: 'image/png',
+        transparent: true,
+        opacity: 0.55,
+        version: '1.3.0',
+        attribution: 'FEMA NFHL via geoplatform.gov',
+        // If the host is slow / down, Leaflet will keep retrying silently — we
+        // don't want an error toast every minute, so we just log.
+      }
+    );
+    wms.on('tileerror', (err) => {
+      // eslint-disable-next-line no-console
+      console.warn('[Flood] tile error', err);
+    });
+    wms.addTo(map);
+    floodLayerRef.current = wms;
+
+    return cleanup;
   }, [showFlood]);
 
   // Never keep the boundary loading overlay stuck for more than 12 seconds;
@@ -1165,22 +1221,27 @@ export default function MapComponent({
 
       <div data-tour="map-tools" className="absolute top-3 right-3 z-[500] flex flex-col gap-2">
         {([
-          { key: 'select', label: 'Select', Icon: MousePointer2 },
-          { key: 'box', label: 'Box', Icon: Square },
-          { key: 'lasso', label: 'Lasso', Icon: PenTool },
-        ] as { key: ToolMode; label: string; Icon: any }[]).map(({ key, label, Icon }) => (
-          <button
-            key={key}
-            onClick={() => setTool(key)}
-            title={label}
-            className={`w-9 h-9 rounded-lg border shadow flex items-center justify-center transition-colors ${
-              tool === key
-                ? 'bg-[#2563eb] border-blue-500 text-white'
-                : 'bg-[#121620] border-white/[0.06] text-gray-300 hover:bg-[#1f2937]'
-            }`}
-          >
-            <Icon className="w-4 h-4" />
-          </button>
+          { key: 'select', label: 'Select', desc: 'Click polygons to select them', Icon: MousePointer2 },
+          { key: 'box', label: 'Box', desc: 'Drag a rectangle to select areas inside it', Icon: Square },
+          { key: 'lasso', label: 'Lasso', desc: 'Draw a freehand shape to select areas inside', Icon: LassoIcon },
+        ] as { key: ToolMode; label: string; desc: string; Icon: any }[]).map(({ key, label, desc, Icon }) => (
+          <div key={key} className="relative group">
+            <button
+              onClick={() => setTool(key)}
+              aria-label={label}
+              className={`w-9 h-9 rounded-lg border shadow flex items-center justify-center transition-colors ${
+                tool === key
+                  ? 'bg-[#2563eb] border-blue-500 text-white'
+                  : 'bg-[#121620] border-white/[0.06] text-gray-300 hover:bg-[#1f2937]'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+            </button>
+            <div className="pointer-events-none absolute right-full mr-2 top-1/2 -translate-y-1/2 whitespace-nowrap bg-gray-900 border border-gray-700 text-gray-200 text-xs px-2 py-1 rounded-md shadow-lg opacity-0 group-hover:opacity-100 transition-opacity">
+              <span className="font-semibold text-white">{label}</span>
+              <span className="text-gray-400"> · {desc}</span>
+            </div>
+          </div>
         ))}
         <button
           onClick={() => {
@@ -1230,6 +1291,33 @@ export default function MapComponent({
           </motion.button>
         )}
       </div>
+
+      {/* Map legend — mirrors the sidebar palette so the colors on the map
+          always match the gradient in the sidebar. */}
+      {colorStops && colorStops.length >= 2 && (
+        <div className="absolute bottom-3 left-3 z-[400] bg-[#121620]/85 backdrop-blur border border-white/[0.08] rounded-lg px-3 py-2 shadow-lg pointer-events-none max-w-[260px]">
+          <div className="text-[9px] uppercase font-bold text-gray-400 mb-1 tracking-wider">{metricLabel}</div>
+          <div
+            className="h-2 w-full rounded-full"
+            style={{
+              background: `linear-gradient(to right, ${colorStops.map((s) => s[1]).join(', ')})`,
+            }}
+          />
+          <div className="flex items-center justify-between text-[10px] font-semibold text-gray-200 mt-1 tabular-nums">
+            <span>{formatLegendValue(colorStops[0][0])}</span>
+            <span className="text-gray-500">·</span>
+            <span>{formatLegendValue(colorStops[colorStops.length - 1][0])}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function formatLegendValue(v: number): string {
+  if (!isFinite(v)) return '–';
+  const abs = Math.abs(v);
+  if (abs >= 1_000_000) return '$' + (v / 1_000_000).toFixed(1) + 'M';
+  if (abs >= 1_000) return '$' + (v / 1_000).toFixed(0) + 'K';
+  return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }

@@ -12,13 +12,34 @@ interface HommieChatProps {
   reportStats: any;
   marketHealth: any;
   selectedIds: string[];
-  onAreaSelect?: (queries: string[]) => void;
+  onAreaSelect?: (queries: string[], generateReportAfter?: boolean) => void;
   onGenerateReport?: () => void;
   getStatsForChatQueries?: (queries: string[]) => any;
   setBoundary?: (boundary: BoundaryKey) => void;
   setMetric?: any;
   setFilters?: any;
+  /** When this changes (non-null), a local assistant message is appended to the
+   *  chat without going through the model. Used to reliably announce "your
+   *  report is ready" the moment the report finishes generating. */
+  reportReadyMsg?: { id: number; text: string } | null;
 }
+
+/** Shown locally (no AI call) when the user clicks the 🚀 Get Started button. */
+const GET_STARTED_HELP = `👋 Welcome! Here's how to use me:
+
+To generate a report, simply type report followed by the area name — for example:
+
+• "report for Katy and Sugar Land"
+• "report for Tomball"
+• "report for Richmond"
+
+I'll automatically select that area on the map and generate the full report for you — prices, market health and more.
+
+You can also ask me to:
+• Compare areas — "compare Bellaire and Westchase"
+• Highlight an area without a report — "show me Cypress"
+• Change the map metric — "show price per sqft"
+• Filter properties — "show me 4 bedroom homes under $500k"`;
 
 function InteractiveQuestion({ toolInvocation, addToolResult }: { toolInvocation: any, addToolResult: any }) {
   const { question, options, isMultiSelect } = toolInvocation.args;
@@ -83,7 +104,7 @@ function InteractiveQuestion({ toolInvocation, addToolResult }: { toolInvocation
   );
 }
 
-export default function HommieChat({ 
+export default function HommieChat({
   boundary,
   metricLabel,
   reportStats,
@@ -94,7 +115,8 @@ export default function HommieChat({
   getStatsForChatQueries,
   setBoundary,
   setMetric,
-  setFilters
+  setFilters,
+  reportReadyMsg
 }: HommieChatProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
@@ -126,26 +148,32 @@ export default function HommieChat({
       if (toolCall.toolName === 'selectMapAreas') {
         const args = toolCall.args as { areasToSearch: string[]; generateReport: boolean };
         const { areasToSearch, generateReport } = args;
-        
+
         try {
           let toolResultData = null;
           if (onAreaSelect && areasToSearch && areasToSearch.length > 0) {
-            onAreaSelect(areasToSearch);
+            // Always defer report generation through the parent's pending-flag
+            // + useEffect pattern. Calling onGenerateReport() synchronously here
+            // would read the pre-commit selectedIds (length === 0) and bail
+            // with "Select one or more areas on the map" even though we just
+            // matched them.
+            onAreaSelect(areasToSearch, generateReport && !!onGenerateReport);
             if (getStatsForChatQueries) {
               toolResultData = getStatsForChatQueries(areasToSearch);
             }
-          }
-          
-          if (generateReport && onGenerateReport) {
+          } else if (generateReport && onGenerateReport) {
+            // No areas to select — fire the report immediately.
             onGenerateReport();
           }
 
           addToolResult({
             toolCallId: toolCall.toolCallId,
-            result: { 
-              success: true, 
-              message: `Successfully matched areas and ${generateReport ? 'generated report' : 'updated selection'}.`,
-              data: toolResultData 
+            result: {
+              success: true,
+              message: generateReport
+                ? `Report generated for the selected areas. Now respond with a brief, friendly confirmation that the report is ready and ask the user if they need anything else. Do not stay silent.`
+                : `Successfully matched areas and updated selection on the map. Now respond with a brief confirmation describing what was selected.`,
+              data: toolResultData
             },
           });
         } catch (error) {
@@ -176,6 +204,25 @@ export default function HommieChat({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Deterministic post-report announcement: the parent bumps reportReadyMsg
+  // when the report finishes generating, and we append a local assistant
+  // message so the user is never left in silence (the model sometimes stays
+  // quiet after a tool call roundtrip).
+  useEffect(() => {
+    if (!reportReadyMsg) return;
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === `report-ready-${reportReadyMsg.id}`)) return prev;
+      return [
+        ...prev,
+        {
+          id: `report-ready-${reportReadyMsg.id}`,
+          role: 'assistant' as const,
+          content: reportReadyMsg.text,
+        },
+      ];
+    });
+  }, [reportReadyMsg, setMessages]);
 
   const clearChat = () => {
     setMessages([greetingMessage]);
@@ -307,7 +354,12 @@ export default function HommieChat({
               <div className="flex gap-2 overflow-x-auto pb-2 mb-1 scrollbar-hide">
                 <button
                   type="button"
-                  onClick={() => append({ role: 'user', content: '[GET_STARTED] Let\'s find my ideal real estate areas' })}
+                  onClick={() => {
+                    setMessages((prev) => {
+                      if (prev.some((m) => m.id === 'get-started-help')) return prev;
+                      return [...prev, { id: 'get-started-help', role: 'assistant' as const, content: GET_STARTED_HELP }];
+                    });
+                  }}
                   className="shrink-0 text-[11px] font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 px-3 py-1.5 rounded-full transition-colors whitespace-nowrap shadow-sm"
                 >
                   🚀 Get Started

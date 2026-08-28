@@ -1693,7 +1693,9 @@ export class RealEstateEngine {
     baseline: number;
     forecast3yr: number;
   } | null {
-    if (!ts || ts.length < 3) return null;
+    // Need at least 2 points to draw any line. With 2 points R² is always 1.0;
+    // we still produce a forecast but downstream UI should hide the R² badge in that case.
+    if (!ts || ts.length < 2) return null;
     const x = ts.map((_, i) => i);
     const y = ts.map((d) => d.value);
     const { slope, intercept, r2 } = this.linearRegression(x, y);

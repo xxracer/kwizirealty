@@ -29,8 +29,10 @@ export default function CollapsibleFilterSection({
       className={`bg-[#121620] border border-white/[0.06] rounded-2xl shadow-sm overflow-hidden ${className}`}
     >
       <button
+        type="button"
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between p-4 text-gray-400 hover:text-white transition-colors"
+        aria-expanded={open}
+        className="w-full flex items-center justify-between p-4 text-gray-400 hover:text-white hover:bg-white/[0.02] transition-colors cursor-pointer select-none"
       >
         <div className="flex items-center gap-2">
           {icon}
@@ -38,7 +40,7 @@ export default function CollapsibleFilterSection({
         </div>
         <motion.div
           animate={{ rotate: open ? 180 : 0 }}
-          transition={{ duration: 0.2 }}
+          transition={{ duration: 0.25, ease: 'easeInOut' }}
         >
           <ChevronDown className="w-4 h-4" />
         </motion.div>
@@ -49,7 +51,7 @@ export default function CollapsibleFilterSection({
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: 'easeInOut' }}
+            transition={{ duration: 0.25, ease: 'easeInOut' }}
             className="overflow-hidden"
           >
             <div className="px-4 pb-4">{children}</div>

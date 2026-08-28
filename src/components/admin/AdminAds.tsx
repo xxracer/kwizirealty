@@ -6,6 +6,15 @@ import { collection, getDocs, doc, setDoc, deleteDoc, updateDoc, query, orderBy 
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { Megaphone, Plus, Image as ImageIcon, Link as LinkIcon, Trash2, CheckCircle, AlertTriangle, Upload, X } from 'lucide-react';
 
+export type AdPlacement = 'corner' | 'top' | 'bottom' | 'right';
+
+export const AD_PLACEMENT_LABELS: Record<AdPlacement, string> = {
+  corner: 'Corner (bottom-left overlay)',
+  top: 'Above the map (top banner)',
+  bottom: 'Below the map (bottom banner)',
+  right: 'Right of the map (side banner)',
+};
+
 export interface AdCampaign {
   id: string;
   title: string;
@@ -13,6 +22,9 @@ export interface AdCampaign {
   mediaType: 'image' | 'video';
   targetUrl: string;
   beneficiaryName?: string;
+  /** Where the banner is displayed relative to the map. Defaults to 'corner'
+   *  for legacy campaigns created before placement existed. */
+  placement?: AdPlacement;
   status: 'active' | 'inactive';
   createdAt: number;
 }
@@ -26,6 +38,7 @@ export function AdminAds() {
   const [title, setTitle] = useState('');
   const [beneficiaryName, setBeneficiaryName] = useState('');
   const [targetUrl, setTargetUrl] = useState('');
+  const [placement, setPlacement] = useState<AdPlacement>('corner');
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -93,6 +106,7 @@ export function AdminAds() {
             mediaType: isVideo ? 'video' : 'image',
             targetUrl,
             beneficiaryName,
+            placement,
             status: 'inactive', // Default to inactive when created
             createdAt: Date.now(),
           };
@@ -104,6 +118,7 @@ export function AdminAds() {
           setTitle('');
           setBeneficiaryName('');
           setTargetUrl('');
+          setPlacement('corner');
           setMediaFile(null);
           fetchAds();
         }
@@ -133,6 +148,17 @@ export function AdminAds() {
     } catch (err) {
       console.error(err);
       setToast({ type: 'error', message: 'Failed to update status' });
+    }
+  };
+
+  const updatePlacement = async (ad: AdCampaign, next: AdPlacement) => {
+    try {
+      await updateDoc(doc(db, 'ads', ad.id), { placement: next });
+      fetchAds();
+      setToast({ type: 'success', message: `Placement updated: ${AD_PLACEMENT_LABELS[next]}` });
+    } catch (err) {
+      console.error(err);
+      setToast({ type: 'error', message: 'Failed to update placement' });
     }
   };
 
@@ -211,6 +237,23 @@ export function AdminAds() {
             </div>
 
             <div className="md:col-span-2">
+              <label className="text-xs font-medium text-gray-400 block mb-1.5">
+                Banner Placement (where the ad appears relative to the map)
+              </label>
+              <select
+                value={placement}
+                onChange={(e) => setPlacement(e.target.value as AdPlacement)}
+                className="w-full bg-background border border-border-subtle rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+              >
+                {(Object.keys(AD_PLACEMENT_LABELS) as AdPlacement[]).map((p) => (
+                  <option key={p} value={p} className="bg-surface">
+                    {AD_PLACEMENT_LABELS[p]}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="md:col-span-2">
               <label className="text-xs font-medium text-gray-400 block mb-1.5">Media Upload (Image, GIF, MP4)</label>
               <div 
                 onClick={() => fileInputRef.current?.click()}
@@ -283,14 +326,31 @@ export function AdminAds() {
                   <p className="text-sm text-gray-400">Beneficiary: {ad.beneficiaryName}</p>
                 )}
               </div>
-              <a 
-                href={ad.targetUrl.startsWith('+') || /^\d/.test(ad.targetUrl) ? `tel:${ad.targetUrl}` : ad.targetUrl} 
-                target="_blank" 
+              <a
+                href={ad.targetUrl.startsWith('+') || /^\d/.test(ad.targetUrl) ? `tel:${ad.targetUrl}` : ad.targetUrl}
+                target="_blank"
                 rel="noreferrer"
                 className="text-xs text-blue-400 hover:text-blue-300 truncate flex items-center gap-1"
               >
                 <LinkIcon className="w-3 h-3" /> {ad.targetUrl || 'No link provided'}
               </a>
+
+              <div>
+                <label className="text-[10px] font-medium uppercase tracking-wider text-gray-500 block mb-1">
+                  Placement
+                </label>
+                <select
+                  value={ad.placement || 'corner'}
+                  onChange={(e) => updatePlacement(ad, e.target.value as AdPlacement)}
+                  className="w-full bg-background border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
+                >
+                  {(Object.keys(AD_PLACEMENT_LABELS) as AdPlacement[]).map((p) => (
+                    <option key={p} value={p} className="bg-surface">
+                      {AD_PLACEMENT_LABELS[p]}
+                    </option>
+                  ))}
+                </select>
+              </div>
               
               <div className="mt-auto flex items-center justify-between pt-4 border-t border-white/5">
                 <button

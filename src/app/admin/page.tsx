@@ -21,6 +21,7 @@ import {
 } from '@/lib/geojsonUpload';
 import { AdminAds } from '@/components/admin/AdminAds';
 import { AdminUsers } from '@/components/admin/AdminUsers';
+import { RequireAdmin } from '@/components/RequireAuth';
 import {
   Upload,
   FileSpreadsheet,
@@ -51,6 +52,7 @@ import {
   ChevronDown,
   Megaphone,
   Users,
+  Loader2,
 } from 'lucide-react';
 
 type AdminSection = 'dashboard' | 'sales' | 'rent' | 'current' | 'tax' | 'schools' | 'boundaries' | 'areas' | 'ads' | 'users';
@@ -222,6 +224,24 @@ interface StagedFile {
   csvSkipped?: { row: number; reason: string }[];
 }
 
+/** Result of the per-section duplicate scan (see runDupesScan). */
+interface SectionDupes {
+  status: 'idle' | 'loading' | 'done' | 'error';
+  totalRows: number;
+  duplicateRows: number;
+  keyLabel: string;
+  samples: { label: string; count: number }[];
+  error?: string;
+}
+
+const NO_SECTION_DUPES: SectionDupes = {
+  status: 'idle',
+  totalRows: 0,
+  duplicateRows: 0,
+  keyLabel: '',
+  samples: [],
+};
+
 const FIELD_LABELS: Record<string, string> = {
   'Close Price': 'Close Price',
   'DOM': 'Days on Market (DOM)',
@@ -277,6 +297,19 @@ function formatBytes(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function timeAgo(ts: number | null | undefined): string {
+  if (!ts) return '—';
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(ts).toLocaleDateString();
 }
 
 function rowsToCsv(headers: string[], rows: Record<string, string>[]): string {
@@ -451,6 +484,14 @@ function FolderNode({ node, path, onPreview, onDelete }: { node: TreeNode, path:
 }
 
 export default function AdminPage() {
+  return (
+    <RequireAdmin>
+      <AdminPageInner />
+    </RequireAdmin>
+  );
+}
+
+function AdminPageInner() {
   const [section, setSection] = useState<AdminSection>('dashboard');
   const [dataTab, setDataTab] = useState<DataTab>('upload');
 
@@ -490,6 +531,9 @@ export default function AdminPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncSectionTitle, setSyncSectionTitle] = useState('');
+
   const reloadEngine = useCallback(async () => {
     await getEngine().loadAllCSV(true);
     setEngineLoaded(true);
@@ -516,6 +560,41 @@ export default function AdminPage() {
     const unsubscribe = cmsStore.subscribe(() => loadData());
     return () => unsubscribe();
   }, [loadData]);
+
+  // Register files that already exist in Firebase Storage but have no
+  // Firestore metadata (uploaded outside the CMS) so they appear in the lists.
+  // Runs automatically every time a data section is opened; if it takes longer
+  // than 400ms a loading popup is shown.
+  const runStorageSync = useCallback(async (sectionKey: AdminSection) => {
+    const config = sectionKey === 'dashboard' ? null : SECTION_CONFIG[sectionKey as keyof typeof SECTION_CONFIG];
+    if (!config && sectionKey !== 'dashboard') return;
+    setSyncSectionTitle(config?.title ?? 'all');
+    const popupTimer = setTimeout(() => setSyncLoading(true), 400);
+    try {
+      const fallback = config ? (Array.isArray(config.category) ? config.category[0] : config.category) : undefined;
+      const result = await cmsStore.importExistingStorageFiles({ fallbackCategory: fallback });
+      if (result.imported.length > 0) {
+        await loadData();
+        setToast({
+          type: 'success',
+          message: `Imported ${result.imported.length} file${result.imported.length !== 1 ? 's' : ''} from Firebase Storage.`,
+        });
+      }
+    } catch (err: unknown) {
+      console.error('Firebase Storage sync failed', err);
+      setToast({ type: 'error', message: 'Could not load files from Firebase Storage — check storage rules.' });
+    } finally {
+      clearTimeout(popupTimer);
+      setSyncLoading(false);
+    }
+  }, [loadData]);
+
+  // Sync on section open — including the dashboard, so files are registered
+  // as soon as the admin opens. Ads/Users don't touch data files.
+  useEffect(() => {
+    if (section === 'ads' || section === 'users') return;
+    runStorageSync(section);
+  }, [section, runStorageSync]);
 
   useEffect(() => {
     if (!getEngine().isLoaded || getEngine().data.length === 0) {
@@ -1102,6 +1181,158 @@ export default function AdminPage() {
     const q = searchQuery.toLowerCase();
     return sectionFiles.filter((f) => f.name.toLowerCase().includes(q));
   }, [sectionFiles, searchQuery]);
+
+  // Per-section data status: what has been uploaded and how many manual edits
+  // exist. Duplicates are handled separately below — scanned from THIS
+  // section's uploaded files only (the engine's data array mixes all sections,
+  // so scanning it would show the same number everywhere).
+  const sectionStats = useMemo(() => {
+    const fileCount = sectionFiles.length;
+    const fileRows = sectionFiles.reduce((a, f) => a + (f.rowCount || 0), 0);
+    const fileBytes = sectionFiles.reduce((a, f) => a + (f.size || 0), 0);
+    const lastUpload = sectionFiles.length
+      ? Math.max(...sectionFiles.map((f) => f.uploadedAt || 0))
+      : null;
+
+    const manualEdits =
+      section === 'areas'
+        ? overrides.length
+        : section === 'schools'
+        ? overrides.filter((o) => o.metric.endsWith('ETA Score')).length
+        : propertyOverrides.length;
+
+    return { fileCount, fileRows, fileBytes, lastUpload, manualEdits };
+  }, [sectionFiles, section, overrides, propertyOverrides.length]);
+
+  // ---- Per-section duplicate scan (runs against the section's own files) ----
+  const [sectionDupes, setSectionDupes] = useState<SectionDupes>(NO_SECTION_DUPES);
+  const dupesScanIdRef = useRef(0);
+
+  const runDupesScan = useCallback(
+    async (sectionKey: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, fileList: Omit<CMSFileRecord, 'rows'>[]) => {
+      const scanId = ++dupesScanIdRef.current;
+      if (!fileList.length) {
+        setSectionDupes({ ...NO_SECTION_DUPES, status: 'done' });
+        return;
+      }
+      setSectionDupes({ ...NO_SECTION_DUPES, status: 'loading' });
+      try {
+        let totalRows = 0;
+        let duplicateRows = 0;
+        let keyLabel = '';
+        const samples: { label: string; count: number }[] = [];
+        // NOTE: `Map` (lucide-react icon) shadows the global Map in this file,
+        // so plain records are used instead of Map instances.
+        const counts: Record<string, { count: number; label: string }> = {};
+        const bump = (k: string, label: string) => {
+          const entry = counts[k];
+          if (entry) entry.count++;
+          else counts[k] = { count: 1, label };
+        };
+
+        if (sectionKey === 'areas') {
+          // Custom-area GeoJSON files: a duplicate is the same normalized area
+          // name appearing more than once across the uploaded FeatureCollections.
+          keyLabel = 'Area name';
+          for (const f of fileList) {
+            if (!f.storageUrl) continue;
+            const res = await fetch(f.storageUrl);
+            const json = await res.json();
+            const feats: any[] = Array.isArray(json?.features) ? json.features : [];
+            totalRows += feats.length;
+            for (const feat of feats) {
+              const raw = String(
+                feat?.properties?.name ||
+                  feat?.properties?.NAME ||
+                  feat?.properties?.area ||
+                  feat?.properties?.AREA ||
+                  ''
+              ).trim();
+              if (!raw) continue;
+              bump(`area|${raw.toUpperCase()}`, raw);
+            }
+          }
+        } else if (sectionKey === 'schools') {
+          // School ratings: a duplicate is the same school name appearing more
+          // than once within the same level (elementary / middle / high).
+          keyLabel = 'School name (per level)';
+          const levels: { cat: CMSFileCategory; label: string }[] = [
+            { cat: 'school-elementary', label: 'Elementary' },
+            { cat: 'school-middle', label: 'Middle' },
+            { cat: 'school-high', label: 'High' },
+          ];
+          for (const { cat, label } of levels) {
+            const rows = await cmsStore.getUploadedRowsByCategories([cat]);
+            totalRows += rows.length;
+            for (const row of rows) {
+              const name = String(row['school_name_clean'] ?? '').trim();
+              if (!name) continue;
+              bump(`school|${cat}|${name.toUpperCase()}`, `${name} (${label})`);
+            }
+          }
+        } else {
+          // Property-style sections: scan only the CSVs uploaded to THIS
+          // section's categories, using the same dedupe key as the upload flow.
+          const config = SECTION_CONFIG[sectionKey as keyof typeof SECTION_CONFIG];
+          if (!config) throw new Error('Unknown section');
+          const cats = Array.isArray(config.category) ? config.category : [config.category];
+          keyLabel =
+            sectionKey === 'tax' ? 'MLS # + Parcel ID + Address' : 'MLS Number + Address + ZIP';
+          const rows = await cmsStore.getUploadedRowsByCategories(cats);
+          totalRows = rows.length;
+          const columns = getDedupeColumns(sectionKey as Parameters<typeof getDedupeColumns>[0]);
+          for (const row of rows) {
+            const parts = columns.map((col) => (row[col] ?? '').trim().toLowerCase());
+            if (parts.every((p) => !p)) continue;
+            bump(
+              parts.join('|'),
+              row['Address'] || row['MLS Number'] || row['MLS #'] || parts.join(' · ')
+            );
+          }
+        }
+
+        const dups = Object.values(counts)
+          .filter((v) => v.count > 1)
+          .sort((a, b) => b.count - a.count);
+        duplicateRows = dups.reduce((a, d) => a + d.count, 0);
+        if (scanId !== dupesScanIdRef.current) return; // a newer scan superseded this one
+        setSectionDupes({
+          status: 'done',
+          totalRows,
+          duplicateRows,
+          keyLabel,
+          samples: dups.slice(0, 8).map((d) => ({ label: d.label, count: d.count })),
+        });
+      } catch (err: any) {
+        if (scanId !== dupesScanIdRef.current) return;
+        setSectionDupes({
+          ...NO_SECTION_DUPES,
+          status: 'error',
+          error: err?.message || 'Failed to analyze files.',
+        });
+      }
+    },
+    []
+  );
+
+  const sectionFileSig = useMemo(
+    () => sectionFiles.map((f) => `${f.id}:${f.uploadedAt || 0}`).join('|'),
+    [sectionFiles]
+  );
+
+  useEffect(() => {
+    if (
+      section === 'dashboard' ||
+      section === 'ads' ||
+      section === 'users' ||
+      section === 'boundaries'
+    ) {
+      setSectionDupes(NO_SECTION_DUPES);
+      return;
+    }
+    runDupesScan(section, sectionFiles);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, sectionFileSig, runDupesScan]);
 
   const boundaryValueOptions = useMemo(() => {
     const key: keyof PropertyData =
@@ -1843,6 +2074,109 @@ export default function AdminPage() {
           </div>
         </div>
 
+        {/* Data status: uploads · edits · duplicates for THIS section */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="bg-surface border border-border-subtle rounded-2xl p-4">
+            <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-blue-400 mb-2">
+              <Upload className="w-3.5 h-3.5" /> Uploaded here
+            </div>
+            <div className="text-2xl font-bold text-white mb-1">
+              {sectionStats.fileCount} <span className="text-sm font-medium text-gray-400">file{sectionStats.fileCount !== 1 ? 's' : ''}</span>
+            </div>
+            <div className="text-xs text-gray-400 leading-relaxed">
+              {sectionStats.fileCount > 0 ? (
+                <>
+                  {formatNumber(sectionStats.fileRows)} rows · {formatBytes(sectionStats.fileBytes)}
+                  <br />
+                  Last upload <span className="text-gray-300">{timeAgo(sectionStats.lastUpload)}</span>
+                </>
+              ) : (
+                'Nothing uploaded yet in this section.'
+              )}
+            </div>
+          </div>
+
+          <div className="bg-surface border border-border-subtle rounded-2xl p-4">
+            <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-pink-400 mb-2">
+              <Pencil className="w-3.5 h-3.5" /> Manual edits
+            </div>
+            <div className="text-2xl font-bold text-white mb-1">
+              {sectionStats.manualEdits.toLocaleString()}
+            </div>
+            <div className="text-xs text-gray-400 leading-relaxed">
+              {section === 'areas'
+                ? 'Area metrics overridden by hand — these take priority over uploaded data.'
+                : section === 'schools'
+                ? 'School scores overridden by hand via “Edit Manually” — these take priority over uploaded ratings.'
+                : 'Properties modified by hand via “Edit Manually” — these take priority over uploaded data.'}
+            </div>
+          </div>
+
+          <div className="bg-surface border border-border-subtle rounded-2xl p-4">
+            <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-amber-400 mb-2">
+              <AlertTriangle className="w-3.5 h-3.5" /> Duplicates
+            </div>
+            {key === 'boundaries' ? (
+              <div className="text-xs text-gray-400 leading-relaxed">
+                Boundary files are drawn as-is on the map; duplicate features are detected at upload
+                time and shown in the staging area.
+              </div>
+            ) : sectionDupes.status === 'loading' ? (
+              <div className="text-xs text-gray-400 leading-relaxed flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing uploaded files…
+              </div>
+            ) : sectionDupes.status === 'error' ? (
+              <div className="text-xs text-red-400 leading-relaxed">
+                Could not analyze the files ({sectionDupes.error}).
+                <button
+                  onClick={() => runDupesScan(key, sectionFiles)}
+                  className="block mt-1 text-gray-300 underline hover:text-white"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : sectionStats.fileCount === 0 ? (
+              <div className="text-xs text-gray-400 leading-relaxed">
+                Nothing uploaded yet in this section — no duplicates possible.
+              </div>
+            ) : (
+              <>
+                <div className="text-2xl font-bold text-white mb-1">
+                  {sectionDupes.duplicateRows.toLocaleString()}{' '}
+                  <span className="text-sm font-medium text-gray-400">rows</span>
+                </div>
+                <div className="text-xs text-gray-400 leading-relaxed">
+                  {sectionDupes.totalRows > 0 && sectionDupes.duplicateRows > 0 ? (
+                    <>
+                      {sectionDupes.duplicateRows.toLocaleString()} of{' '}
+                      {sectionDupes.totalRows.toLocaleString()} rows in{' '}
+                      <span className="text-gray-300">{config.title}</span> share the same{' '}
+                      <span className="text-gray-300">{sectionDupes.keyLabel}</span>.
+                    </>
+                  ) : (
+                    <>No duplicates found among the {sectionDupes.totalRows.toLocaleString()} rows uploaded to {config.title}.</>
+                  )}
+                </div>
+                {sectionDupes.samples.length > 0 && (
+                  <details className="mt-2 bg-white/[0.03] border border-border-subtle rounded-lg p-2.5 text-xs">
+                    <summary className="cursor-pointer text-gray-300 hover:text-white">
+                      Top duplicated entries ({sectionDupes.samples.length})
+                    </summary>
+                    <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
+                      {sectionDupes.samples.map((d, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2">
+                          <span className="text-gray-300 truncate" title={d.label}>{d.label}</span>
+                          <span className="text-amber-400 font-semibold shrink-0">×{d.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
         {dataTab === 'upload' ? (
           <>
             <div className="grid lg:grid-cols-3 gap-6">
@@ -2215,6 +2549,16 @@ export default function AdminPage() {
             <div className="px-5 py-3 border-t border-border-subtle text-xs text-gray-500">
               Showing first 100 of {previewFile.rows.length.toLocaleString()} rows
             </div>
+          </div>
+        </div>
+      )}
+
+      {syncLoading && (
+        <div className="fixed inset-0 z-[10000] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#121620] border border-white/[0.08] rounded-2xl shadow-2xl px-8 py-7 flex flex-col items-center gap-3 max-w-xs text-center">
+            <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
+            <p className="text-sm font-bold text-white">Loading data from Firebase…</p>
+            <p className="text-xs text-gray-400">Checking Firebase Storage for {syncSectionTitle.toLowerCase()} files</p>
           </div>
         </div>
       )}

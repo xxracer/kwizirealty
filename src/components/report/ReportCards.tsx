@@ -19,6 +19,7 @@ import {
   AlertTriangle,
   Pin,
   GripVertical,
+  Info,
 } from 'lucide-react';
 import {
   BarChart,
@@ -65,6 +66,34 @@ function formatMetricValue(metric: MetricKey, value: number): string {
   if (metric === 'Last Year Tax Rate') return value.toFixed(2) + '%';
   if (metric === 'Elem ETA Score' || metric === 'Middle ETA Score' || metric === 'High ETA Score') return value.toFixed(0);
   return formatMoney(value);
+}
+
+function r2Color(r2: number): string {
+  if (!isFinite(r2)) return 'text-gray-400';
+  if (r2 >= 0.7) return 'text-emerald-400';
+  if (r2 >= 0.4) return 'text-amber-400';
+  return 'text-rose-400';
+}
+
+function r2Label(r2: number): string {
+  if (!isFinite(r2)) return 'No data';
+  if (r2 >= 0.7) return 'Excellent fit';
+  if (r2 >= 0.4) return 'Moderate fit';
+  return 'Poor fit';
+}
+
+function R2Tooltip() {
+  return (
+    <div className="absolute bottom-full mb-2 right-0 w-56 bg-gray-900 border border-gray-700 text-gray-200 text-xs p-2.5 rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 font-normal text-left tracking-normal normal-case">
+      <div className="font-semibold text-white mb-1">R² (coefficient of determination)</div>
+      <p className="mb-1.5">Measures how well the forecast fits the historical data.</p>
+      <ul className="space-y-0.5 text-[10px]">
+        <li><span className="text-emerald-400">≥ 0.7</span> · Excellent fit</li>
+        <li><span className="text-amber-400">0.4–0.7</span> · Moderate fit</li>
+        <li><span className="text-rose-400">&lt; 0.4</span> · Poor fit / unreliable</li>
+      </ul>
+    </div>
+  );
 }
 
 const PIE_COLORS = ['#2c7be5', '#00d4ff', '#7c3aed', '#f59e0b', '#10b981'];
@@ -166,15 +195,14 @@ function CardShell({
         <div className="flex items-center gap-2">
           {onTogglePin && <PinHandle pinned={!!pinned} onClick={onTogglePin} />}
           {headerExtra}
-          {!compact && (
-            <button
-              onClick={() => setCollapsed(!collapsed)}
-              className="w-6 h-6 rounded bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 transition-colors"
-              title={collapsed ? "Expand" : "Collapse"}
-            >
-              <ArrowDown className={`w-3.5 h-3.5 transition-transform ${collapsed ? 'rotate-180' : ''}`} />
-            </button>
-          )}
+          <button
+            onClick={() => setCollapsed(!collapsed)}
+            className={`${compact ? 'w-5 h-5' : 'w-6 h-6'} rounded bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white transition-colors`}
+            title={collapsed ? "Expand" : "Collapse"}
+            aria-label={collapsed ? "Expand window" : "Collapse window"}
+          >
+            <ArrowDown className={`${compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} transition-transform ${collapsed ? 'rotate-180' : ''}`} />
+          </button>
         </div>
       </div>
       
@@ -363,16 +391,26 @@ export function MarketHealthCard({
       headerExtra={
         <>
           {onSet90Days && (
-            <button
-              onClick={onSet90Days}
-              className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
-                is90Days 
-                  ? 'bg-blue-500/20 border-blue-500/50 text-blue-400' 
-                  : 'bg-white/5 border-white/10 text-gray-400 hover:text-white hover:bg-white/10'
-              }`}
-            >
-              90d
-            </button>
+            <div className="relative flex items-center bg-white/5 border border-white/10 rounded-md overflow-hidden">
+              <button
+                onClick={() => { if (is90Days) onSet90Days(); }}
+                className={`text-[10px] px-1.5 py-0.5 font-semibold transition-colors ${
+                  !is90Days ? 'bg-blue-500/30 text-blue-300' : 'text-gray-400 hover:text-white'
+                }`}
+                title="Last 30 days"
+              >
+                30d
+              </button>
+              <button
+                onClick={() => { if (!is90Days) onSet90Days(); }}
+                className={`text-[10px] px-1.5 py-0.5 font-semibold transition-colors ${
+                  is90Days ? 'bg-blue-500/30 text-blue-300' : 'text-gray-400 hover:text-white'
+                }`}
+                title="Last 90 days"
+              >
+                90d
+              </button>
+            </div>
           )}
           {headerExtra}
         </>
@@ -556,8 +594,13 @@ export function TimeSeriesCard({
           </ResponsiveContainer>
         </div>
       ) : (
-        <div className={`flex items-center justify-center text-gray-500 ${compact ? 'h-40 text-[10px]' : 'h-64 text-xs'}`}>
-          Not enough periods for a trend.
+        <div className={`flex flex-col items-center justify-center text-center text-gray-500 ${compact ? 'h-40 text-[10px] px-2' : 'h-64 text-xs px-3'}`}>
+          <Clock className="w-5 h-5 mb-2 opacity-40" />
+          {timeSeries.length === 0 ? (
+            <span>Select an area to see its time series.</span>
+          ) : (
+            <span>Not enough periods for a trend — try a longer time range.</span>
+          )}
         </div>
       )}
     </CardShell>
@@ -645,14 +688,28 @@ export function ForecastCard({
             </div>
           </div>
           {!compact && (
-            <div className="text-center mt-2">
-              <span className="text-[10px] text-gray-500">R² = {forecast.r2.toFixed(2)} · Annual % = {forecast.annualPct.toFixed(2)}%</span>
+            <div className="text-center mt-2 flex items-center justify-center gap-2">
+              <span className={`text-[10px] font-semibold ${r2Color(forecast.r2)}`}>
+                R² = {forecast.r2.toFixed(2)} · {r2Label(forecast.r2)}
+              </span>
+              <div className="relative group">
+                <Info className="w-3 h-3 text-gray-500 group-hover:text-white transition-colors cursor-help" />
+                <R2Tooltip />
+              </div>
+              <span className="text-[10px] text-gray-500">· Annual % = {forecast.annualPct.toFixed(2)}%</span>
             </div>
           )}
         </>
       ) : (
-        <div className={`flex items-center justify-center text-gray-500 ${compact ? 'h-44 text-[10px]' : 'h-64 text-xs'}`}>
-          {timeSeries.length >= 3 ? 'Forecast needs more historical data.' : 'Select areas and a forecastable metric.'}
+        <div className={`flex flex-col items-center justify-center text-center text-gray-500 ${compact ? 'h-44 text-[10px] px-2' : 'h-64 text-xs px-3'}`}>
+          <TrendingUp className="w-5 h-5 mb-2 opacity-40" />
+          {timeSeries.length === 0 ? (
+            <span>Select areas and a forecastable metric.</span>
+          ) : timeSeries.length === 1 ? (
+            <span>Only one historical point — at least 2 are needed for a forecast.</span>
+          ) : (
+            <span>Forecast unavailable. Try a longer time period or different metric.</span>
+          )}
         </div>
       )}
     </CardShell>
@@ -887,13 +944,11 @@ export function ForecastComparisonCard({
         <div className="flex items-center gap-2">
           {!compact && lowR2Count > 0 && (
             <div className="relative group flex items-center">
-              <span className="flex items-center gap-1 text-[10px] text-amber-400 cursor-help">
+              <span className="flex items-center gap-1 text-[10px] text-rose-400 cursor-help">
                 <AlertTriangle className="w-3 h-3" />
                 {lowR2Count} low R²
               </span>
-              <div className="absolute bottom-full mb-2 right-0 w-48 bg-gray-900 border border-gray-700 text-gray-200 text-xs p-2 rounded shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 font-normal normal-case tracking-normal">
-                A low R² indicates the forecast model may not be statistically reliable for these areas.
-              </div>
+              <R2Tooltip />
             </div>
           )}
           {!compact && (
@@ -962,16 +1017,15 @@ export function ForecastComparisonCard({
                     </td>
                   )}
                   {!compact && (
-                    <td className={`py-1.5 text-right ${row.r2 < 0.4 ? 'text-amber-400 font-semibold' : 'text-gray-300'}`}>
+                    <td className={`py-1.5 text-right ${r2Color(row.r2)} font-semibold`}>
                       <span className="inline-flex items-center gap-1">
                         {row.r2.toFixed(2)}
+                        <div className="relative group flex items-center cursor-help">
+                          <Info className="w-3 h-3 opacity-60 group-hover:opacity-100" />
+                          <R2Tooltip />
+                        </div>
                         {row.r2 < 0.4 && (
-                          <div className="relative group flex items-center cursor-help">
-                            <AlertTriangle className="w-3 h-3" />
-                            <div className="absolute bottom-full mb-2 right-0 w-48 bg-gray-900 border border-gray-700 text-gray-200 text-xs p-2 rounded shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 font-normal text-left tracking-normal">
-                              A low R² indicates the forecast model may not be statistically reliable here.
-                            </div>
-                          </div>
+                          <AlertTriangle className="w-3 h-3 text-rose-400" />
                         )}
                       </span>
                     </td>
