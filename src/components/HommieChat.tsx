@@ -13,9 +13,17 @@ interface HommieChatProps {
   reportStats: any;
   marketHealth: any;
   selectedIds: string[];
-  onAreaSelect?: (queries: string[], generateReportAfter?: boolean) => void;
+  /** Display names of the currently selected areas — lets the model re-select
+   *  them ("generate the report" with no area named) via selectMapAreas. */
+  selectedAreaNames?: string[];
+  /** Returns the display names that actually matched on the active boundary
+   *  layer, or null when nothing matched — so the chat can report failures. */
+  onAreaSelect?: (queries: string[], generateReportAfter?: boolean) => string[] | null | void;
   onGenerateReport?: () => void;
   getStatsForChatQueries?: (queries: string[]) => any;
+  /** Real-time aggregates for the filters the bot is about to apply, so the
+   *  model can answer "how many / what average" in the same turn. */
+  getStatsForChatFilters?: (filters: any) => any;
   setBoundary?: (boundary: BoundaryKey) => void;
   setMetric?: any;
   setFilters?: any;
@@ -128,9 +136,11 @@ export default function HommieChat({
   reportStats,
   marketHealth,
   selectedIds,
+  selectedAreaNames,
   onAreaSelect,
   onGenerateReport,
   getStatsForChatQueries,
+  getStatsForChatFilters,
   setBoundary,
   setMetric,
   setFilters,
@@ -139,11 +149,22 @@ export default function HommieChat({
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Filter announcement queued during the stream. Appending it directly inside
+  // onToolCall gets WIPED by the next onUpdate (the SDK replaces the messages
+  // array while the stream is still running), so it is flushed once the
+  // request finishes (isLoading false).
+  const pendingFilterAnnouncement = useRef<{ id: string; text: string } | null>(null);
+  // Tool results held back on purpose. The user wants the bot's answer to
+  // arrive AFTER the report popup finishes loading — and adding a tool result
+  // is what triggers the model's roundtrip, so we hold them until the parent
+  // signals the report is ready (reportReadyMsg) and only then flush.
+  const heldToolResults = useRef<Array<{ toolCallId: string; result: any }>>([]);
   
   // Construct context object to send to the AI
   const contextData = {
     boundary,
     selectedAreasCount: selectedIds.length,
+    selectedAreaNames: selectedAreaNames || [],
     metricLabel,
     reportStats,
     marketHealth,
@@ -162,20 +183,35 @@ export default function HommieChat({
       contextData,
     },
     initialMessages: [greetingMessage],
+    // Failures used to be invisible (no bubble, no log the user could find).
+    onError: (err) => {
+      console.error('[Hommie] chat request failed:', err);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `chat-error-${Date.now()}`,
+          role: 'assistant' as const,
+          content: '⚠️ I could not reach the assistant. Check your connection and try again.',
+        },
+      ]);
+    },
     onToolCall: async ({ toolCall }) => {
+      console.info('[Hommie] tool call:', toolCall.toolName, JSON.stringify(toolCall.args));
       if (toolCall.toolName === 'selectMapAreas') {
         const args = toolCall.args as { areasToSearch: string[]; generateReport: boolean };
         const { areasToSearch, generateReport } = args;
 
+        console.info('[Hommie] selectMapAreas:', areasToSearch, 'generateReport:', generateReport);
         try {
           let toolResultData = null;
+          let matchedNames: string[] | null = null;
           if (onAreaSelect && areasToSearch && areasToSearch.length > 0) {
             // Always defer report generation through the parent's pending-flag
             // + useEffect pattern. Calling onGenerateReport() synchronously here
             // would read the pre-commit selectedIds (length === 0) and bail
             // with "Select one or more areas on the map" even though we just
             // matched them.
-            onAreaSelect(areasToSearch, generateReport && !!onGenerateReport);
+            matchedNames = (onAreaSelect(areasToSearch, generateReport && !!onGenerateReport) as string[] | null) ?? null;
             if (getStatsForChatQueries) {
               toolResultData = getStatsForChatQueries(areasToSearch);
             }
@@ -184,16 +220,56 @@ export default function HommieChat({
             onGenerateReport();
           }
 
-          addToolResult({
-            toolCallId: toolCall.toolCallId,
-            result: {
-              success: true,
-              message: generateReport
-                ? `Report generated for the selected areas. Now respond with a brief, friendly confirmation that the report is ready and ask the user if they need anything else. Do not stay silent.`
-                : `Successfully matched areas and updated selection on the map. Now respond with a brief confirmation describing what was selected.`,
-              data: toolResultData
-            },
-          });
+          if (matchedNames && matchedNames.length > 0 && generateReport && onGenerateReport) {
+            // HOLD the tool result: the answer must arrive AFTER the report
+            // popup finishes loading. The parent bumps reportReadyMsg when the
+            // report is done, and that effect flushes this result — which is
+            // what makes the model answer at exactly that moment.
+            heldToolResults.current.push({
+              toolCallId: toolCall.toolCallId,
+              result: {
+                success: true,
+                matchedAreas: matchedNames,
+                reportQueued: true,
+                message: `The report finished generating and is now displayed on screen for: ${matchedNames.join(', ')}. Respond with a brief, friendly confirmation naming the areas and confirming the report is ready. Do not stay silent.`,
+                data: toolResultData,
+              },
+            });
+            // Safety net: if the report never finishes (load error, cancelled,
+            // etc.), flush the held result anyway so the model answers instead
+            // of leaving the tool call pending forever.
+            window.setTimeout(() => {
+              const still = heldToolResults.current.find((h) => h.toolCallId === toolCall.toolCallId);
+              if (!still) return;
+              heldToolResults.current = heldToolResults.current.filter((h) => h.toolCallId !== toolCall.toolCallId);
+              addToolResult({
+                toolCallId: still.toolCallId,
+                result: {
+                  ...still.result,
+                  reportQueued: false,
+                  message:
+                    'The report did not finish loading. Tell the user the report could not be generated right now and suggest trying again or picking a smaller area.',
+                },
+              });
+            }, 120000);
+          } else {
+            addToolResult({
+              toolCallId: toolCall.toolCallId,
+              result: matchedNames && matchedNames.length > 0
+                ? {
+                    success: true,
+                    matchedAreas: matchedNames,
+                    reportQueued: generateReport,
+                    message: `Matched and selected: ${matchedNames.join(', ')}. Now respond with a brief confirmation naming what was selected.`,
+                    data: toolResultData,
+                  }
+                : {
+                    success: false,
+                    noMatch: true,
+                    message: `NO areas on the current map boundary matched: ${JSON.stringify(areasToSearch)}. Do NOT claim anything was selected or that a report was generated. Instead, apologize and tell the user you could not find those areas on the current boundary layer, and suggest trying a ZIP code or a nearby city name, or switching the boundary layer.`,
+                  },
+            });
+          }
         } catch (error) {
           addToolResult({
             toolCallId: toolCall.toolCallId,
@@ -236,8 +312,133 @@ export default function HommieChat({
         }
       } else if (toolCall.toolName === 'setMapFilters') {
         if (setFilters) {
-          setFilters((prev: any) => ({ ...prev, ...(toolCall.args as any).filters }));
-          addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map filters updated` } });
+          try {
+            const raw = { ...((toolCall.args as any).filters || {}) };
+            // Users type sale prices without the trailing zeros ("under $500" =
+            // $500k). A saleMin/saleMax below 10000 is always a mis-parse — the
+            // cheapest homes in Houston are far above that — so scale it up
+            // deterministically instead of showing an empty map. Rents are
+            // monthly and are NOT scaled.
+            if (typeof raw.saleMin === 'number' && raw.saleMin > 0 && raw.saleMin < 10000) raw.saleMin *= 1000;
+            if (typeof raw.saleMax === 'number' && raw.saleMax > 0 && raw.saleMax < 10000) raw.saleMax *= 1000;
+            setFilters((prev: any) => ({ ...prev, ...raw }));
+
+            // Real aggregates for the merged filters — the model answers the
+            // user's question with these instead of inventing numbers.
+            let stats: any = null;
+            try {
+              stats = getStatsForChatFilters ? getStatsForChatFilters(raw) : null;
+            } catch {
+              stats = null; // never block the tool result on a stats failure
+            }
+
+            // Deterministic report chain for EVERY filter request. The user
+            // wants the exact sequence: filters → top areas selected → report
+            // popup loads → bot answers. Models sometimes stop after the
+            // filters and never make the follow-up selectMapAreas call, so the
+            // client performs the whole chain here: select the top matching
+            // areas, queue the report, and HOLD the tool result until the
+            // popup has loaded. The interactive onboarding flow is exempt —
+            // its budget filters are immediately followed by a location
+            // question, and the report comes later in that flow.
+            const history = [...messages];
+            const lastUserIdx = history.map((m) => m.role).lastIndexOf('user');
+            const prevAssistant = lastUserIdx > 0
+              ? [...history.slice(0, lastUserIdx)].reverse().find((m) => m.role === 'assistant')
+              : null;
+            const isOnboardingAnswer = !!prevAssistant?.toolInvocations?.some(
+              (t: any) => t.toolName === 'askInteractiveQuestion'
+            );
+            const topNames: string[] = stats?.topAreas?.length
+              ? stats.topAreas.slice(0, 3).map((a: any) => a.name)
+              : [];
+            let reportHeld = false;
+            if (!isOnboardingAnswer && topNames.length > 0 && onAreaSelect && onGenerateReport) {
+              const matched = onAreaSelect(topNames, true) as string[] | null;
+              if (matched && matched.length > 0) {
+                reportHeld = true;
+                heldToolResults.current.push({
+                  toolCallId: toolCall.toolCallId,
+                  result: {
+                    success: true,
+                    appliedFilters: raw,
+                    reportQueued: true,
+                    message: `Filters applied and the report finished generating for the top matching areas: ${matched.join(', ')}. Do NOT call selectMapAreas or setMapFilters again for this request. Respond with a brief, friendly confirmation of the filters and that the report is on screen. Do not stay silent.`,
+                    data: stats,
+                  },
+                });
+                // Safety net: flush on timeout so the model still answers if
+                // the report never finishes.
+                window.setTimeout(() => {
+                  const still = heldToolResults.current.find((h) => h.toolCallId === toolCall.toolCallId);
+                  if (!still) return;
+                  heldToolResults.current = heldToolResults.current.filter((h) => h.toolCallId !== toolCall.toolCallId);
+                  addToolResult({
+                    toolCallId: still.toolCallId,
+                    result: {
+                      ...still.result,
+                      reportQueued: false,
+                      message: 'The report did not finish loading. Tell the user the report could not be generated right now and suggest trying again.',
+                    },
+                  });
+                }, 120000);
+              }
+            }
+
+            // Deterministic local answer — the model's continuation after a
+            // tool call sometimes arrives empty, so the user ALWAYS sees the
+            // applied filters (and the matching stats when available), the
+            // same guarantee as the reportReadyMsg pattern.
+            const LABELS: Record<string, string> = {
+              bedsMin: 'min beds', bedsMax: 'max beds',
+              bathsMin: 'min baths', bathsMax: 'max baths',
+              saleMin: 'min price', saleMax: 'max price',
+              rentMin: 'min rent', rentMax: 'max rent',
+              sqftMin: 'min sqft', sqftMax: 'max sqft',
+              yearMin: 'min year', yearMax: 'max year',
+              pool: 'pool',
+            };
+            const applied = Object.entries(raw)
+              .filter(([, v]) => v !== undefined && v !== '' && v !== 'any' && v !== 0)
+              .map(([k, v]) => `${LABELS[k] || k}: ${Array.isArray(v) ? v.join(', ') : typeof v === 'number' ? v.toLocaleString() : v}`);
+            let text = applied.length
+              ? `✅ Done — the map now shows properties with ${applied.join(', ')}.`
+              : '✅ Filters updated on the map.';
+            const s = stats?.stats;
+            if (s && s.count > 0) {
+              text += `\n\n🏠 ${s.count.toLocaleString()} matching properties · avg price $${Math.round(s.avgSale).toLocaleString()}`;
+              if (s.avgSqft) text += ` · avg ${Math.round(s.avgSqft).toLocaleString()} sqft`;
+              if (stats.topAreas?.length) {
+                text += `\n📍 Most in: ${stats.topAreas.slice(0, 3).map((a: any) => `${a.name} (${a.count.toLocaleString()})`).join(', ')}`;
+              }
+            } else if (s && s.count === 0) {
+              text += '\n\n⚠️ No properties match those filters — try widening the price range.';
+            }
+            if (reportHeld) {
+              text += '\n\n📊 Generating the report for the top matching areas — it will open on screen when ready.';
+            }
+            pendingFilterAnnouncement.current = { id: `filters-${toolCall.toolCallId}`, text };
+
+            if (!reportHeld) {
+              addToolResult({
+                toolCallId: toolCall.toolCallId,
+                result: {
+                  success: true,
+                  message: `Map filters updated: ${Object.entries(raw)
+                    .filter(([, v]) => v !== undefined && v !== '' && v !== 'any')
+                    .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(', ') : v}`)
+                    .join(', ') || '(none)'}. Use the "data" object (if present) to answer the user's question with REAL numbers. Do NOT invent numbers. If data is null, just confirm the filters were applied. IMPORTANT: if the user asked for a REPORT (not just to see results on the map), you MUST now call selectMapAreas with the top 1-3 area names from data.topAreas and generateReport: true — the report renders on screen automatically. Do not stop after the filters.`,
+                  data: stats,
+                },
+              });
+            }
+          } catch (error) {
+            console.error('[Hommie] setMapFilters failed:', error);
+            addToolResult({
+              toolCallId: toolCall.toolCallId,
+              result: { error: 'Failed to apply filters.' },
+            });
+          }
         }
       }
     }
@@ -247,12 +448,35 @@ export default function HommieChat({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Deterministic post-report announcement: the parent bumps reportReadyMsg
-  // when the report finishes generating, and we append a local assistant
-  // message so the user is never left in silence (the model sometimes stays
-  // quiet after a tool call roundtrip).
+  // Flush the queued filter announcement once the request has finished, so no
+  // later onUpdate can wipe it (see pendingFilterAnnouncement above).
+  useEffect(() => {
+    if (isLoading) return;
+    const pending = pendingFilterAnnouncement.current;
+    if (!pending) return;
+    pendingFilterAnnouncement.current = null;
+    setMessages((prev) =>
+      prev.some((m) => m.id === pending.id)
+        ? prev
+        : [...prev, { id: pending.id, role: 'assistant' as const, content: pending.text }]
+    );
+  }, [isLoading, messages, setMessages]);
+
+  // Deterministic post-report moment: the parent bumps reportReadyMsg when the
+  // report finishes generating. If a report tool result is being held, flush
+  // it now — adding the result triggers the model's roundtrip, so its answer
+  // lands right after the popup loaded (and the local announcement is skipped
+  // to avoid two bubbles saying the same thing).
   useEffect(() => {
     if (!reportReadyMsg) return;
+    const held = heldToolResults.current;
+    if (held.length > 0) {
+      heldToolResults.current = [];
+      for (const h of held) {
+        addToolResult({ toolCallId: h.toolCallId, result: h.result });
+      }
+      return;
+    }
     setMessages((prev) => {
       if (prev.some((m) => m.id === `report-ready-${reportReadyMsg.id}`)) return prev;
       return [
@@ -264,6 +488,11 @@ export default function HommieChat({
         },
       ];
     });
+    // addToolResult is intentionally omitted: it is NOT stable between renders
+    // in @ai-sdk/react (it appears/disappears), which crashes this effect with
+    // "dependency array changed size". The closure from the render that
+    // re-runs this effect is the one the tool result needs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportReadyMsg, setMessages]);
 
   const clearChat = () => {
@@ -334,7 +563,14 @@ export default function HommieChat({
         {!isMinimized && (
           <>
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50/50 scroll-smooth">
-              {messages.map((m) => (
+              {messages.map((m) => {
+                // Skip empty assistant bubbles: a tool-call-only message whose
+                // final text never arrived renders as a blank white box.
+                const hasInteractive = m.toolInvocations?.some(
+                  (t) => t.toolName === 'askInteractiveQuestion'
+                );
+                if (m.role === 'assistant' && !m.content && !hasInteractive) return null;
+                return (
                 <div
                   key={m.id}
                   className={`flex items-start space-x-2 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -374,7 +610,8 @@ export default function HommieChat({
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
               
               {isLoading && (
                 <div className="flex items-start space-x-2 justify-start">

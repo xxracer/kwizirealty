@@ -5,7 +5,7 @@ import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import * as turf from '@turf/turf';
 import { PropertyData, BoundaryKey, engine, cleanBoundaryName, cleanSchoolName } from '@/lib/engine';
-import { MousePointer2, Square, Trash2, BarChart3, Loader2 } from 'lucide-react';
+import { MousePointer2, Square, Trash2, BarChart3, Loader2, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
 
@@ -201,6 +201,8 @@ interface MapComponentProps {
   fillOpacity: number;
   onClear?: () => void;
   onGenerateReport?: () => void;
+  /** Global reset (filters, metric, scale, layers) — shown only after a report. */
+  onReset?: () => void;
   reportGenerated?: boolean;
   isReportLoading?: boolean;
   /** True while the full dataset is streaming in for the map itself (not a
@@ -227,6 +229,7 @@ export default function MapComponent({
   fillOpacity,
   onClear,
   onGenerateReport,
+  onReset,
   reportGenerated,
   isReportLoading,
   isDataLoading,
@@ -1401,6 +1404,18 @@ export default function MapComponent({
         >
           <Trash2 className="w-4 h-4" />
         </button>
+
+        {/* Reset only appears once a report has been generated (user request):
+            it sits right below Clear selection in the map tool column. */}
+        {reportGenerated && selectedIds.length > 0 && onReset && (
+          <button
+            onClick={onReset}
+            title="Reset all"
+            className="w-9 h-9 rounded-lg border shadow bg-[#121620] border-white/[0.06] text-gray-300 hover:bg-amber-900/40 hover:text-amber-400 hover:border-amber-700 flex items-center justify-center transition-colors"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
+        )}
 
         {selectedIds.length > 0 && !reportGenerated && (
           <motion.button

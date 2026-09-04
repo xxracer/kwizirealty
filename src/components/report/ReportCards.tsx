@@ -30,6 +30,7 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  ComposedChart,
   CartesianGrid,
   LineChart,
   Line,
@@ -111,9 +112,17 @@ export interface Forecast {
   periods: string[];
   fitted: number[];
   forecast: number[];
+  /** Raw observed value per historical period (null inside the forecast). */
+  actual?: (number | null)[];
+  /** 95% prediction interval around the trend (both arrays span all periods). */
+  lower?: number[];
+  upper?: number[];
+  /** Weighted residual standard deviation (interval half-width scale). */
+  sigma?: number;
   baseline: number;
   annualDelta: number;
   forecast3yr: number;
+  forecast5yr?: number;
   r2: number;
   annualPct: number;
 }
@@ -642,11 +651,21 @@ export function ForecastCard({
 }) {
   const forecastChartData = useMemo(() => {
     if (!forecast) return [];
-    return forecast.periods.map((p, i) => ({
-      period: p,
-      fitted: isFinite(forecast.fitted[i]) ? forecast.fitted[i] : null,
-      forecast: isFinite(forecast.forecast[i]) ? forecast.forecast[i] : null,
-    }));
+    return forecast.periods.map((p, i) => {
+      const actual = forecast.actual?.[i] ?? null;
+      const inHistory = actual != null;
+      const lo = forecast.lower?.[i];
+      const hi = forecast.upper?.[i];
+      const band: [number, number] | null =
+        lo != null && hi != null && isFinite(lo) && isFinite(hi) ? [lo, hi] : null;
+      return {
+        period: p,
+        actual: inHistory ? actual : null,
+        fitted: isFinite(forecast.fitted[i]) ? forecast.fitted[i] : null,
+        forecast: !inHistory && isFinite(forecast.forecast[i]) ? forecast.forecast[i] : null,
+        band,
+      };
+    });
   }, [forecast]);
 
   return (
@@ -665,39 +684,65 @@ export function ForecastCard({
         <>
           <div className={compact ? 'h-36 w-full' : 'h-48 w-full'}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={forecastChartData}>
+              <ComposedChart data={forecastChartData}>
+                <defs>
+                  <linearGradient id="forecastBand" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#34d399" stopOpacity={0.25} />
+                    <stop offset="100%" stopColor="#34d399" stopOpacity={0.05} />
+                  </linearGradient>
+                  <linearGradient id="forecastTrend" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#2c7be5" stopOpacity={0.18} />
+                    <stop offset="100%" stopColor="#2c7be5" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
                 <XAxis dataKey="period" tick={{ fill: '#6b7280', fontSize: compact ? 8 : 8 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ fill: '#6b7280', fontSize: compact ? 8 : 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => formatMetricValue(metric, v)} />
+                <YAxis tick={{ fill: '#6b7280', fontSize: compact ? 8 : 9 }} axisLine={false} tickLine={false} tickFormatter={(v) => formatMetricValue(metric, v)} domain={['dataMin - 5%', 'dataMax + 5%']} />
                 <RechartsTooltip
                   contentStyle={{ backgroundColor: '#161a24', border: '1px solid #374151', borderRadius: '8px' }}
-                  formatter={(val: any, name: any) => [val != null ? formatMetricValue(metric, Number(val)) : '-', name]}
+                  formatter={(val: any, name: any) => {
+                    if (val == null) return ['-', name];
+                    if (Array.isArray(val)) return [`between ${formatMetricValue(metric, Number(val[0]))} and ${formatMetricValue(metric, Number(val[1]))}`, '95% interval'];
+                    const labels: Record<string, string> = { actual: 'Actual', fitted: 'Fitted', forecast: 'Forecast' };
+                    return [formatMetricValue(metric, Number(val)), labels[name] || name];
+                  }}
                   labelStyle={{ color: '#9ca3af' }}
                 />
-                <ReferenceLine x={timeSeries[timeSeries.length - 1]?.period} stroke="#ffffff40" />
-                <Line type="monotone" dataKey="fitted" stroke="#2c7be5" strokeWidth={2} dot={false} name="Fitted" />
-                <Line type="monotone" dataKey="forecast" stroke="#00d4ff" strokeWidth={2} strokeDasharray="5 5" dot={false} name="Forecast" />
-              </LineChart>
+                {/* 95% prediction interval band (Recharts range area) */}
+                <Area type="monotone" dataKey="band" stroke="none" fill="url(#forecastBand)" isAnimationActive={false} connectNulls />
+                {/* Trend fill under the fitted line */}
+                <Area type="monotone" dataKey="fitted" stroke="none" fill="url(#forecastTrend)" isAnimationActive={false} connectNulls />
+                <ReferenceLine x={timeSeries[timeSeries.length - 1]?.period} stroke="#ffffff40" strokeDasharray="4 4" />
+                <Line type="monotone" dataKey="actual" stroke="#2c7be5" strokeWidth={2} dot={false} name="Actual" connectNulls={false} />
+                <Line type="monotone" dataKey="fitted" stroke="#94a3b8" strokeWidth={1.5} dot={false} name="Fitted" opacity={0.8} />
+                <Line type="monotone" dataKey="forecast" stroke="#34d399" strokeWidth={2} strokeDasharray="5 5" dot={false} name="Forecast" connectNulls={false} />
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
-          <div className={`grid gap-2 mt-3 ${compact ? 'grid-cols-3' : 'grid-cols-3'}`}>
+          <div className={`grid gap-2 mt-3 ${compact ? 'grid-cols-4' : 'grid-cols-4'}`}>
             <div className="bg-[#0b0e14] border border-white/[0.06] rounded-lg p-2 text-center">
               <div className={`text-gray-500 uppercase font-bold ${compact ? 'text-[8px]' : 'text-[10px]'}`}>Baseline</div>
-              <div className={`font-bold text-white ${compact ? 'text-xs' : 'text-sm'}`}>{formatMetricValue(metric, forecast.baseline)}</div>
+              <div className={`font-bold text-white ${compact ? 'text-[11px]' : 'text-sm'}`}>{formatMetricValue(metric, forecast.baseline)}</div>
             </div>
             <div className="bg-[#0b0e14] border border-white/[0.06] rounded-lg p-2 text-center">
               <div className={`text-gray-500 uppercase font-bold ${compact ? 'text-[8px]' : 'text-[10px]'}`}>Annual Δ</div>
-              <div className={`font-bold ${forecast.annualDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'} ${compact ? 'text-xs' : 'text-sm'}`}>
+              <div className={`font-bold ${forecast.annualDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'} ${compact ? 'text-[11px]' : 'text-sm'}`}>
                 {formatMetricValue(metric, forecast.annualDelta)}/yr
               </div>
             </div>
             <div className="bg-[#0b0e14] border border-white/[0.06] rounded-lg p-2 text-center">
               <div className={`text-gray-500 uppercase font-bold ${compact ? 'text-[8px]' : 'text-[10px]'}`}>3-Yr</div>
-              <div className={`font-bold text-white ${compact ? 'text-xs' : 'text-sm'}`}>{formatMetricValue(metric, forecast.forecast3yr)}</div>
+              <div className={`font-bold text-white ${compact ? 'text-[11px]' : 'text-sm'}`}>{formatMetricValue(metric, forecast.forecast3yr)}</div>
+            </div>
+            <div className="bg-[#0b0e14] border border-white/[0.06] rounded-lg p-2 text-center">
+              <div className={`text-gray-500 uppercase font-bold ${compact ? 'text-[8px]' : 'text-[10px]'}`}>5-Yr</div>
+              <div className={`font-bold text-white ${compact ? 'text-[11px]' : 'text-sm'}`}>
+                {forecast.forecast5yr != null ? formatMetricValue(metric, forecast.forecast5yr) : '—'}
+              </div>
             </div>
           </div>
           {!compact && (
-            <div className="text-center mt-2 flex items-center justify-center gap-2">
+            <div className="text-center mt-2 flex items-center justify-center gap-2 flex-wrap">
               <span className={`text-[10px] font-semibold ${r2Color(forecast.r2)}`}>
                 R² = {forecast.r2.toFixed(2)} · {r2Label(forecast.r2)}
               </span>
@@ -706,6 +751,11 @@ export function ForecastCard({
                 <R2Tooltip />
               </div>
               <span className="text-[10px] text-gray-500">· Annual % = {forecast.annualPct.toFixed(2)}%</span>
+              {forecast.sigma != null && (
+                <span className="text-[10px] text-gray-500 flex items-center gap-1">
+                  · <span className="inline-block w-2.5 h-2 rounded-sm bg-emerald-400/40 border border-emerald-400/60" /> 95% prediction interval
+                </span>
+              )}
             </div>
           )}
         </>

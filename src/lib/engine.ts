@@ -1867,6 +1867,9 @@ export class RealEstateEngine {
     periods: string[];
     fitted: number[];
     forecast: number[];
+    actual: (number | null)[];
+    lower: number[];
+    upper: number[];
     isForecast: boolean[];
     slope: number;
     intercept: number;
@@ -1875,26 +1878,78 @@ export class RealEstateEngine {
     annualPct: number;
     baseline: number;
     forecast3yr: number;
+    forecast5yr: number;
+    sigma: number;
   } | null {
     // Need at least 2 points to draw any line. With 2 points R² is always 1.0;
     // we still produce a forecast but downstream UI should hide the R² badge in that case.
     if (!ts || ts.length < 2) return null;
     const x = ts.map((_, i) => i);
     const y = ts.map((d) => d.value);
-    const { slope, intercept, r2 } = this.linearRegression(x, y);
+
+    // Weighted least squares. Two weight sources:
+    //  - recency: recent months describe the current trend better than old ones
+    //    (0.9^age ≈ half-weight after ~7 months, quarter after ~13)
+    //  - sample size: a month aggregated from 400 sales is far more reliable
+    //    than one from 12, so weight by sqrt(n) (n=0 falls back to 1).
+    const lastIndex = x[x.length - 1];
+    const weights = ts.map((d, i) => Math.pow(0.9, lastIndex - i) * Math.sqrt(d.n > 0 ? d.n : 1));
+
+    let wSum = 0;
+    let wxSum = 0;
+    let wySum = 0;
+    let wxxSum = 0;
+    let wxySum = 0;
+    for (let i = 0; i < x.length; i++) {
+      const w = weights[i];
+      wSum += w;
+      wxSum += w * x[i];
+      wySum += w * y[i];
+      wxxSum += w * x[i] * x[i];
+      wxySum += w * x[i] * y[i];
+    }
+    const meanX = wxSum / wSum;
+    const meanY = wySum / wSum;
+    const sxx = wxxSum - wSum * meanX * meanX;
+    const sxy = wxySum - wSum * meanX * meanY;
+    const slope = sxx !== 0 ? sxy / sxx : 0;
+    const intercept = meanY - slope * meanX;
     if (!isFinite(slope) || !isFinite(intercept)) return null;
+
+    // Weighted R²: share of weighted variance the trend explains.
+    let ssRes = 0;
+    let ssTot = 0;
+    for (let i = 0; i < x.length; i++) {
+      const resid = y[i] - (slope * x[i] + intercept);
+      ssRes += weights[i] * resid * resid;
+      ssTot += weights[i] * (y[i] - meanY) * (y[i] - meanY);
+    }
+    const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+
+    // Weighted residual scale → 95% prediction interval. The band widens away
+    // from the data centroid (classic prediction-interval form) so far-future
+    // months are visibly less certain than next-month ones.
+    const sigma = wSum > 0 ? Math.sqrt(ssRes / wSum) : 0;
+    const z = 1.96;
+    const intervalHalf = (xi: number) =>
+      z * sigma * Math.sqrt(1 + 1 / wSum + ((xi - meanX) * (xi - meanX)) / (sxx || 1));
 
     const monthlySlope = slope;
     const annualDelta = monthlySlope * 12;
-    const baseline = y[y.length - 1] || intercept;
+    // Baseline is the FITTED value at "today" — the raw last month can be a
+    // noisy outlier, the fitted endpoint is the trend's best estimate.
+    const baseline = slope * lastIndex + intercept;
     const annualPct = baseline ? (annualDelta / baseline) * 100 : 0;
     const forecast3yr = baseline + annualDelta * 3;
+    const forecast5yr = baseline + annualDelta * 60;
 
-    const lastIndex = x[x.length - 1];
     const forecastMonths = 60;
     const periods: string[] = [];
     const fitted: number[] = [];
     const forecast: number[] = [];
+    const actual: (number | null)[] = [];
+    const lower: number[] = [];
+    const upper: number[] = [];
     const isForecast: boolean[] = [];
 
     // Extend period labels by month.
@@ -1904,9 +1959,13 @@ export class RealEstateEngine {
       d.setMonth(d.getMonth() + (i - lastIndex));
       const label = `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}`;
       const yhat = slope * i + intercept;
+      const half = intervalHalf(i);
       periods.push(label);
-      fitted.push(i <= lastIndex ? yhat : yhat);
+      fitted.push(yhat);
       forecast.push(i > lastIndex ? yhat : NaN);
+      actual.push(i < ts.length ? ts[i].value : null);
+      lower.push(Math.max(0, yhat - half));
+      upper.push(yhat + half);
       isForecast.push(i > lastIndex);
     }
 
@@ -1914,6 +1973,9 @@ export class RealEstateEngine {
       periods,
       fitted,
       forecast,
+      actual,
+      lower,
+      upper,
       isForecast,
       slope,
       intercept,
@@ -1922,6 +1984,8 @@ export class RealEstateEngine {
       annualPct,
       baseline,
       forecast3yr,
+      forecast5yr,
+      sigma,
     };
   }
 

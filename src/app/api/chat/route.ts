@@ -1,5 +1,41 @@
 import { google } from '@ai-sdk/google';
 import { streamText, tool } from 'ai';
+
+/**
+ * Flatten useChat messages into plain text history. Two reasons:
+ *  1. streamText (ai 3.4.x) does NOT convert the client's useChat format
+ *     (toolInvocations inside assistant messages), so tool results never
+ *     reached the model — it re-called the tool in a loop.
+ *  2. Sending assistant functionCall parts back to Gemini 3.x requires a
+ *     `thought_signature` the old @ai-sdk/google provider doesn't capture —
+ *     the API rejects the roundtrip with 400 ("missing thought_signature"),
+ *     which surfaced as an empty assistant bubble in the chat.
+ * Plain-text history avoids both: the tool results are delivered as a
+ * "[tool result]" user message and the model answers with text.
+ */
+function toModelMessages(messages: any[]): { role: 'system' | 'user' | 'assistant'; content: string }[] {
+  const out: { role: 'system' | 'user' | 'assistant'; content: string }[] = [];
+  for (const m of messages || []) {
+    if (m?.role === 'assistant' && Array.isArray(m.toolInvocations) && m.toolInvocations.length) {
+      if (m.content) out.push({ role: 'assistant', content: m.content });
+      const results = m.toolInvocations
+        .filter((t: any) => t && 'result' in t)
+        .map((t: any) => `Tool "${t.toolName}" returned: ${JSON.stringify(t.result)}`)
+        .join('\n');
+      if (results) {
+        out.push({
+          role: 'user',
+          content: `[tool result — not written by the user]\n${results}\nUse these results to answer the user's last message now. Do not call the same tool again unless the user asks for something new.`,
+        });
+      }
+      continue;
+    }
+    if (m?.role === 'user' || m?.role === 'assistant' || m?.role === 'system') {
+      out.push({ role: m.role, content: typeof m.content === 'string' ? m.content : '' });
+    }
+  }
+  return out;
+}
 import { z } from 'zod';
 import { AREA_ALIASES, resolveQueriesToZips } from '@/lib/areaAliases';
 
@@ -36,6 +72,7 @@ Your primary goal is to help users understand the real estate market using the p
 You currently have access to the following context data selected by the user on the map:
 - Boundary Type: ${contextData?.boundary || 'None'}
 - Selected Areas Count: ${contextData?.selectedAreasCount || 0}
+- Currently Selected Area Names: ${Array.isArray(contextData?.selectedAreaNames) && contextData.selectedAreaNames.length ? contextData.selectedAreaNames.join(', ') : 'None'}
 - Current Map Metric: ${contextData?.metricLabel || 'None'}
 
 Overall Statistics for Selected Areas:
@@ -73,6 +110,22 @@ either subdivisions or ZIP features. Example:
 5. Provide aggregated analytics and insights. Do not dump raw data or attempt to recreate large transaction histories.
 6. Distinguish between provided values and your own calculations derived from them.
 7. Be concise, friendly, and professional.
+8. When the user asks to see, show, or filter properties matching criteria (bedrooms, bathrooms, price, sqft, year built, pool), you MUST call \`setMapFilters\` — that data IS available as a live map filter. NEVER reply that this is unavailable. After the call, confirm in 1-2 sentences which filters were applied (e.g. "Done — the map now shows 4+ bedroom homes under $500k").
+
+### 3a. Report Requests (CRITICAL)
+When the user asks for a report, analysis, or stats for specific areas ("report for Tomball", "compare Katy and Cypress"):
+- Call \`selectMapAreas\` with those areas AND \`generateReport: true\`. The report renders on screen automatically — never say you cannot generate reports.
+- If the user asks to "generate the report" WITHOUT naming an area and areas are ALREADY selected (Selected Areas Count > 0), call \`selectMapAreas\` with \`areasToSearch\` set to the Currently Selected Area Names and \`generateReport: true\`.
+- If the user asks for a report about CRITERIA instead of an area ("report of 4-bedroom homes under $500k", "analyze homes under $300k"), just call \`setMapFilters\` with the criteria — the client automatically selects the top matching areas and generates the report right after. Do NOT call selectMapAreas for this unless the tool result explicitly says the report is missing.
+- If the user asks for a report but names NO area and NOTHING is selected, ask which area (or offer the top zones for their criteria); do not silently skip the report.
+
+### 3b. Price Interpretation (CRITICAL)
+Users almost never type full dollar amounts. When a sale price is mentioned WITHOUT a unit (k, thousand, million), it means THOUSANDS:
+- "under $500" / "below 500" / "under 500k" → saleMax: 500000
+- "between 300 and 600" → saleMin: 300000, saleMax: 600000
+- "under $1.5 million" → saleMax: 1500000
+- Rent ("rent") is monthly: "$2,000 rent" → rentMax: 2000 (rents are NOT scaled by 1000).
+NEVER send a saleMin/saleMax below 10000 — the cheapest homes in Houston are far above that.
 
 ### 4. Interactive Onboarding ("Get Started" Flow)
 - If the user sends a message like [GET_STARTED] or asks to "Get Started", you MUST follow this EXACT sequence of steps.
@@ -117,7 +170,10 @@ ${aliasHintBlock}
     // @ts-expect-error type incompatibility between ai and ai-sdk/google versions
     model: google('models/gemini-3.5-flash-lite'),
     system: systemPrompt,
-    messages,
+    // The client sends useChat-format messages (toolInvocations live inside
+    // assistant messages) — flattened to plain text so the tool results
+    // actually reach the model (see toModelMessages above).
+    messages: toModelMessages(messages),
     tools: {
       selectMapAreas: tool({
         description: 'Select areas on the map and optionally generate a report.',
@@ -163,7 +219,7 @@ ${aliasHintBlock}
             yearMin: z.number().optional().describe('Minimum year built.'),
             yearMax: z.number().optional().describe('Maximum year built.'),
             pool: z.enum(['any', 'yes', 'no']).optional().describe('Whether the property must have a pool.'),
-          }).describe('The filters to apply to the map data. Only send the keys you want to change — they are merged into the current filters.'),
+          }).describe('The filters to apply to the map data. Only send the keys you want to change — they are merged into the current filters. Sale prices in USD: a bare number like "under $500" means $500,000 (saleMax: 500000).'),
         }),
       }),
     },

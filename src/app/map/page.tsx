@@ -610,6 +610,10 @@ function MapPageInner() {
     setReportPhase('idle');
     setReportProgress(null);
     setReportError(null);
+    // A pending chat report no longer has its selection — cancel it instead of
+    // letting it fire later against whatever the user selects manually.
+    setPendingReport(false);
+    reportFromChatRef.current = false;
     loadFullData();
   }, [boundary, loadFullData]);
 
@@ -1052,6 +1056,7 @@ function MapPageInner() {
     // Convert to lowercase for fuzzy matching
     const normalizedQueries = queries.map(q => q.toLowerCase().trim());
     const matchedIds: string[] = [];
+    const matchedNames: string[] = [];
 
     // Search through the combined name source
     Object.entries(nameSource).forEach(([id, name]) => {
@@ -1062,6 +1067,7 @@ function MapPageInner() {
       );
       if (isMatch) {
         matchedIds.push(id);
+        matchedNames.push(name);
       }
     });
 
@@ -1073,7 +1079,10 @@ function MapPageInner() {
       if (aliasResult.zips.length > 0) {
         const zipSet = new Set(aliasResult.zips);
         Object.entries(boundaryLookup[boundary] || {}).forEach(([id, info]) => {
-          if (info.zip && zipSet.has(info.zip)) matchedIds.push(id);
+          if (info.zip && zipSet.has(info.zip)) {
+            matchedIds.push(id);
+            matchedNames.push(info.name);
+          }
         });
         if (matchedIds.length > 0) {
           console.info(
@@ -1092,7 +1101,10 @@ function MapPageInner() {
       if (aliasResult.zips.length > 0) {
         const zipSet = new Set(aliasResult.zips);
         Object.entries(nameSource).forEach(([id]) => {
-          if (zipSet.has(id)) matchedIds.push(id);
+          if (zipSet.has(id)) {
+            matchedIds.push(id);
+            matchedNames.push(nameSource[id]);
+          }
         });
         if (aliasResult.matched.length > 0) {
           console.info(
@@ -1106,7 +1118,18 @@ function MapPageInner() {
     if (matchedIds.length > 0) {
       // Add the matched IDs to the current selection, without duplicating
       setSelectedIds(prev => Array.from(new Set([...prev, ...matchedIds])));
+    } else {
+      // Nothing matched — drop the pending-report flag so a later manual
+      // selection by the user doesn't unexpectedly trigger a report.
+      console.warn('[handleAreaSelectFromChat] NO areas matched for:', queries, 'on boundary:', boundary);
+      if (generateReportAfter) {
+        reportFromChatRef.current = false;
+        setPendingReport(false);
+      }
     }
+    // Let the chat know what actually matched so the model (and the tool
+    // result) can tell matching failures apart from successes.
+    return matchedNames.length > 0 ? matchedNames : null;
   }, [effectiveNameMap, boundary, boundaryLookup]);
 
   const getStatsForChatQueries = useCallback((queries: string[]) => {
@@ -1178,6 +1201,37 @@ function MapPageInner() {
     return { stats, health, matchedNames };
   }, [dataReady, useSql, filteredData, boundary, effectiveNameMap, metric, boundaryLookup]);
 
+  // Real-time stats for chat-driven property filters. The bot merges the
+  // requested filters on top of the applied ones and this returns the matching
+  // rows' aggregates in ONE synchronous pass, so the model can answer
+  // "how many / what's the average / where" in the same turn it applies them.
+  // Null in SQL mode (rows live server-side) or before the dataset has loaded.
+  const getStatsForChatFilters = useCallback((newFilters: Partial<PropertyFilters>) => {
+    if (useSql || reportPhase !== 'ready') return null;
+    const merged = { ...appliedFilters, ...newFilters } as PropertyFilters;
+    const rows = engine.filterProperties(merged);
+    const stats = engine.getStatsForSelection(rows, boundary, []);
+    // Top 5 areas by match count so the bot can say where these homes cluster.
+    const counts: Record<string, number> = {};
+    for (const d of rows) {
+      const pid = engine.getBoundaryKey(boundary, d);
+      if (!pid) continue;
+      counts[pid] = (counts[pid] || 0) + 1;
+    }
+    const nameSource: Record<string, string> = {};
+    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+      nameSource[id] = info.name;
+    }
+    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+      if (!nameSource[id]) nameSource[id] = name;
+    }
+    const topAreas = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([id, n]) => ({ name: nameSource[id] || id, count: n }));
+    return { stats, topAreas };
+  }, [useSql, reportPhase, appliedFilters, boundary, boundaryLookup, effectiveNameMap]);
+
   const generateReport = useCallback(() => {
     if (reportPhase === 'loading') return;
     if (selectedIds.length === 0) {
@@ -1218,10 +1272,15 @@ function MapPageInner() {
   // updated, so selectedIds is guaranteed to reflect the latest selection.
   useEffect(() => {
     if (!pendingReport) return;
+    // The initial full-dataset load ALSO uses reportPhase 'loading'. Firing
+    // generateReport() inside that window would hit its 'loading' guard and
+    // silently bail — so wait here until the load finishes; this effect
+    // re-runs when reportPhase transitions.
+    if (reportPhase === 'loading') return;
     if (selectedIds.length === 0) return; // selection didn't actually land
     setPendingReport(false);
     generateReport();
-  }, [pendingReport, selectedIds, generateReport]);
+  }, [pendingReport, selectedIds, reportPhase, generateReport]);
 
   // Load the full dataset in the background right after the map first renders
   // (see loadFullData above). Reports for a selection still re-load just the
@@ -1231,6 +1290,20 @@ function MapPageInner() {
     // Run once on mount (boundary effect also fires on mount; the engine
     // de-duplicates concurrent loads via its in-flight promise).
   }, [loadFullData]);
+
+  // Display names of the current selection, so the chat model can re-select
+  // the same areas when the user says "generate the report" without naming one.
+  const selectedAreaNames = useMemo(() => {
+    if (selectedIds.length === 0) return [];
+    const nameSource: Record<string, string> = {};
+    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+      nameSource[id] = info.name;
+    }
+    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+      if (!nameSource[id]) nameSource[id] = name;
+    }
+    return selectedIds.map((id) => nameSource[id] || id);
+  }, [selectedIds, boundary, boundaryLookup, effectiveNameMap]);
 
   // Announce in the chat when a chat-triggered report finishes generating.
   // Deterministic — doesn't rely on the model saying anything.
@@ -1419,14 +1492,6 @@ function MapPageInner() {
           >
             <User className="w-4 h-4" />
             <span className="hidden lg:inline">Account</span>
-          </button>
-          <button
-            onClick={handleReset}
-            className="bg-[#1f2937] hover:bg-[#374151] text-white p-2 sm:px-3 sm:py-2 rounded-lg shadow flex items-center gap-2 font-semibold text-sm transition-all"
-            title="Reset all"
-          >
-            <RotateCcw className="w-4 h-4" />
-            <span className="hidden sm:inline">Reset</span>
           </button>
         </div>
       </header>
@@ -2063,6 +2128,7 @@ function MapPageInner() {
                     fillOpacity={fillOpacity}
                     onClear={() => setSelectedIds([])}
                     onGenerateReport={generateReport}
+                    onReset={handleReset}
                     reportGenerated={reportGenerated}
                     isReportLoading={reportPhase === 'loading' && dataLoadKind === 'report'}
                     isDataLoading={reportPhase === 'loading' && dataLoadKind === 'data'}
@@ -2166,9 +2232,11 @@ function MapPageInner() {
           reportStats={reportStats}
           marketHealth={marketHealth}
           selectedIds={selectedIds}
+          selectedAreaNames={selectedAreaNames}
           onAreaSelect={handleAreaSelectFromChat}
           onGenerateReport={generateReport}
           getStatsForChatQueries={getStatsForChatQueries}
+          getStatsForChatFilters={getStatsForChatFilters}
           setBoundary={setBoundary}
           setMetric={setMetric}
           setFilters={applyFiltersNow}
