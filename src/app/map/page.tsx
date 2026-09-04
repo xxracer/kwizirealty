@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef, useDeferredValue } from 'react';
 import SimpleSelect from '@/components/SimpleSelect';
 import Link from 'next/link';
 import ReportPanel from '@/components/ReportPanel';
@@ -10,6 +10,7 @@ import CollapsibleFilterSection from '@/components/CollapsibleFilterSection';
 import DraggableMapWindows, { WindowSelector, useDraggableWindows } from '@/components/DraggableMapWindows';
 import HommieChat from '@/components/HommieChat';
 import { RequireAuth } from '@/components/RequireAuth';
+import { useAuth } from '@/lib/authContext';
 import {
   PropertyData,
   BoundaryKey,
@@ -19,9 +20,19 @@ import {
   engine,
   cleanBoundaryName,
 } from '@/lib/engine';
+import {
+  isSQLEnabled,
+  hasActiveFilters,
+  resolveRatingFilters,
+  periodToWindow,
+  fetchSqlAggregates,
+  type SqlAggregates,
+} from '@/lib/sqlData';
 import { resolveQueriesToZips } from '@/lib/areaAliases';
+import { METRICS } from '@/lib/metrics';
+import { cmsStore, type CMSMetricOverride } from '@/lib/cmsStore';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, limit } from 'firebase/firestore';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 import type { AdCampaign } from '@/components/admin/AdminAds';
 import { motion, AnimatePresence } from 'framer-motion';
 import dynamic from 'next/dynamic';
@@ -53,6 +64,8 @@ import {
   PanelLeft,
   Check,
   Star,
+  Loader2,
+  Filter,
 } from 'lucide-react';
 
 const MapComponent = dynamic(() => import('@/components/MapComponent'), {
@@ -72,25 +85,6 @@ const BOUNDARIES: { key: BoundaryKey; name: string; short: string; premium?: boo
   { key: 'areas', name: 'Custom Areas', short: 'Custom', premium: false },
   { key: 'middle', name: 'Middle Schools', short: 'Middle', premium: true },
   { key: 'neighborhoods', name: 'Neighborhoods', short: 'Neighborhoods', premium: true },
-];
-
-const METRICS: { key: MetricKey; label: string; category: 'sale' | 'rental' | 'market' | 'school' | 'cost' }[] = [
-  { key: 'Close Price', label: 'Sales Price', category: 'sale' },
-  { key: 'Price per Sqft', label: 'Sale Price / Sq.Ft.', category: 'sale' },
-  { key: 'List-to-Sale Ratio', label: 'List-to-Sale Ratio', category: 'market' },
-  { key: 'Days on Market', label: 'Sale Days on Market', category: 'market' },
-  { key: 'Est. Rental Price', label: 'Rental Price', category: 'rental' },
-  { key: 'Rent-to-Sale Ratio', label: 'Rent-to-Sale Ratio', category: 'rental' },
-  { key: 'Rental Price per Sqft', label: 'Rental Price / Sq.Ft.', category: 'rental' },
-  { key: 'Rental Days On Market', label: 'Rent Days on Market', category: 'rental' },
-  { key: 'Lot Size', label: 'Lot Size', category: 'sale' },
-  { key: 'Appreciation Rate', label: 'Appreciation Rate', category: 'market' },
-  { key: 'Investor Index', label: "Investor's Index", category: 'market' },
-  { key: 'Annual HOA Fee', label: 'Annual HOA Fee', category: 'cost' },
-  { key: 'Last Year Tax Rate', label: 'Last Year Tax Rate', category: 'cost' },
-  { key: 'Elem ETA Score', label: 'Elementary ETA Score', category: 'school' },
-  { key: 'Middle ETA Score', label: 'Middle ETA Score', category: 'school' },
-  { key: 'High ETA Score', label: 'High School District ETA', category: 'school' },
 ];
 
 const PERIODS: { key: PropertyFilters['period']; label: string }[] = [
@@ -208,14 +202,126 @@ export default function MapPage() {
   );
 }
 
+/**
+ * Ad creative card — Google-ads style: every variant lives AROUND the map in
+ * normal document flow, never floating on top of it.
+ *   `inline-top` / `inline-bottom` — thin banner strips above/below the map.
+ *   `side-left` / `side-right`    — vertical banner columns beside the map
+ *                                   (hidden on phones, where side banners
+ *                                   would crush the map — same as Google).
+ * The whole card is one anchor; "Learn More" is a span so we never nest <a>.
+ */
+function AdCard({
+  ad,
+  variant,
+  onClose,
+}: {
+  ad: AdCampaign;
+  variant: 'inline-top' | 'inline-bottom' | 'side-left' | 'side-right';
+  onClose: () => void;
+}) {
+  const inline = variant === 'inline-top' || variant === 'inline-bottom';
+  const className = inline
+    ? `relative mx-auto w-full max-w-[64rem] h-16 sm:h-20 rounded-xl overflow-hidden bg-slate-900 border border-slate-700/50 shadow-2xl print:hidden no-print ${
+        variant === 'inline-top' ? 'mb-2' : 'mt-2'
+      }`
+    : 'relative hidden sm:block w-24 md:w-32 lg:w-40 self-stretch rounded-xl overflow-hidden bg-slate-900 border border-slate-700/50 shadow-2xl print:hidden no-print';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: inline ? (variant === 'inline-top' ? -12 : 12) : 0 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: inline ? (variant === 'inline-top' ? -12 : 12) : 0 }}
+      transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+      className={className}
+    >
+      <button
+        onClick={onClose}
+        className="absolute top-1.5 right-1.5 z-10 p-1 bg-black/50 hover:bg-black/80 rounded-full text-white backdrop-blur-sm transition-colors"
+      >
+        <X className="w-3 h-3" />
+      </button>
+      <a href={ad.targetUrl} target="_blank" rel="noreferrer" className="block relative bg-black group h-full">
+        {ad.mediaType === 'video' ? (
+          <video src={ad.mediaUrl} className="w-full h-full object-cover" muted loop autoPlay playsInline />
+        ) : (
+          <img src={ad.mediaUrl} alt={ad.title} className="w-full h-full object-cover" />
+        )}
+        {inline ? (
+          <>
+            {/* Thin-banner overlay: gradient only on the left third so the
+                creative stays visible, Sponsored + title on one line. */}
+            <div className="absolute inset-y-0 left-0 w-2/3 bg-gradient-to-r from-black/80 to-transparent flex items-center gap-2 pl-3 pr-8">
+              <span className="shrink-0 text-[9px] uppercase tracking-wider font-bold text-slate-300 bg-black/60 border border-white/10 rounded px-1.5 py-0.5">
+                Sponsored
+              </span>
+              <span className="text-white text-[11px] sm:text-xs font-bold truncate drop-shadow-md">
+                {ad.title}
+              </span>
+            </div>
+            <span className="absolute bottom-1.5 right-2 text-[10px] text-blue-300 font-bold drop-shadow-md">
+              Learn More →
+            </span>
+          </>
+        ) : (
+          <>
+            {/* Side banner (skyscraper): label + title stacked at the bottom. */}
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent p-2 pt-6 flex flex-col gap-1">
+              <span className="self-start text-[8px] uppercase tracking-wider font-bold text-slate-300 bg-black/60 border border-white/10 rounded px-1 py-0.5">
+                Sponsored
+              </span>
+              <span className="text-white text-[11px] font-bold leading-snug line-clamp-3 drop-shadow-md">
+                {ad.title}
+              </span>
+              <span className="text-[10px] text-blue-300 font-bold">Learn More →</span>
+            </div>
+          </>
+        )}
+      </a>
+    </motion.div>
+  );
+}
+
+// Closed ads stay hidden for 3 minutes; the timestamps live in localStorage
+// under this key so the close survives page reloads.
+const AD_RESHOW_MS = 3 * 60 * 1000;
+const AD_CLOSE_KEY = 'kwizi_closed_ads';
+
 function MapPageInner() {
+  const { user } = useAuth();
   const [boundary, setBoundary] = useState<BoundaryKey>('subdivisions');
   const [metric, setMetric] = useState<MetricKey>('Close Price');
+  // Aggregates resolved server-side via /api/query (Firebase SQL Connect) when
+  // the user has active filters or a report selection. null = use the client
+  // engine (no SQL, fetch in-flight, or SQL errored → graceful fallback).
+  const [sqlAgg, setSqlAgg] = useState<SqlAggregates | null>(null);
+  // CMS metric overrides (boundary+metric → value), applied to the SQL-returned
+  // map values to mirror engine.getMapValues' override pass (the server rows
+  // are raw — overrides live client-side).
+  const [cmsOverrides, setCmsOverrides] = useState<CMSMetricOverride[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    cmsStore
+      .listOverrides()
+      .then((o) => {
+        if (!cancelled) setCmsOverrides(o);
+      })
+      .catch(() => {
+        /* overrides are best-effort — ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Property data is no longer loaded on page load. We keep only the tiny
   // boundary snapshots and GeoJSON in memory for instant map rendering. The full
   // CSV rows are fetched on demand when the user clicks Generate Report for the
   // selected areas, so memory stays low and the page loads fast.
   const [reportPhase, setReportPhase] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  // What triggered the current 'loading' phase: streaming the dataset for the
+  // map ("Loading Data…") or building a report for selected areas
+  // ("Generating Report…"). The map overlay must not lie about which one.
+  const [dataLoadKind, setDataLoadKind] = useState<'data' | 'report'>('data');
   const [reportProgress, setReportProgress] = useState<{ loaded: number; total: number } | null>(null);
   // When the chat asks us to generate a report right after selecting areas,
   // we set this flag. A useEffect below watches selectedIds and fires the
@@ -245,7 +351,14 @@ function MapPageInner() {
     Partial<Record<BoundaryKey, Record<string, { name: string; zip?: string }>>>
   >({});
 
+  // Controls edit this DRAFT; the heavy polygon recompute only runs when the
+  // user commits with "Apply Filters". Programmatic changes (chat bot, reset,
+  // 90-days toggle) apply immediately.
   const [filters, setFilters] = useState<PropertyFilters>(DEFAULT_FILTERS);
+  const [appliedFilters, setAppliedFilters] = useState<PropertyFilters>(DEFAULT_FILTERS);
+  // True while the "Applying filters…" popup is up — i.e. the heavy recompute
+  // triggered by Apply hasn't settled yet.
+  const [filtersApplying, setFiltersApplying] = useState(false);
 
   const [layerSales, setLayerSales] = useState(false);
   const [layerRentals, setLayerRentals] = useState(false);
@@ -273,22 +386,85 @@ function MapPageInner() {
   const [accountModalMode, setAccountModalMode] = useState<'account' | 'save'>('account');
 
   const { active: activeWindows, setActive: setActiveWindows } = useDraggableWindows();
-  const [activeAd, setActiveAd] = useState<AdCampaign | null>(null);
-  const [showAd, setShowAd] = useState(true);
+  // Every active ad campaign, one per placement slot (top/bottom/right/corner).
+  const [activeAds, setActiveAds] = useState<AdCampaign[]>([]);
+  // Ads the user closed stay hidden for 3 minutes — per browser (localStorage),
+  // so a reload doesn't bring them back immediately. After 3 minutes they
+  // reappear automatically. Map of campaign id → close timestamp (ms).
+  const [closedAdIds, setClosedAdIds] = useState<Set<string>>(new Set());
+
+  // Restore closes from a previous visit on mount.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(AD_CLOSE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, number>;
+      const now = Date.now();
+      const stillClosed = new Set(
+        Object.entries(parsed)
+          .filter(([, ts]) => now - ts < AD_RESHOW_MS)
+          .map(([id]) => id)
+      );
+      if (stillClosed.size > 0) setClosedAdIds(stillClosed);
+    } catch {
+      /* corrupted storage — ignore, ads just show again */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Re-evaluate every 15s: once 3 minutes pass, closed ads come back.
+  useEffect(() => {
+    const id = setInterval(() => {
+      setClosedAdIds((prev) => {
+        if (prev.size === 0) return prev;
+        try {
+          const parsed = JSON.parse(localStorage.getItem(AD_CLOSE_KEY) || '{}') as Record<string, number>;
+          const now = Date.now();
+          const next = new Set([...prev].filter((cid) => now - (parsed[cid] ?? now) < AD_RESHOW_MS));
+          return next.size === prev.size ? prev : next;
+        } catch {
+          return new Set<string>();
+        }
+      });
+    }, 15000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     const fetchAd = async () => {
       try {
-        const q = query(collection(db, 'ads'), where('status', '==', 'active'), limit(1));
+        const q = query(collection(db, 'ads'), where('status', '==', 'active'));
         const snapshot = await getDocs(q);
-        if (!snapshot.empty) {
-          setActiveAd({ id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as AdCampaign);
-        }
+        setActiveAds(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })) as AdCampaign[]);
       } catch (err) {
         console.error('Error fetching ad', err);
       }
     };
     fetchAd();
+  }, []);
+
+  // First active campaign per placement (legacy ads without a placement fall
+  // into the corner slot).
+  const adsByPlacement = useMemo(() => {
+    const by: Partial<Record<NonNullable<AdCampaign['placement']>, AdCampaign>> = {};
+    for (const ad of activeAds) {
+      const p = ad.placement || 'corner';
+      if (!by[p]) by[p] = ad;
+    }
+    return by;
+  }, [activeAds]);
+
+  const closeAd = useCallback((id: string) => {
+    setClosedAdIds((prev) => new Set(prev).add(id));
+    // Persist with a timestamp so the close survives reloads and expires
+    // (ad reappears) after 3 minutes.
+    try {
+      const parsed = JSON.parse(localStorage.getItem(AD_CLOSE_KEY) || '{}') as Record<string, number>;
+      parsed[id] = Date.now();
+      localStorage.setItem(AD_CLOSE_KEY, JSON.stringify(parsed));
+    } catch {
+      /* storage unavailable — close just lasts for the session */
+    }
   }, []);
 
   const isMobile = useMediaQuery('(max-width: 1024px)');
@@ -383,13 +559,49 @@ function MapPageInner() {
     else setSidebarOpen(true);
   }, [isMobile]);
 
+  // Load (or re-load) the full dataset into the engine. Until it lands, every
+  // filter that acts on real rows — Market Metric, Property Filters, Scale
+  // Range, period — looks dead because the map colors come from the static
+  // per-boundary snapshot. Called on mount, after a boundary change and after
+  // a reset so the live data path is always restored (it's instant once the
+  // engine already holds the full dataset).
+  const loadFullData = useCallback(() => {
+    setDataLoadKind('data');
+    setReportError(null);
+    setReportPhase('loading');
+    engine
+      .loadAllCSV(false, (loaded, total) => setReportProgress({ loaded, total }))
+      .then((result) => {
+        if (result.ok) {
+          setReportPhase('ready');
+          setReportGeneration((g) => g + 1);
+          setReportError(null);
+        } else {
+          // Keep the snapshot view, but SAY IT: a silent failure here is what
+          // made the map look like filters do nothing — without the dataset
+          // the polygons can only show the static snapshot.
+          setReportPhase('idle');
+          setReportProgress(null);
+          setReportError(`Dataset load failed: ${result.error || 'unknown error'}. Filters are inactive until the data loads.`);
+        }
+      })
+      .catch((err) => {
+        setReportPhase('idle');
+        setReportProgress(null);
+        const msg = err instanceof Error ? err.message : String(err);
+        setReportError(`Dataset load failed: ${msg}. Filters are inactive until the data loads.`);
+      });
+  }, []);
+
   useEffect(() => {
     if (selectedIds.length === 0) {
       setReportGenerated(false);
-      setReportPhase('idle');
-      setReportProgress(null);
+      // Re-prime the full dataset instead of staying idle: otherwise clearing
+      // the selection (or a boundary change) would drop the map back onto the
+      // static snapshot and make every filter look dead again.
+      loadFullData();
     }
-  }, [selectedIds]);
+  }, [selectedIds, loadFullData]);
 
   useEffect(() => {
     // Changing boundary invalidates the current selection and report data.
@@ -398,18 +610,96 @@ function MapPageInner() {
     setReportPhase('idle');
     setReportProgress(null);
     setReportError(null);
-  }, [boundary]);
+    loadFullData();
+  }, [boundary, loadFullData]);
+
+  // The full filter pipeline (filterProperties + all aggregations + map
+  // rebuilds) processes ~763k rows synchronously. It reads APPLIED filters —
+  // draft edits wait for the Apply Filters button. useDeferredValue still
+  // coalesces any burst into a single pass.
+  const deferredAppliedFilters = useDeferredValue(appliedFilters);
+
+  // SQL Connect path. When the user has active filters (or a report selection)
+  // and SQL is enabled, the aggregates are resolved server-side via /api/query
+  // instead of re-scanning the 763k rows in RAM. If the fetch fails, sqlFailed
+  // flips and the client engine below takes over exactly as before.
+  const [sqlFailed, setSqlFailed] = useState(false);
+  const useSql = isSQLEnabled() && !sqlFailed && (hasActiveFilters(deferredAppliedFilters) || selectedIds.length > 0);
+
+  useEffect(() => {
+    if (!useSql) {
+      setSqlAgg(null);
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const resolved = resolveRatingFilters(engine, deferredAppliedFilters);
+        const { startTs, endTs } = periodToWindow(deferredAppliedFilters.period, engine.getReferenceDate());
+        const token = await user?.getIdToken();
+        if (!token) return; // not signed in — fall back to the client engine
+        const agg = await fetchSqlAggregates(
+          deferredAppliedFilters,
+          resolved,
+          boundary,
+          metric,
+          selectedIds,
+          startTs,
+          endTs,
+          token
+        );
+        if (cancelled) return;
+        if (agg) {
+          setSqlFailed(false);
+          setSqlAgg(agg);
+        } else {
+          setSqlFailed(true);
+          setSqlAgg(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setSqlFailed(true);
+          setSqlAgg(null);
+        }
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [useSql, deferredAppliedFilters, boundary, metric, selectedIds, user]);
+
+  // A new filter attempt retries SQL (a transient failure shouldn't disable it
+  // for the whole session).
+  useEffect(() => {
+    setSqlFailed(false);
+  }, [filters]);
 
   const filteredData = useMemo(() => {
+    if (useSql) return [];
     if (reportPhase !== 'ready') return [];
-    return engine.filterProperties(filters);
-  }, [reportPhase, filters, reportGeneration]);
+    return engine.filterProperties(deferredAppliedFilters);
+  }, [useSql, reportPhase, deferredAppliedFilters, reportGeneration]);
 
   const { values: metricValues, counts: sampleCounts, names: nameMap } = useMemo(() => {
+    if (useSql) {
+      const values = { ...(sqlAgg?.mapValues.values ?? {}) };
+      // Apply CMS metric overrides client-side (mirrors engine.getMapValues).
+      cmsOverrides.forEach((o) => {
+        if (o.boundary === boundary && o.metric === metric && values[o.boundaryId] !== undefined) {
+          values[o.boundaryId] = o.value;
+        }
+      });
+      return {
+        values,
+        counts: sqlAgg?.mapValues.counts ?? {},
+        names: {},
+      };
+    }
     return engine.getMapValues(filteredData, boundary, metric);
-  }, [filteredData, boundary, metric, reportGeneration]);
+  }, [useSql, sqlAgg, cmsOverrides, filteredData, boundary, metric, reportGeneration]);
 
-  const dataReady = reportPhase === 'ready' && filteredData.length > 0;
+  const dataReady = useSql ? !!sqlAgg : reportPhase === 'ready' && filteredData.length > 0;
 
   // Use the lightweight pre-computed snapshot for instant map coloring while
   // the full CSV dataset is still loading in the background.
@@ -421,13 +711,20 @@ function MapPageInner() {
     : initialMetrics?.[boundary]?.counts ?? {};
   const effectiveNameMap = dataReady ? nameMap : {};
 
+  // Seed the manual range inputs from the current data. While Auto scale is
+  // on, the inputs track the dataset; the moment the user turns it off we
+  // snapshot the current range once into the inputs so they start editing from
+  // the real values, and from there on their typed range is never reset by
+  // data updates (report ready, boundary change, period change, ...).
+  const prevAutoScaleRef = useRef(autoScale);
   useEffect(() => {
+    const reseed = prevAutoScaleRef.current !== autoScale ? true : autoScale;
+    prevAutoScaleRef.current = autoScale;
     const vals = Object.values(effectiveMetricValues).filter((v) => isFinite(v));
-    if (vals.length) {
-      setCustomMin(Math.min(...vals));
-      setCustomMax(Math.max(...vals));
-    }
-  }, [effectiveMetricValues]);
+    if (!vals.length || !reseed) return;
+    setCustomMin(Math.min(...vals));
+    setCustomMax(Math.max(...vals));
+  }, [effectiveMetricValues, autoScale]);
 
   const colorStops = useMemo(() => {
     return generateColorStops(
@@ -444,11 +741,13 @@ function MapPageInner() {
   }), []);
 
   const reportStats = useMemo(() => {
+    if (useSql) return sqlAgg?.reportStats ?? emptyStats;
     if (!dataReady) return emptyStats;
     return engine.getStatsForSelection(filteredData, boundary, selectedIds);
-  }, [filteredData, selectedIds, boundary, dataReady, emptyStats]);
+  }, [useSql, sqlAgg, dataReady, filteredData, selectedIds, boundary, emptyStats]);
 
   const marketHealth = useMemo(() => {
+    if (useSql) return sqlAgg?.marketHealth ?? null;
     if (!dataReady) return null;
     const isRental =
       metric === 'Est. Rental Price' ||
@@ -456,12 +755,13 @@ function MapPageInner() {
       metric === 'Rental Days On Market' ||
       metric === 'Rent-to-Sale Ratio';
     return engine.getMarketHealth(filteredData, boundary, selectedIds, isRental ? 'rental' : 'sale');
-  }, [filteredData, selectedIds, boundary, metric, dataReady]);
+  }, [useSql, sqlAgg, dataReady, filteredData, selectedIds, boundary, metric]);
 
   const timeSeries = useMemo(() => {
+    if (useSql) return sqlAgg?.timeSeries ?? [];
     if (!dataReady) return [];
     return engine.getTimeSeries(filteredData, boundary, metric, selectedIds);
-  }, [filteredData, boundary, metric, selectedIds, dataReady]);
+  }, [useSql, sqlAgg, dataReady, filteredData, boundary, metric, selectedIds]);
 
   const forecast = useMemo(() => {
     if (!timeSeries.length) return null;
@@ -469,22 +769,25 @@ function MapPageInner() {
   }, [timeSeries]);
 
   const forecastComparison = useMemo(() => {
+    if (useSql) return sqlAgg?.forecastComparison ?? [];
     if (!dataReady) return [];
     const full = engine.getForecastForSelection(filteredData, boundary, metric, selectedIds);
     // Sort by baseline descending to get the top 5 areas
     return full.sort((a, b) => b.baseline - a.baseline).slice(0, 5);
-  }, [filteredData, boundary, metric, selectedIds, dataReady]);
+  }, [useSql, sqlAgg, dataReady, filteredData, boundary, metric, selectedIds]);
 
   const chartData = useMemo(() => {
     if (!dataReady) return [];
-    return Object.entries(metricValues)
+    const source = useSql ? (sqlAgg?.mapValues.values ?? {}) : metricValues;
+    return Object.entries(source)
       .filter(([k]) => selectedIds.length === 0 || selectedIds.includes(k))
       .map(([name, value]) => ({ name: cleanBoundaryName(name), value }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 5);
-  }, [metricValues, selectedIds, dataReady]);
+  }, [useSql, sqlAgg, metricValues, selectedIds, dataReady]);
 
   const yearBuiltData = useMemo(() => {
+    if (useSql) return sqlAgg?.yearBuiltData ?? [];
     if (!dataReady) return [];
     const buckets: Record<string, number> = {
       'Before 1970': 0,
@@ -506,11 +809,62 @@ function MapPageInner() {
     return Object.entries(buckets)
       .map(([name, value]) => ({ name, value }))
       .filter((d) => d.value > 0);
-  }, [filteredData, selectedIds, boundary, dataReady]);
+  }, [useSql, sqlAgg, filteredData, selectedIds, boundary, dataReady]);
+
+  // MapComponent only reads lat/lng from rawData (points + bounds), so when SQL
+  // is active we hand it the capped point set from the server instead of the
+  // full filtered rows.
+  const mapRawData = useMemo(() => {
+    if (useSql && sqlAgg) return sqlAgg.points as unknown as PropertyData[];
+    return filteredData;
+  }, [useSql, sqlAgg, filteredData]);
+
+  // Property count shown in the map footer / report header. Under SQL the raw
+  // rows aren't in the browser, so we use the server's report count (exact for
+  // a selection, the capped sample otherwise).
+  const displayPropertyCount = useMemo(() => {
+    if (useSql) return sqlAgg?.reportStats.count ?? 0;
+    return filteredData.length;
+  }, [useSql, sqlAgg, filteredData]);
 
   const handleFilterChange = useCallback(
     (key: keyof PropertyFilters, value: number | string | string[]) => {
       setFilters((prev) => ({ ...prev, [key]: value }));
+    },
+    []
+  );
+
+  // True when the draft differs from what the map is currently showing.
+  const filtersDirty = useMemo(
+    () => JSON.stringify(filters) !== JSON.stringify(appliedFilters),
+    [filters, appliedFilters]
+  );
+
+  // Commit the draft. The popup goes up IMMEDIATELY and the browser gets a
+  // guaranteed 250ms to paint it BEFORE the ~763k-row recompute blocks the
+  // main thread (rAF-based waiting was racy — the popup sometimes never
+  // became visible). It stays at least MIN_APPLY_POPUP_MS after the swap.
+  const MIN_APPLY_POPUP_MS = 900;
+  const applyFilters = useCallback(() => {
+    if (!filtersDirty) return;
+    setFiltersApplying(true);
+    setTimeout(() => {
+      setAppliedFilters(filters);
+      // If the dataset isn't in memory yet, fetch it now — applying a
+      // filter must always end with live data on the map.
+      if (reportPhase !== 'ready') loadFullData();
+      // The heavy recompute happens during the render above; this timer
+      // only starts counting once the main thread is free again.
+      setTimeout(() => setFiltersApplying(false), MIN_APPLY_POPUP_MS);
+    }, 250);
+  }, [filters, filtersDirty, reportPhase, loadFullData]);
+
+  // For changes that must take effect immediately (chat bot, toggles): apply
+  // to BOTH the draft and the applied state in one go.
+  const applyFiltersNow = useCallback(
+    (updater: (prev: PropertyFilters) => PropertyFilters) => {
+      setFilters(updater);
+      setAppliedFilters(updater);
     },
     []
   );
@@ -650,13 +1004,27 @@ function MapPageInner() {
   const handleReset = useCallback(() => {
     setSelectedIds([]);
     setFilters(DEFAULT_FILTERS);
+    setAppliedFilters(DEFAULT_FILTERS);
+    setFiltersApplying(false);
     setSearchQuery('');
+    setSearchInput('');
+    // Reset every control the sidebar exposes, not just the property filters —
+    // "Reset all filters" previously left metric, boundary scale and layers as
+    // they were.
+    setMetric('Close Price');
+    setAutoScale(true);
+    setReversePalette(false);
+    setLayerSales(false);
+    setLayerRentals(false);
+    setLayerFlood(false);
     setReportGenerated(false);
-    setReportPhase('idle');
     setReportError(null);
     setReportProgress(null);
     setActiveWindows([]);
-  }, [setActiveWindows]);
+    // Re-prime the live data path (instant — the engine already has the full
+    // dataset) so filters stay active after a reset.
+    loadFullData();
+  }, [setActiveWindows, loadFullData]);
 
   const handleAreaSelectFromChat = useCallback((queries: string[], generateReportAfter?: boolean) => {
     if (!queries || queries.length === 0) return;
@@ -743,6 +1111,10 @@ function MapPageInner() {
 
   const getStatsForChatQueries = useCallback((queries: string[]) => {
     if (!queries || queries.length === 0 || !dataReady) return null;
+    // SQL mode: the raw rows live server-side, so an arbitrary-area preview
+    // can't be computed client-side. The chat still works — it just skips the
+    // stats preview rather than reporting zeros.
+    if (useSql) return null;
 
     const nameSource: Record<string, string> = {};
     for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
@@ -804,7 +1176,7 @@ function MapPageInner() {
     const health = engine.getMarketHealth(filteredData, boundary, matchedIds, isRental ? 'rental' : 'sale');
 
     return { stats, health, matchedNames };
-  }, [dataReady, filteredData, boundary, effectiveNameMap, metric, boundaryLookup]);
+  }, [dataReady, useSql, filteredData, boundary, effectiveNameMap, metric, boundaryLookup]);
 
   const generateReport = useCallback(() => {
     if (reportPhase === 'loading') return;
@@ -813,6 +1185,7 @@ function MapPageInner() {
       setTimeout(() => setReportError(null), 4000);
       return;
     }
+    setDataLoadKind('report');
     setReportPhase('loading');
     setReportError(null);
     setReportProgress(null);
@@ -849,6 +1222,15 @@ function MapPageInner() {
     setPendingReport(false);
     generateReport();
   }, [pendingReport, selectedIds, generateReport]);
+
+  // Load the full dataset in the background right after the map first renders
+  // (see loadFullData above). Reports for a selection still re-load just the
+  // relevant chunks on top of this when the engine doesn't hold the full data.
+  useEffect(() => {
+    loadFullData();
+    // Run once on mount (boundary effect also fires on mount; the engine
+    // de-duplicates concurrent loads via its in-flight promise).
+  }, [loadFullData]);
 
   // Announce in the chat when a chat-triggered report finishes generating.
   // Deterministic — doesn't rely on the model saying anything.
@@ -914,36 +1296,55 @@ function MapPageInner() {
     lowKey: keyof PropertyFilters;
     highKey: keyof PropertyFilters;
     format: (n: number) => string;
-  }) => (
-    <div>
-      <div className="flex justify-between text-xs text-gray-400 font-bold uppercase tracking-wider mb-2">
-        <span>{label}</span>
-        <span className="text-blue-400">
-          {format(filters[lowKey] as number)} - {format(filters[highKey] as number)}
-        </span>
+  }) => {
+    const low = filters[lowKey] as number;
+    const high = filters[highKey] as number;
+    // Readable range label: untouched ends read as "Any" instead of raw
+    // extremes like "$0 - $20M", and the sliders clamp each other so the
+    // label can never cross (e.g. "$9K - $0").
+    const rangeLabel =
+      low <= min && high >= max
+        ? 'Any'
+        : `${low <= min ? 'Any' : format(low)} – ${high >= max ? 'Any' : format(high)}`;
+    return (
+      <div>
+        <div className="flex justify-between text-xs text-gray-400 font-bold uppercase tracking-wider mb-2">
+          <span>{label}</span>
+          <span className="text-blue-400">{rangeLabel}</span>
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="range"
+            min={min}
+            max={max}
+            step={step}
+            value={low}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              handleFilterChange(lowKey, v);
+              // Keep low <= high: pushing min past max drags max along.
+              if (v > high) handleFilterChange(highKey, v);
+            }}
+            className="flex-1 accent-blue-500 h-1.5 bg-white/10 rounded-full appearance-none"
+          />
+          <input
+            type="range"
+            min={min}
+            max={max}
+            step={step}
+            value={high}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              handleFilterChange(highKey, v);
+              // Keep high >= low: pulling max below min drags min along.
+              if (v < low) handleFilterChange(lowKey, v);
+            }}
+            className="flex-1 accent-blue-500 h-1.5 bg-white/10 rounded-full appearance-none"
+          />
+        </div>
       </div>
-      <div className="flex gap-2">
-        <input
-          type="range"
-          min={min}
-          max={max}
-          step={step}
-          value={filters[lowKey] as number}
-          onChange={(e) => handleFilterChange(lowKey, Number(e.target.value))}
-          className="flex-1 accent-blue-500 h-1.5 bg-white/10 rounded-full appearance-none"
-        />
-        <input
-          type="range"
-          min={min}
-          max={max}
-          step={step}
-          value={filters[highKey] as number}
-          onChange={(e) => handleFilterChange(highKey, Number(e.target.value))}
-          className="flex-1 accent-blue-500 h-1.5 bg-white/10 rounded-full appearance-none"
-        />
-      </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="min-h-screen bg-[#0a0c10] text-white flex flex-col font-sans print:bg-white print:text-black">
@@ -966,7 +1367,7 @@ function MapPageInner() {
           {reportPhase === 'loading' && reportProgress && (
             <div className="flex flex-col gap-1 mr-2 min-w-[140px]">
               <div className="flex items-center justify-between text-[10px] text-blue-300">
-                <span>Loading report data {reportProgress.loaded}/{reportProgress.total}</span>
+                <span>Loading market data {reportProgress.loaded}/{reportProgress.total}</span>
                 <span>{Math.round((reportProgress.loaded / reportProgress.total) * 100)}%</span>
               </div>
               <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
@@ -980,7 +1381,7 @@ function MapPageInner() {
           {reportPhase === 'loading' && !reportProgress && (
             <div className="flex items-center gap-2 text-blue-300 text-sm mr-2">
               <div className="w-4 h-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
-              <span className="hidden sm:inline">Loading report data…</span>
+              <span className="hidden sm:inline">Loading market data…</span>
             </div>
           )}
           {reportError && (
@@ -1067,7 +1468,7 @@ function MapPageInner() {
           ) : (
             <>
               <span>
-                <span className="text-white font-semibold">{filteredData.length.toLocaleString()}</span> properties
+                <span className="text-white font-semibold">{displayPropertyCount.toLocaleString()}</span> properties
               </span>
               <span>
                 <span className="text-white font-semibold">{Object.keys(metricValues).length.toLocaleString()}</span> areas
@@ -1091,11 +1492,20 @@ function MapPageInner() {
           {sidebarOpen ? 'Hide filters' : 'Show filters'}
         </button>
 
-        {/* Left sidebar */}
+        {/* Mobile backdrop: tapping outside the filter drawer closes it */}
+        {sidebarOpen && (
+          <div
+            className="lg:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm print:hidden"
+            onClick={() => setSidebarOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+
+        {/* Left sidebar — slide-over drawer on mobile, static column on desktop */}
         <aside
           className={`${
             sidebarOpen ? 'flex' : 'hidden'
-          } lg:flex flex-col gap-4 w-full lg:w-80 xl:w-88 shrink-0 bg-[#0a0c10] border-r border-white/[0.06] p-4 overflow-y-auto print:hidden`}
+          } lg:flex fixed lg:static inset-y-0 left-0 z-40 flex-col gap-4 w-[85vw] max-w-sm lg:w-80 xl:w-88 shrink-0 bg-[#0a0c10] border-r border-white/[0.06] p-4 overflow-y-auto print:hidden`}
         >
           {/* Search */}
           <FilterSection icon={<Search className="w-4 h-4" />} title="Search" defaultOpen={false} dataTour="search">
@@ -1168,7 +1578,7 @@ function MapPageInner() {
           </FilterSection>
 
           {/* Period */}
-          <FilterSection icon={<CalendarDays className="w-4 h-4 text-amber-400" />} title="Close Period" defaultOpen={false}>
+          <FilterSection icon={<CalendarDays className="w-4 h-4 text-amber-400" />} title="Close Period" defaultOpen>
             <SimpleSelect
               value={filters.period}
               onChange={(v) => handleFilterChange('period', v as PropertyFilters['period'])}
@@ -1186,8 +1596,8 @@ function MapPageInner() {
               <RangeControl
                 label="Sale Price"
                 min={0}
-                max={5000000}
-                step={50000}
+                max={20000000}
+                step={100000}
                 lowKey="saleMin"
                 highKey="saleMax"
                 format={formatMoney}
@@ -1195,8 +1605,8 @@ function MapPageInner() {
               <RangeControl
                 label="Est. Rent"
                 min={0}
-                max={10000}
-                step={100}
+                max={50000}
+                step={500}
                 lowKey="rentMin"
                 highKey="rentMax"
                 format={formatMoney}
@@ -1211,7 +1621,7 @@ function MapPageInner() {
                   >
                     {[0, 1, 2, 3, 4, 5, 6].map((n) => (
                       <option key={n} value={n} className="bg-[#121620]">
-                        {n}+
+                        {n === 0 ? 'Any' : `${n}+`}
                       </option>
                     ))}
                   </select>
@@ -1225,7 +1635,7 @@ function MapPageInner() {
                   >
                     {[0, 1, 2, 3, 4, 5].map((n) => (
                       <option key={n} value={n} className="bg-[#121620]">
-                        {n}+
+                        {n === 0 ? 'Any' : `${n}+`}
                       </option>
                     ))}
                   </select>
@@ -1240,7 +1650,7 @@ function MapPageInner() {
               <RangeControl
                 label="Sq.Ft."
                 min={0}
-                max={10000}
+                max={20000}
                 step={250}
                 lowKey="sqftMin"
                 highKey="sqftMax"
@@ -1249,7 +1659,7 @@ function MapPageInner() {
               <RangeControl
                 label="Price / Sq.Ft."
                 min={0}
-                max={2000}
+                max={5000}
                 step={10}
                 lowKey="pricePerSqftMin"
                 highKey="pricePerSqftMax"
@@ -1258,8 +1668,8 @@ function MapPageInner() {
               <RangeControl
                 label="Lot Size"
                 min={0}
-                max={50000}
-                step={500}
+                max={1000000}
+                step={5000}
                 lowKey="lotSizeMin"
                 highKey="lotSizeMax"
                 format={(n) => n.toLocaleString()}
@@ -1276,8 +1686,8 @@ function MapPageInner() {
               <RangeControl
                 label="Days on Market"
                 min={0}
-                max={365}
-                step={5}
+                max={2000}
+                step={10}
                 lowKey="domMin"
                 highKey="domMax"
                 format={(n) => n + 'd'}
@@ -1436,6 +1846,9 @@ function MapPageInner() {
           {/* Scale / legend */}
           <FilterSection icon={<BarChart3 className="w-4 h-4 text-cyan-400" />} title="Scale Range" defaultOpen={false}>
             <div className="space-y-3">
+              <p className="text-[10px] text-gray-500 leading-relaxed">
+                Controls the color scale of the map: each area is colored by where its metric value falls between Min and Max. With Auto scale on, Min/Max fit the current data automatically.
+              </p>
               <div className="flex items-center justify-between">
                 <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
                   <input
@@ -1526,12 +1939,15 @@ function MapPageInner() {
               </button>
               {layerFlood && (
                 <p className="text-[10px] text-gray-500 leading-relaxed px-1">
-                  Flood Hazard Areas via FEMA NFHL (hazards.geoplatform.gov).
+                  Flood Hazard Areas via FEMA NFHL. Zoom in to city level for the zones to render.
                 </p>
               )}
             </div>
           </FilterSection>
 
+          {/* Apply button lives ON the map (mid-left) — intentionally not
+              duplicated here. Controls stage changes into a draft; the map
+              button commits them and recomputes the polygons. */}
           <button
             onClick={handleReset}
             className="w-full py-3 text-xs font-semibold text-gray-400 hover:text-white transition-colors flex items-center justify-center gap-2 bg-[#121620] border border-white/[0.06] rounded-xl"
@@ -1543,9 +1959,42 @@ function MapPageInner() {
 
         {/* Map + Report */}
         <main className="flex-1 flex flex-col min-h-0 overflow-y-auto">
-          <div className="p-4 lg:p-6">
-            {/* Map */}
-            <div className="relative w-full aspect-[4/3] min-h-[420px] max-h-[760px] print:hidden no-print">
+          {/* min-h-full makes the ads + map fill exactly the visible height, so
+              the bottom banner is reachable WITHOUT scrolling. Once a report is
+              generated below, the page grows and scrolls as before. */}
+          <div className="p-4 lg:p-6 flex flex-col min-h-full">
+            {/* 'top' ads sit ABOVE the map in normal flow — the map shrinks a
+                little but the ad never overlays it. */}
+            <AnimatePresence>
+              {adsByPlacement.top && !closedAdIds.has(adsByPlacement.top.id) && (
+                <AdCard
+                  key={adsByPlacement.top.id}
+                  ad={adsByPlacement.top}
+                  variant="inline-top"
+                  onClose={() => closeAd(adsByPlacement.top!.id)}
+                />
+              )}
+            </AnimatePresence>
+
+            {/* Map + side banners (Google-ads style: ads AROUND the map, never
+                on top of it). 'corner' → left column, 'right' → right column;
+                both hide on phones where side banners would crush the map. */}
+            <div className="flex gap-3 items-stretch sm:flex-1 sm:min-h-0">
+              <AnimatePresence>
+                {adsByPlacement.corner && !closedAdIds.has(adsByPlacement.corner.id) && (
+                  <AdCard
+                    key={adsByPlacement.corner.id}
+                    ad={adsByPlacement.corner}
+                    variant="side-left"
+                    onClose={() => closeAd(adsByPlacement.corner!.id)}
+                  />
+                )}
+              </AnimatePresence>
+
+            {/* On desktop the card stretches to whatever height is left after
+                the top/bottom banners (no aspect ratio → no page scroll). On
+                mobile it keeps a fixed 65vh. */}
+            <div className="relative flex-1 min-w-0 h-[65vh] max-h-[760px] sm:h-auto sm:min-h-[420px] print:hidden no-print">
               <div className="absolute inset-0 bg-[#121620] border border-white/[0.06] rounded-2xl shadow-2xl p-3 flex flex-col overflow-hidden">
                 <div className="flex items-center justify-between mb-3 px-1">
                   <div className="flex items-center gap-2 text-gray-400">
@@ -1554,10 +2003,10 @@ function MapPageInner() {
                     <span className="text-xs text-gray-500 hidden sm:inline">
                       {reportPhase === 'loading' ? (
                         reportProgress && reportProgress.total > 0
-                          ? `Loading report data ${reportProgress.loaded}/${reportProgress.total}…`
-                          : 'Loading report data…'
+                          ? `Loading market data ${reportProgress.loaded}/${reportProgress.total}…`
+                          : 'Loading market data…'
                       ) : (
-                        `${filteredData.length.toLocaleString()} properties · ${Object.keys(metricValues).length} areas`
+                        `${displayPropertyCount.toLocaleString()} properties · ${Object.keys(metricValues).length} areas`
                       )}
                     </span>
                   </div>
@@ -1591,73 +2040,12 @@ function MapPageInner() {
                     visible={reportGenerated && selectedIds.length > 0}
                     isLoading={!dataReady}
                     onClose={(key) => setActiveWindows(activeWindows.filter((k) => k !== key))}
-                    onSet90Days={() => handleFilterChange('period', filters.period === '90d' ? '30d' : '90d')}
-                    is90Days={filters.period === '90d'}
+                    period={filters.period}
+                    onSetPeriod={(p) =>
+                      applyFiltersNow((prev) => ({ ...prev, period: p as PropertyFilters['period'] }))
+                    }
                   />
 
-                  <AnimatePresence>
-                    {activeAd && showAd && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 20, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 20, scale: 0.95 }}
-                        transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-                        className={
-                          activeAd.placement === 'top'
-                            ? 'absolute top-3 inset-x-0 mx-auto z-[100] w-64 md:w-80 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
-                            : activeAd.placement === 'bottom'
-                              ? 'absolute bottom-3 inset-x-0 mx-auto z-[100] w-64 md:w-80 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
-                              : activeAd.placement === 'right'
-                                ? 'absolute right-3 top-3 z-[100] w-32 md:w-40 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
-                                : 'fixed bottom-6 left-6 z-[100] w-64 md:w-72 shadow-2xl rounded-2xl overflow-hidden bg-slate-900 border border-slate-700/50'
-                        }
-                      >
-                        <button
-                          onClick={() => setShowAd(false)}
-                          className="absolute top-2 right-2 z-10 p-1 bg-black/50 hover:bg-black/80 rounded-full text-white backdrop-blur-sm transition-colors"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                        <a
-                          href={activeAd.targetUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className={`block relative bg-black group ${
-                            activeAd.placement === 'right' ? 'aspect-[9/16]' : 'aspect-video'
-                          }`}
-                        >
-                          {activeAd.mediaType === 'video' ? (
-                            <video src={activeAd.mediaUrl} className="w-full h-full object-cover" muted loop autoPlay playsInline />
-                          ) : (
-                            <img src={activeAd.mediaUrl} alt={activeAd.title} className="w-full h-full object-cover" />
-                          )}
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-4">
-                            <span className="text-white text-sm font-bold truncate drop-shadow-md">
-                              {activeAd.title}
-                            </span>
-                          </div>
-                        </a>
-                        <div className="bg-slate-900 px-4 py-2 flex items-center justify-between">
-                          <span className="text-xs text-slate-400 font-medium">Sponsored</span>
-                          <a href={activeAd.targetUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-400 hover:text-blue-300 font-bold transition-colors">
-                            Learn More
-                          </a>
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  <HommieChat
-                    boundary={boundary}
-                    metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
-                    reportStats={reportStats}
-                    marketHealth={marketHealth}
-                    selectedIds={selectedIds}
-                    onAreaSelect={handleAreaSelectFromChat}
-                    onGenerateReport={generateReport}
-                    getStatsForChatQueries={getStatsForChatQueries}
-                    reportReadyMsg={reportReadyMsg}
-                  />
                   <MapComponent
                     boundary={boundary}
                     metricValues={effectiveMetricValues}
@@ -1667,7 +2055,7 @@ function MapPageInner() {
                     multiSelect={multiSelect}
                     selectedIds={selectedIds}
                     onSelectionChange={(ids) => setSelectedIds(ids)}
-                    rawData={filteredData}
+                    rawData={mapRawData}
                     showSales={layerSales}
                     showRentals={layerRentals}
                     showFlood={layerFlood}
@@ -1676,12 +2064,65 @@ function MapPageInner() {
                     onClear={() => setSelectedIds([])}
                     onGenerateReport={generateReport}
                     reportGenerated={reportGenerated}
-                    isReportLoading={reportPhase === 'loading'}
+                    isReportLoading={reportPhase === 'loading' && dataLoadKind === 'report'}
+                    isDataLoading={reportPhase === 'loading' && dataLoadKind === 'data'}
                     focusSelectionTick={searchFocusTick}
                   />
                 </div>
               </div>
+
+              {/* Floating Apply button ON the map, mid-left (user-requested
+                  spot). NO framer-motion here: it animates on the main thread,
+                  and the heavy filter recompute blocks that thread, leaving
+                  the button stuck at opacity 0 (invisible). Plain CSS only. */}
+              {filtersDirty && !filtersApplying && (
+                <button
+                  onClick={applyFilters}
+                  className="absolute left-4 top-1/2 -translate-y-1/2 z-[800] px-5 py-3 rounded-full bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold shadow-2xl shadow-black/50 border border-blue-400/40 flex items-center gap-2 whitespace-nowrap print:hidden no-print transition-transform hover:scale-105"
+                >
+                  <Filter className="w-4 h-4" />
+                  Apply Filters
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                </button>
+              )}
+
+              {/* Applying-filters popup — anchored to the MAP (not the whole
+                  viewport), plain div, no framer-motion (main-thread blocking
+                  would freeze it at opacity 0). */}
+              {filtersApplying && (
+                <div className="absolute inset-0 z-[900] bg-black/50 backdrop-blur-sm flex items-center justify-center print:hidden no-print">
+                  <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-3 shadow-2xl max-w-[280px] text-center">
+                    <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
+                    <p className="text-sm font-bold text-white tracking-wide">Applying filters…</p>
+                    <p className="text-xs text-gray-400">Updating map polygons and metrics for your selection.</p>
+                  </div>
+                </div>
+              )}
             </div>
+
+              <AnimatePresence>
+                {adsByPlacement.right && !closedAdIds.has(adsByPlacement.right.id) && (
+                  <AdCard
+                    key={adsByPlacement.right.id}
+                    ad={adsByPlacement.right}
+                    variant="side-right"
+                    onClose={() => closeAd(adsByPlacement.right!.id)}
+                  />
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* 'bottom' ads sit BELOW the map, also outside it. */}
+            <AnimatePresence>
+              {adsByPlacement.bottom && !closedAdIds.has(adsByPlacement.bottom.id) && (
+                <AdCard
+                  key={adsByPlacement.bottom.id}
+                  ad={adsByPlacement.bottom}
+                  variant="inline-bottom"
+                  onClose={() => closeAd(adsByPlacement.bottom!.id)}
+                />
+              )}
+            </AnimatePresence>
 
             {reportGenerated && selectedIds.length > 0 && (
               <div data-tour="report" ref={reportRef} className="mt-6 scroll-mt-6 analysis-panel">
@@ -1730,7 +2171,7 @@ function MapPageInner() {
           getStatsForChatQueries={getStatsForChatQueries}
           setBoundary={setBoundary}
           setMetric={setMetric}
-          setFilters={setFilters}
+          setFilters={applyFiltersNow}
           reportReadyMsg={reportReadyMsg}
         />
       </div>

@@ -294,7 +294,7 @@ export default function Home() {
         </section>
 
         {/* Cinematic Video Section (Using Client Location Video) */}
-        <section className="relative h-[600px] bg-black border-b border-white/5 overflow-hidden flex items-center justify-center">
+        <section className="relative h-[420px] sm:h-[600px] bg-black border-b border-white/5 overflow-hidden flex items-center justify-center">
           <video 
             autoPlay 
             loop 
@@ -306,13 +306,13 @@ export default function Home() {
           </video>
           
           <div className="relative z-10 text-center max-w-4xl mx-auto px-4">
-            <h2 className="text-4xl md:text-5xl lg:text-6xl font-extrabold text-white mb-6 drop-shadow-xl">
+            <h2 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-extrabold text-white mb-4 sm:mb-6 drop-shadow-xl">
               Understand the ground truth.
             </h2>
-            <p className="text-xl text-gray-200 mb-10 max-w-2xl mx-auto drop-shadow-md">
+            <p className="text-base sm:text-xl text-gray-200 mb-6 sm:mb-10 max-w-2xl mx-auto drop-shadow-md">
               From dense urban cores to sprawling suburban developments, our platform provides context to every location across Texas.
             </p>
-            <button className="inline-flex items-center gap-2 bg-white hover:bg-gray-100 text-black px-8 py-3.5 rounded text-lg font-bold transition-colors">
+            <button className="inline-flex items-center gap-2 bg-white hover:bg-gray-100 text-black px-5 sm:px-8 py-3 sm:py-3.5 rounded text-base sm:text-lg font-bold transition-colors">
               <PlayCircle className="w-5 h-5" /> See the platform in action
             </button>
           </div>
@@ -336,12 +336,12 @@ export default function Home() {
             </div>
             
             <div className="grid md:grid-cols-2 gap-6">
-              <div className="group relative h-80 rounded-2xl overflow-hidden border border-white/10 bg-black cursor-pointer">
+              <div className="group relative h-72 sm:h-80 rounded-2xl overflow-hidden border border-white/10 bg-black cursor-pointer">
                 <div className="absolute inset-0 bg-[url('/image/katy-tx.jpg')] bg-cover bg-center opacity-40 group-hover:opacity-70 group-hover:scale-105 transition-all duration-700 ease-out" />
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
-                <div className="absolute bottom-0 left-0 p-8 w-full">
-                  <h3 className="text-3xl font-extrabold text-white mb-2">Katy, TX</h3>
-                  <div className="flex justify-between items-center text-gray-300">
+                <div className="absolute bottom-0 left-0 p-5 sm:p-8 w-full">
+                  <h3 className="text-2xl sm:text-3xl font-extrabold text-white mb-2">Katy, TX</h3>
+                  <div className="flex flex-wrap gap-x-4 justify-between items-center text-gray-300 text-sm sm:text-base">
                     <p className="font-medium">Suburban expansion analysis</p>
                     <span className="text-[#7ef29d] font-bold flex items-center gap-1">
                       <TrendingUp className="w-4 h-4" /> +8.2%
@@ -350,12 +350,12 @@ export default function Home() {
                 </div>
               </div>
               
-              <div className="group relative h-80 rounded-2xl overflow-hidden border border-white/10 bg-black cursor-pointer">
+              <div className="group relative h-72 sm:h-80 rounded-2xl overflow-hidden border border-white/10 bg-black cursor-pointer">
                 <div className="absolute inset-0 bg-[url('/image/beach-galveston-island-texas.jpg')] bg-cover bg-center opacity-40 group-hover:opacity-70 group-hover:scale-105 transition-all duration-700 ease-out" />
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
-                <div className="absolute bottom-0 left-0 p-8 w-full">
-                  <h3 className="text-3xl font-extrabold text-white mb-2">Galveston</h3>
-                  <div className="flex justify-between items-center text-gray-300">
+                <div className="absolute bottom-0 left-0 p-5 sm:p-8 w-full">
+                  <h3 className="text-2xl sm:text-3xl font-extrabold text-white mb-2">Galveston</h3>
+                  <div className="flex flex-wrap gap-x-4 justify-between items-center text-gray-300 text-sm sm:text-base">
                     <p className="font-medium">Coastal property intelligence</p>
                     <span className="text-[#7ef29d] font-bold flex items-center gap-1">
                       <TrendingUp className="w-4 h-4" /> +5.4%
@@ -379,7 +379,7 @@ export default function Home() {
               </p>
             </div>
             
-            <div className="grid grid-cols-2 md:grid-cols-4 grid-rows-2 gap-4 h-[600px]">
+            <div className="grid grid-cols-2 md:grid-cols-4 grid-rows-2 gap-4 h-[420px] md:h-[600px]">
               {/* Large block */}
               <div className="col-span-2 row-span-2 relative rounded-2xl overflow-hidden border border-white/10 group">
                 <div className="absolute inset-0 bg-[url('/image/IMG_2183.jpeg')] bg-cover bg-center opacity-60 group-hover:opacity-80 transition-opacity duration-500" />
@@ -459,7 +459,7 @@ export default function Home() {
       <footer className="bg-black pt-20 pb-10 border-t border-white/10">
         <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-12 mb-20">
-            <div className="col-span-2 pr-12">
+            <div className="col-span-2 pr-0 sm:pr-12">
               <Link href="/" className="flex items-center gap-3 mb-8">
                 <div className="w-10 h-10 bg-[#7ef29d] rounded flex items-center justify-center">
                   <span className="text-black font-extrabold text-xl">K</span>

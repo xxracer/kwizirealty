@@ -94,12 +94,18 @@ function SubscriptionEditor({
       if (!plan) {
         await onSave(null);
       } else {
-        await onSave({
+        // Firestore rejects `undefined` field values outright ("Unsupported
+        // field value: undefined"), so only include keys that actually have a
+        // value. First save stamps startedAt with "now".
+        const sub: UserSubscription = {
           plan,
           status,
-          startedAt: initial?.startedAt,
-          expiresAt: expires ? new Date(`${expires}T23:59:59`).getTime() : undefined,
-        });
+          startedAt: initial?.startedAt ?? Date.now(),
+        };
+        if (expires) {
+          sub.expiresAt = new Date(`${expires}T23:59:59`).getTime();
+        }
+        await onSave(sub);
       }
     } finally {
       setSaving(false);

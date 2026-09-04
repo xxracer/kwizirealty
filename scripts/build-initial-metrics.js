@@ -92,19 +92,24 @@ function main() {
         });
       }
       totalRows += rows.length;
+      // With per-boundary chunks, every partition of the same rows is visited
+      // once per boundary — a row must only feed the metric bucket of the
+      // boundary that owns this chunk list, otherwise every count is inflated
+      // by the number of boundary partitions (x5). Legacy flat chunks are
+      // global, so they feed all buckets.
+      const rowBoundaries = currentBoundary ? [currentBoundary] : BOUNDARIES;
       for (const row of rows) {
-        for (const b of BOUNDARIES) {
-          const key = b === 'elementary' || b === 'middle' ? cleanSchoolName(row[b]) : cleanBoundaryName(row[b]);
+        for (const b of rowBoundaries) {
+          // 'neighborhoods' shares its data column with 'subdivisions' (see
+          // engine.getBoundaryKey), so read the same column for both.
+          const column = b === 'neighborhoods' ? 'subdivisions' : b;
+          const key = b === 'elementary' || b === 'middle' ? cleanSchoolName(row[column]) : cleanBoundaryName(row[column]);
           if (!key) continue;
           const bucket = groups[b];
           if (!bucket[key]) bucket[key] = [];
           const price = Number(row.closePrice);
           if (price > 0) bucket[key].push(price);
 
-          // With per-boundary chunks, the chunk index only makes sense for the
-          // boundary that owns this chunk list. Legacy flat chunks are global, so
-          // we record the index for every boundary.
-          if (currentBoundary && b !== currentBoundary) continue;
           const idxMap = chunkIndex[b];
           if (!idxMap.has(key)) idxMap.set(key, new Set());
           idxMap.get(key).add(chunkIdx);
@@ -112,6 +117,13 @@ function main() {
       }
     }
   }
+
+  // 'neighborhoods' has no chunk partition of its own in the manifest — it
+  // shares the 'subdivisions' data column (see engine.getBoundaryKey), so
+  // mirror the subdivisions buckets into it. For legacy flat chunks this is a
+  // no-op over already-populated buckets.
+  groups['neighborhoods'] = { ...groups['subdivisions'] };
+  chunkIndex['neighborhoods'] = new Map(chunkIndex['subdivisions']);
 
   // Write per-boundary initial metric snapshots.
   for (const b of BOUNDARIES) {

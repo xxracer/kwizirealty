@@ -224,6 +224,13 @@ interface StagedFile {
   csvSkipped?: { row: number; reason: string }[];
 }
 
+/** Preview modal state — extends CMSFileRecord with GeoJSON awareness. */
+interface PreviewState extends CMSFileRecord {
+  isGeoJson?: boolean;
+  totalFeatures?: number;
+  geometryTypes?: string;
+}
+
 /** Result of the per-section duplicate scan (see runDupesScan). */
 interface SectionDupes {
   status: 'idle' | 'loading' | 'done' | 'error';
@@ -503,7 +510,7 @@ function AdminPageInner() {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const [previewFile, setPreviewFile] = useState<CMSFileRecord | null>(null);
+  const [previewFile, setPreviewFile] = useState<PreviewState | null>(null);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [engineLoaded, setEngineLoaded] = useState(getEngine().isLoaded);
@@ -1008,6 +1015,54 @@ function AdminPageInner() {
     await cmsStore.removeFile(id);
     await reloadEngine();
     setToast({ type: 'success', message: 'File removed and map updated.' });
+  };
+
+  /**
+   * Preview a CMS file. GeoJSON boundary files (category 'boundary'/'custom-area'
+   * or a .geojson/.json name) are parsed as JSON and shown as a feature table;
+   * everything else keeps the CSV table preview.
+   */
+  const handlePreview = async (file: Omit<CMSFileRecord, 'rows'>) => {
+    try {
+      const response = await fetch(file.storageUrl || '');
+      const text = await response.text();
+      const isGeoJson =
+        file.category === 'boundary' ||
+        file.category === 'custom-area' ||
+        /\.(geojson|json)(\.gz)?$/i.test(file.name);
+      if (isGeoJson) {
+        const parsed = JSON.parse(text);
+        const features: any[] = Array.isArray(parsed?.features) ? parsed.features : [];
+        const typeCounts: Record<string, number> = {};
+        for (const f of features) {
+          const t = f?.geometry?.type || 'Unknown';
+          typeCounts[t] = (typeCounts[t] || 0) + 1;
+        }
+        const headers = ['#', 'id', 'name', 'geometry', 'properties'];
+        const rows = features.slice(0, 100).map((f, i) => ({
+          '#': String(i + 1),
+          id: String(f?.properties?.id ?? f?.id ?? ''),
+          name: String(f?.properties?.name ?? f?.properties?.NAME ?? ''),
+          geometry: String(f?.geometry?.type ?? ''),
+          properties: JSON.stringify(f?.properties ?? {}).slice(0, 160),
+        }));
+        setPreviewFile({
+          ...file,
+          headers,
+          rows,
+          isGeoJson: true,
+          totalFeatures: features.length,
+          geometryTypes: Object.entries(typeCounts)
+            .map(([t, n]) => `${t} × ${n.toLocaleString()}`)
+            .join(' · '),
+        });
+      } else {
+        const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+        setPreviewFile({ ...file, rows: parsed.data as Record<string, string>[] });
+      }
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const handleClearAll = async () => {
@@ -2371,16 +2426,7 @@ function AdminPageInner() {
                             key={folder.name} 
                             node={folder} 
                             path={folder.name}
-                            onPreview={async (file) => {
-                              try {
-                                const response = await fetch(file.storageUrl || '');
-                                const csvText = await response.text();
-                                const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
-                                setPreviewFile({ ...file, rows: parsed.data as Record<string, string>[] });
-                              } catch (err) {
-                                console.error(err);
-                              }
-                            }}
+                            onPreview={handlePreview}
                             onDelete={handleDelete}
                           />
                         )).concat(
@@ -2393,16 +2439,7 @@ function AdminPageInner() {
                                 </div>
                               </div>
                               <div className="flex items-center gap-1 shrink-0">
-                                <button onClick={async () => {
-                                  try {
-                                    const response = await fetch(file.storageUrl || '');
-                                    const csvText = await response.text();
-                                    const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
-                                    setPreviewFile({ ...file, rows: parsed.data as Record<string, string>[] });
-                                  } catch (err) {
-                                    console.error(err);
-                                  }
-                                }} className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white" title="Preview">
+                                <button onClick={() => handlePreview(file)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white" title="Preview">
                                   <Eye className="w-4 h-4" />
                                 </button>
                                 <button
@@ -2520,15 +2557,22 @@ function AdminPageInner() {
           <div className="bg-surface border border-border-subtle rounded-2xl w-full max-w-4xl max-h-[80vh] flex flex-col shadow-2xl">
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <FileSpreadsheet className="w-4 h-4" /> {previewFile.name}
+                {previewFile.isGeoJson ? <Map className="w-4 h-4" /> : <FileSpreadsheet className="w-4 h-4" />} {previewFile.name}
               </h3>
               <button onClick={() => setPreviewFile(null)} className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white">
                 <X className="w-4 h-4" />
               </button>
             </div>
+            {previewFile.isGeoJson && (
+              <div className="px-5 py-2 border-b border-border-subtle text-xs text-gray-400 flex items-center gap-3 flex-wrap">
+                <span className="text-blue-400 font-medium">GeoJSON</span>
+                <span>{previewFile.totalFeatures?.toLocaleString() ?? 0} features</span>
+                {previewFile.geometryTypes && <span>{previewFile.geometryTypes}</span>}
+              </div>
+            )}
             <div className="overflow-auto p-0 flex-1">
               <table className="w-full text-left text-xs">
-                <thead className="bg-background sticky top-0 z-10">
+                <thead className="bg-[#0e1118] sticky top-0 z-10">
                   <tr>
                     {previewFile.headers.map((h) => (
                       <th key={h} className="px-3 py-2 text-gray-400 font-medium border-b border-border-subtle whitespace-nowrap">{h}</th>
@@ -2547,7 +2591,7 @@ function AdminPageInner() {
               </table>
             </div>
             <div className="px-5 py-3 border-t border-border-subtle text-xs text-gray-500">
-              Showing first 100 of {previewFile.rows.length.toLocaleString()} rows
+              Showing first 100 of {previewFile.rows.length.toLocaleString()} {previewFile.isGeoJson ? 'features' : 'rows'}
             </div>
           </div>
         </div>

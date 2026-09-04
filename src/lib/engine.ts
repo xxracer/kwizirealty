@@ -108,28 +108,35 @@ export interface PropertyFilters {
   highRating: string[];
 }
 
+// Defaults must be no-ops: every max matches (or exceeds) the top of its
+// sidebar slider so the untouched filter state includes the whole dataset.
+// The previous defaults (saleMax $5M, rentMax $10k, l2sMin 80, domMax 365…)
+// silently dropped millions-dollar homes and stale listings from every stat.
 export const DEFAULT_FILTERS: PropertyFilters = {
   bedsMin: 0,
-  bedsMax: 10,
+  bedsMax: 20,
   bathsMin: 0,
-  bathsMax: 8,
+  bathsMax: 20,
   sqftMin: 0,
-  sqftMax: 10000,
+  sqftMax: 20000,
   saleMin: 0,
-  saleMax: 5000000,
+  saleMax: 20000000,
   rentMin: 0,
-  rentMax: 10000,
+  rentMax: 50000,
   pricePerSqftMin: 0,
-  pricePerSqftMax: 2000,
+  pricePerSqftMax: 5000,
   lotSizeMin: 0,
-  lotSizeMax: 50000,
+  lotSizeMax: 1000000,
   domMin: 0,
-  domMax: 365,
-  l2sMin: 80,
-  l2sMax: 110,
+  domMax: 2000,
+  l2sMin: 50,
+  l2sMax: 150,
   yearMin: 1920,
   yearMax: new Date().getFullYear(),
-  period: '5y',
+  // The user picks the close-period window in the map sidebar; 'all' means no
+  // date cutoff, so the default shows every sale in the dataset instead of
+  // hiding older ones behind a fixed 5-year window.
+  period: 'all',
   propertyTypes: [],
   pool: 'any',
   schoolDistricts: [],
@@ -354,8 +361,48 @@ interface ChunkAreaIndex {
 }
 
 export class RealEstateEngine {
+  /**
+   * Max rows kept in RAM, derived from the device's RAM (navigator.deviceMemory).
+   * The full ~763k-row dataset needs ~0.5 GB of JS heap just for the rows — on
+   * machines with 4 GB (or less) of total RAM that is an instant
+   * "Out of Memory" tab crash. We keep a deterministic uniform sample instead:
+   * every row is kept/dropped by a hash of its MLS number, so the sample is
+   * stable across reloads and medians/averages stay statistically valid.
+   */
+  private memoryRowCap(): number {
+    try {
+      const mem = (navigator as unknown as { deviceMemory?: number }).deviceMemory;
+      if (!mem || mem <= 0) return 250000; // unknown device — stay safe
+      if (mem <= 2) return 100000; // <2 GB machines
+      if (mem <= 4) return 180000; // 4 GB machines
+      return Infinity; // 8+ GB — keep the full dataset
+    } catch {
+      return 250000;
+    }
+  }
+
+  /** FNV-1a hash of a row's identity — deterministic across reloads. */
+  private static rowHash(r: PropertyData): number {
+    const s = r.mlsNumber || r.address || '';
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  /** Uniform hash sample down to `cap` rows. */
+  private subsampleRows(rows: PropertyData[], cap: number): PropertyData[] {
+    if (!isFinite(cap) || rows.length <= cap) return rows;
+    const k = Math.max(1, Math.ceil(rows.length / cap));
+    return rows.filter((r) => RealEstateEngine.rowHash(r) % k === 0);
+  }
+
   public data: PropertyData[] = [];
   public isLoaded = false;
+  /** True once the complete dataset (all chunks) is in memory, not a selection subset. */
+  private fullDatasetLoaded = false;
   public dataQuality: DataQualitySummary = {
     totalRowsRead: 0,
     keptRows: 0,
@@ -691,16 +738,24 @@ export class RealEstateEngine {
   private async loadChunksOnMainThread(
     chunkPaths: string[],
     localBase?: string,
-    onProgress?: (loaded: number, total: number) => void
+    onProgress?: (loaded: number, total: number) => void,
+    rowCap: number = Infinity
   ): Promise<PropertyData[]> {
     const ds = (window as any).DecompressionStream as typeof DecompressionStream;
     if (!ds) throw new Error('Browser does not support gzip decompression.');
 
-    const results = new Array(chunkPaths.length);
+    const results: PropertyData[][] = new Array(chunkPaths.length);
     let completed = 0;
+    // Streaming memory-cap state (see the adaptive filter inside the loop).
+    let keepFactor = 1;
+    let keptRows = 0;
 
+    // Concurrency 1 (was 6): each in-flight chunk holds its raw buffer + full
+    // decoded text + parsed rows in RAM at once, and the adaptive memory cap
+    // needs sequential processing to stay accurate. On low-RAM machines (4 GB
+    // and less) six concurrent chunks crashed the tab outright.
     await asyncPool(
-      6,
+      1,
       chunkPaths.map((path, index) => ({ path, index })),
       async ({ path, index }) => {
         const url = await this.resolveChunkUrl(path, localBase);
@@ -708,19 +763,21 @@ export class RealEstateEngine {
         if (!res.ok) throw new Error(`Chunk fetch failed: ${res.status}`);
 
         const buf = await res.arrayBuffer();
+        // Detect gzip by magic bytes (1f 8b) instead of the old approach of
+        // JSON.parse-ing the text as a "validation" — that parsed every
+        // non-gzip chunk TWICE, doubling the transient allocation peak.
+        const isGzip = buf.byteLength >= 2 && new Uint8Array(buf, 0, 2)[0] === 0x1f && new Uint8Array(buf, 0, 2)[1] === 0x8b;
         let text: string;
-        try {
-          text = new TextDecoder().decode(buf);
-          JSON.parse(text);
-        } catch {
+        if (isGzip) {
           const stream = new ReadableStream({
             start(controller) {
               controller.enqueue(new Uint8Array(buf));
               controller.close();
             },
           });
-          const decompressed = stream.pipeThrough(new ds('gzip'));
-          text = await new Response(decompressed).text();
+          text = await new Response(stream.pipeThrough(new ds('gzip'))).text();
+        } else {
+          text = new TextDecoder().decode(buf);
         }
         const parsed = JSON.parse(text);
         let rows: PropertyData[];
@@ -736,6 +793,30 @@ export class RealEstateEngine {
         } else {
           throw new Error(`Unrecognized chunk format: ${typeof parsed}`);
         }
+
+        // Adaptive streaming cap: while chunks arrive (concurrency is 1, so
+        // this closure is safe), thin the accumulated rows whenever they grow
+        // past the device cap. Rows are kept/dropped by a stable hash so the
+        // sample is uniform and reproducible.
+        if (rowCap !== Infinity) {
+          if (keepFactor > 1) {
+            rows = rows.filter((r) => RealEstateEngine.rowHash(r) % keepFactor === 0);
+          }
+          keptRows += rows.length;
+          if (keptRows > rowCap * 1.15) {
+            keepFactor = Math.max(keepFactor, Math.ceil(keptRows / rowCap));
+            keptRows = 0;
+            for (let i = 0; i < results.length; i++) {
+              const arr = results[i];
+              if (!arr) continue;
+              const filtered = arr.filter((r) => RealEstateEngine.rowHash(r) % keepFactor === 0);
+              results[i] = filtered;
+              keptRows += filtered.length;
+            }
+            console.log(`[Kwizi Engine] Memory cap: sampling 1-in-${keepFactor} rows (${keptRows.toLocaleString()} kept)`);
+          }
+        }
+
         results[index] = rows;
         completed++;
         onProgress?.(completed, chunkPaths.length);
@@ -752,13 +833,14 @@ export class RealEstateEngine {
   private async loadChunkedCache(
     chunkPaths: string[],
     localBase?: string,
-    onProgress?: (loaded: number, total: number) => void
+    onProgress?: (loaded: number, total: number) => void,
+    rowCap: number = Infinity
   ): Promise<PropertyData[]> {
     // The chunks are large (~60 MB raw), and transferring parsed rows back from
     // a Web Worker is slower than parsing on the main thread. We run on the main
     // thread while a tiny pre-computed metric snapshot lets the map render
     // instantly in parallel.
-    return this.loadChunksOnMainThread(chunkPaths, localBase, onProgress);
+    return this.loadChunksOnMainThread(chunkPaths, localBase, onProgress, rowCap);
   }
 
   private async parseCsvText(text: string): Promise<Record<string, string>[]> {
@@ -890,6 +972,16 @@ export class RealEstateEngine {
       }
     }
 
+    // If the full dataset is already in memory (background load), the selected
+    // areas' rows are already part of it — skip the chunk re-load entirely.
+    // Reports scope themselves via getStatsForSelection(..., selectedIds), and
+    // keeping the full data here is what keeps every non-selected area colored
+    // on the map instead of wiping it when the report renders.
+    if (this.fullDatasetLoaded) {
+      console.log('[Kwizi Engine] Full dataset already in memory — skipping selection chunk load');
+      return { ok: true, count: this.data.length };
+    }
+
     const totalChunks = chunkPaths.length;
     const indices = this.resolveChunkIndicesForSelection(boundary, selectedIds, totalChunks);
     const selectedPaths = indices.map((i) => chunkPaths[i]);
@@ -936,7 +1028,9 @@ export class RealEstateEngine {
     forceRefresh = false,
     onProgress?: (loaded: number, total: number) => void
   ): Promise<{ ok: boolean; error?: string; count: number }> {
-    if (this.isLoaded && !forceRefresh) return { ok: true, count: this.data.length };
+    // Only a completed FULL load makes this early return: a selection load
+    // also sets isLoaded, but its data is a subset — retrying must reload.
+    if (this.fullDatasetLoaded && !forceRefresh) return { ok: true, count: this.data.length };
     if (this.loadingPromise) return this.loadingPromise;
 
     this.loadingPromise = (async () => {
@@ -963,8 +1057,13 @@ export class RealEstateEngine {
           const cacheResult = await readCache<PropertyData[]>(version);
           const cached = cacheResult.data;
           if (cached && cached.length > 0) {
-            this.data = cached;
+            // An old cache may hold the full 763k rows — trimming BEFORE the
+            // interning pass keeps both the peak and the steady state low.
+            const trimmed = this.subsampleRows(cached, this.memoryRowCap());
+            this.internStrings(trimmed);
+            this.data = trimmed;
             this.isLoaded = true;
+            this.fullDatasetLoaded = true;
             console.log('[Kwizi Engine] Restored', cached.length, 'properties from IndexedDB cache');
             this.loadSchoolRatings().catch(() => {});
             return { ok: true, count: cached.length };
@@ -1004,7 +1103,7 @@ export class RealEstateEngine {
           console.log(`[Kwizi Engine] Loading ${fullLoadPaths.length} pre-normalized JSON chunks`);
           onProgress?.(0, fullLoadPaths.length);
           try {
-            allItems = await this.loadChunkedCache(fullLoadPaths, chunkedCache.localBase, onProgress);
+            allItems = await this.loadChunkedCache(fullLoadPaths, chunkedCache.localBase, onProgress, this.memoryRowCap());
             console.log(`[Kwizi Engine] Restored ${allItems.length} properties from chunked JSON cache`);
           } catch (err) {
             loadError = err instanceof Error ? err.message : String(err);
@@ -1083,7 +1182,12 @@ export class RealEstateEngine {
         }
       }
 
+      // Safety net for the master/manifest paths (the chunked path caps
+      // during load): never hold more than the device can survive.
+      allItems = this.subsampleRows(allItems, this.memoryRowCap());
+      this.internStrings(allItems);
       this.data = allItems;
+      if (allItems.length > 0) this.fullDatasetLoaded = true;
       // Start post-load work in the background; the UI can render as soon as
       // the data is in memory. applyPostLoadSteps sets this.isLoaded = true.
       this.applyPostLoadSteps(quality, zipSet, version).catch((err) =>
@@ -1092,7 +1196,13 @@ export class RealEstateEngine {
       return { ok: this.data.length > 0, error: loadError, count: this.data.length };
     })();
 
-    return this.loadingPromise;
+    try {
+      return await this.loadingPromise;
+    } finally {
+      // Clear the in-flight promise so a later retry (e.g. the first load
+      // failed) can start fresh instead of returning the stale result.
+      this.loadingPromise = null;
+    }
   }
 
   private async saveCache(cacheVersion: string) {
@@ -1231,6 +1341,50 @@ export class RealEstateEngine {
     return maxTs ? new Date(maxTs) : new Date();
   }
 
+  /**
+   * Deduplicate repeated strings across the dataset. Rows share the same few
+   * thousand city/school/subdivision names, but JSON.parse gives EVERY row its
+   * own copy of each string — on the ~763k-row dataset that is hundreds of MB
+   * of duplicates (a real crash cause on 4 GB machines). After this pass all
+   * rows share one string instance per unique value.
+   */
+  private internStrings(rows: PropertyData[]): void {
+    // Only massively-repeated fields. Unique-per-row strings (address,
+    // mlsNumber) are skipped — interning those would only add pool overhead.
+    const fields: (keyof PropertyData)[] = [
+      'state',
+      'city',
+      'zip',
+      'zipcodes',
+      'subdivisions',
+      'highschools',
+      'highschoolName',
+      'elementary',
+      'middle',
+      'schoolDistrict',
+      'marketArea',
+      'area',
+      'propertyType',
+      'maintFeeSchedule',
+      'closeDate',
+    ];
+    const pools = new Map<string, Map<string, string>>();
+    for (const f of fields) pools.set(f as string, new Map());
+    for (const d of rows) {
+      for (const f of fields) {
+        const v = d[f] as unknown;
+        if (typeof v !== 'string' || v === '') continue;
+        const pool = pools.get(f as string)!;
+        const canon = pool.get(v);
+        if (canon !== undefined) {
+          (d as unknown as Record<string, unknown>)[f as string] = canon;
+        } else {
+          pool.set(v, v);
+        }
+      }
+    }
+  }
+
   public filterProperties(filters: PropertyFilters): PropertyData[] {
     const ref = this.getReferenceDate();
     const { start, end } = periodToDates(filters.period, ref);
@@ -1242,8 +1396,13 @@ export class RealEstateEngine {
       if (d.br < filters.bedsMin || d.br > filters.bedsMax) return false;
       if (d.baths < filters.bathsMin || d.baths > filters.bathsMax) return false;
 
-      const l2s = d.listPrice > 0 ? (d.closePrice / d.listPrice) * 100 : 0;
-      if (l2s < filters.l2sMin || l2s > filters.l2sMax) return false;
+      // Rows with no list price have no list-to-sale ratio at all — they carry
+      // no information about the ratio, so don't drop them (l2s was computed
+      // as 0 before, which excluded them even with a permissive range).
+      if (d.listPrice > 0) {
+        const l2s = (d.closePrice / d.listPrice) * 100;
+        if (l2s < filters.l2sMin || l2s > filters.l2sMax) return false;
+      }
 
       const dom = d.cdom || d.dom;
       if (dom < filters.domMin || dom > filters.domMax) return false;
@@ -1256,7 +1415,10 @@ export class RealEstateEngine {
       const estRent = d.closePrice * 0.008;
       if (estRent < filters.rentMin || estRent > filters.rentMax) return false;
 
-      if (start && d.closeDateTs) {
+      // A time period must actually filter: rows with no parseable close date
+      // can't be placed in the window, so they only survive 'all' (start=null).
+      if (start) {
+        if (!d.closeDateTs) return false;
         if (d.closeDateTs < start.getTime() || d.closeDateTs > end.getTime()) return false;
       }
 
@@ -1342,6 +1504,20 @@ export class RealEstateEngine {
     return Object.entries(scores)
       .map(([name, score]) => ({ name, score, grade: scoreToGrade(score) }))
       .sort((a, b) => b.score - a.score);
+  }
+
+  /**
+   * Concrete school names (per the TEA score map for `level`) whose grade is in
+   * `grades`. Used by the SQL Connect path to resolve rating filters to plain
+   * name lists — mirrors filterProperties' per-row getRealSchoolScore check.
+   * Note: for 'high' this returns individual high-school names (matching the
+   * highschoolName column), NOT district names.
+   */
+  public getSchoolNamesByGrade(level: 'elementary' | 'middle' | 'high', grades: string[]): string[] {
+    if (!grades.length) return [];
+    return Object.entries(this.teaScores[level])
+      .filter(([, score]) => grades.includes(scoreToGrade(score)))
+      .map(([name]) => name);
   }
 
   public getMetricRange(metric: MetricKey, data?: PropertyData[]): { min: number; max: number } {
@@ -1591,11 +1767,18 @@ export class RealEstateEngine {
     };
   }
 
-  public generateRentalPoints(data: PropertyData[]): PropertyData[] {
-    return data.map((d) => ({
-      ...d,
-      closePrice: d.closePrice * 0.008,
-    }));
+  /** Lightweight rental point — MapComponent only reads lat/lng to draw dots.
+   *  The previous implementation cloned every full row ({...d}), which for the
+   *  ~763k-row dataset allocated hundreds of MB on every filter change and
+   *  could crash the tab. */
+  public generateRentalPoints(data: PropertyData[]): { lat: number; lng: number }[] {
+    const out: { lat: number; lng: number }[] = [];
+    for (const d of data) {
+      if (isFinite(d.lat) && isFinite(d.lng) && (d.lat !== 0 || d.lng !== 0)) {
+        out.push({ lat: d.lat, lng: d.lng });
+      }
+    }
+    return out;
   }
 
   private aggregateTimeSeries(

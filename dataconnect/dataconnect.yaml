@@ -1,0 +1,12 @@
+specVersion: "v1"
+serviceId: "kwizi-sql"
+location: "us-central1"
+schema:
+  source: "./schema"
+  datasource:
+    postgresql:
+      database: "kwizi"
+      cloudSql:
+        instanceId: "kwizi-sql-instance"
+schemaValidation: "COMPATIBLE"
+connectorDirs: ["./connector"]

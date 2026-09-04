@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "prebuild": "node scripts/download-boundaries.js && node scripts/download-chunked-cache.js && node scripts/build-initial-metrics.js"
+    "prebuild": "node scripts/download-boundaries.js && node scripts/download-chunked-cache.js && node scripts/build-initial-metrics.js",
+    "simplify:boundaries": "node scripts/simplify-boundaries.js",
+    "import:sql": "node scripts/import-properties-to-sql.js"
   },
   "dependencies": {
     "@ai-sdk/google": "^0.0.26",

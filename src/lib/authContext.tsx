@@ -6,6 +6,7 @@ import {
   User,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithEmailAndPassword,
   signOut as firebaseSignOut,
 } from 'firebase/auth';
 import { collection, doc, getDoc, getDocs, query, setDoc, serverTimestamp, where } from 'firebase/firestore';
@@ -41,9 +42,12 @@ interface AuthContextValue {
   user: User | null;
   profile: UserProfile | null;
   loading: boolean;
+  /** Set when loading the Firestore profile failed (e.g. security rules). */
+  profileError: string | null;
   isAdmin: boolean;
   isAuthorized: boolean;
   signInWithGoogle: () => Promise<void>;
+  signInWithEmail: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   cmsAllowedEmails: string[];
 }
@@ -62,7 +66,13 @@ async function loadProfile(uid: string): Promise<UserProfile | null> {
   const ref = doc(db, 'users', uid);
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
-  return snap.data() as UserProfile;
+  const profile = snap.data() as UserProfile;
+  // Users created by an admin (AdminUsers -> createUserWithEmailAndPassword)
+  // store { id, name, email, role, createdAt } without an `authorized` flag.
+  // They were explicitly created with a role, so treat them as authorized;
+  // otherwise they'd be stuck on "Access pending" forever.
+  if (profile.authorized === undefined) profile.authorized = true;
+  return profile;
 }
 
 async function ensureUserProfile(user: User, isAdminEmail: boolean): Promise<UserProfile> {
@@ -126,6 +136,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   const cmsAllowedEmails = useMemo(() => getCmsAllowedEmails(), []);
 
@@ -134,6 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(firebaseUser);
       if (!firebaseUser) {
         setProfile(null);
+        setProfileError(null);
         setLoading(false);
         return;
       }
@@ -161,8 +173,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         setProfile(prof);
+        setProfileError(null);
       } catch (err) {
+        // Surface the real reason (usually Firestore security rules) instead of
+        // spinning forever on the login page.
         console.error('[AuthContext] Failed to load profile:', err);
+        const message = err instanceof Error ? err.message : String(err);
+        setProfileError(`Could not load your account: ${message}`);
         setProfile(null);
       } finally {
         setLoading(false);
@@ -177,18 +194,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await signInWithPopup(auth, provider);
   }, []);
 
+  const signInWithEmail = useCallback(async (email: string, password: string) => {
+    // Users created by an admin authenticate with email + password; the login
+    // page must offer this or those accounts have no way to sign in.
+    await signInWithEmailAndPassword(auth, email.trim(), password);
+  }, []);
+
   const signOut = useCallback(async () => {
     await firebaseSignOut(auth);
     setUser(null);
     setProfile(null);
+    setProfileError(null);
   }, []);
 
   const isAdmin = !!profile && profile.role === 'admin' && profile.authorized;
   const isAuthorized = !!profile && profile.authorized;
 
   const value = useMemo<AuthContextValue>(
-    () => ({ user, profile, loading, isAdmin, isAuthorized, signInWithGoogle, signOut, cmsAllowedEmails }),
-    [user, profile, loading, isAdmin, isAuthorized, signInWithGoogle, signOut, cmsAllowedEmails]
+    () => ({ user, profile, loading, profileError, isAdmin, isAuthorized, signInWithGoogle, signInWithEmail, signOut, cmsAllowedEmails }),
+    [user, profile, loading, profileError, isAdmin, isAuthorized, signInWithGoogle, signInWithEmail, signOut, cmsAllowedEmails]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,0 +1,57 @@
+# Firebase SQL Connect (Data Connect) schema for the Houston real-estate dataset.
+#
+# Mirrors src/lib/engine.ts PropertyData. Field names are camelCase and map to
+# snake_case Postgres columns automatically (closePrice -> close_price, etc.).
+# The table is named "properties" (lowercase) with mlsNumber as primary key.
+#
+# Composite indexes on (boundary, closeDateTs) make the period-filtered
+# boundary queries fast; a standalone closeDateTs index covers period-only
+# filters. closeDateTs is unix milliseconds stored as Int64 (Int would overflow).
+
+type Property
+  @table(name: "properties", key: ["mlsNumber"])
+  @index(fields: ["subdivisions", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["zipcodes", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["highschools", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["elementary", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["middle", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["area", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["closeDateTs"])
+{
+  mlsNumber: String!
+  address: String
+  city: String
+  state: String
+  zip: String
+  closePrice: Int
+  listPrice: Int
+  pricePerSqft: Int
+  sqft: Int
+  lotSize: Int
+  br: Int
+  baths: Int
+  yearBuilt: Int
+  dom: Int
+  cdom: Int
+  closeDate: String
+  closeYear: Int
+  closeDateTs: Int64
+  maintFee: Int
+  maintFeeSchedule: String
+  taxRate: Int
+  taxYear: Int
+  taxAmount: Int
+  subdivisions: String
+  zipcodes: String
+  highschools: String
+  highschoolName: String
+  elementary: String
+  middle: String
+  schoolDistrict: String
+  marketArea: String
+  area: String
+  lat: Float
+  lng: Float
+  propertyType: String
+  pool: Boolean
+}

@@ -62,8 +62,8 @@ interface DraggableMapWindowsProps {
   visible?: boolean;
   isLoading?: boolean;
   onClose?: (key: WindowType) => void;
-  onSet90Days?: () => void;
-  is90Days?: boolean;
+  period?: string;
+  onSetPeriod?: (p: string) => void;
 }
 
 export function useDraggableWindows() {
@@ -105,8 +105,8 @@ export default function DraggableMapWindows({
   visible = true,
   isLoading,
   onClose,
-  onSet90Days,
-  is90Days,
+  period,
+  onSetPeriod,
 }: DraggableMapWindowsProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [constraints, setConstraints] = useState({ left: 0, top: 0, right: 0, bottom: 0 });
@@ -172,7 +172,7 @@ export default function DraggableMapWindows({
                 <button
                   onClick={() => onClose(def.key)}
                   title="Close window"
-                  className="absolute -top-2 -right-2 z-10 w-6 h-6 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="absolute -top-2 -right-2 z-10 w-6 h-6 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -192,8 +192,8 @@ export default function DraggableMapWindows({
                   timeSeries={timeSeries}
                   isLoading={isLoading}
                   compact
-                  onSet90Days={onSet90Days}
-                  is90Days={is90Days}
+                  period={period}
+                  onSetPeriod={onSetPeriod}
                   dragHandle={<div className="p-1 rounded bg-white/5 text-gray-500 cursor-move"><GripVertical className="w-3.5 h-3.5" /></div>}
                 />
               )}

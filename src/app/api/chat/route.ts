@@ -105,8 +105,8 @@ either subdivisions or ZIP features. Example:
 You have access to several powerful tools to control the application interface:
 
 1. **\`selectMapAreas\`**: Use this tool ONLY when the user explicitly asks you to select, highlight, or find specific areas on the map, or asks you to generate a report for specific areas. The system will return a \`data\` object containing real-time statistics. You MUST read this data to construct your response. Pass display names AND ZIPs in \`areasToSearch\`.
-2. **\`setMapBoundary\`**: Changes the Geographic Boundary. Options: 'subdivisions', 'zipcodes', 'counties', 'cities', 'school_districts'.
-3. **\`setMapMetric\`**: Changes the active Market Metric being displayed on the map (e.g., 'Close Price', 'DOM', 'MOI').
+2. **\`setMapBoundary\`**: Changes the Geographic Boundary. Options: 'subdivisions', 'zipcodes', 'highschools', 'elementary', 'middle', 'neighborhoods', 'areas'.
+3. **\`setMapMetric\`**: Changes the active Market Metric being displayed on the map. Use one of these EXACT keys: 'Close Price', 'Price per Sqft', 'List-to-Sale Ratio', 'Days on Market', 'Est. Rental Price', 'Rent-to-Sale Ratio', 'Rental Price per Sqft', 'Rental Days On Market', 'Lot Size', 'Appreciation Rate', 'Investor Index', 'Annual HOA Fee', 'Last Year Tax Rate', 'Elem ETA Score', 'Middle ETA Score', 'High ETA Score'.
 4. **\`setMapFilters\`**: Modifies the Property Filters. Uses these EXACT keys: \`saleMin\`/\`saleMax\` (sale price), \`rentMin\`/\`rentMax\` (rental price), \`bedsMin\`/\`bedsMax\`, \`bathsMin\`/\`bathsMax\`, \`sqftMin\`/\`sqftMax\`, \`yearMin\`/\`yearMax\`, \`pool\` ('any'|'yes'|'no'). Example: 4-bedroom homes under $500k → \`{ bedsMin: 4, saleMax: 500000 }\`.
 
 When answering, reference the specific metrics provided to support your conclusions.
@@ -137,13 +137,13 @@ ${aliasHintBlock}
       setMapBoundary: tool({
         description: 'Changes the geographic boundary layer on the map.',
         parameters: z.object({
-          boundary: z.enum(['subdivisions', 'zipcodes', 'counties', 'cities', 'school_districts']).describe('The new boundary layer to display.'),
+          boundary: z.enum(['subdivisions', 'zipcodes', 'highschools', 'elementary', 'middle', 'neighborhoods', 'areas']).describe('The new boundary layer to display.'),
         }),
       }),
       setMapMetric: tool({
         description: 'Changes the active market metric displayed on the map.',
         parameters: z.object({
-          metric: z.string().describe('The name of the metric to display (e.g. "Close Price", "DOM", "MOI").'),
+          metric: z.string().describe('Exact metric key, e.g. "Close Price", "Price per Sqft", "Days on Market", "Est. Rental Price".'),
         }),
       }),
       setMapFilters: tool({

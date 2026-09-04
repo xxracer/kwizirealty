@@ -9,11 +9,45 @@ import { Megaphone, Plus, Image as ImageIcon, Link as LinkIcon, Trash2, CheckCir
 export type AdPlacement = 'corner' | 'top' | 'bottom' | 'right';
 
 export const AD_PLACEMENT_LABELS: Record<AdPlacement, string> = {
-  corner: 'Corner (bottom-left overlay)',
-  top: 'Above the map (top banner)',
-  bottom: 'Below the map (bottom banner)',
-  right: 'Right of the map (side banner)',
+  corner: 'Left of the map (side column)',
+  top: 'Above the map (thin banner)',
+  bottom: 'Below the map (thin banner)',
+  right: 'Right of the map (side column)',
 };
+
+/** Recommended creative size (px) per placement. Thin banners stretch to the
+ *  map width; side columns stretch to the map height — design for these boxes
+ *  and the media crops cleanly (object-cover). */
+export const AD_PLACEMENT_RECOMMENDED: Record<AdPlacement, string> = {
+  corner: '160 × 600 px (vertical skyscraper)',
+  top: '1024 × 80 px (wide thin strip)',
+  bottom: '1024 × 80 px (wide thin strip)',
+  right: '160 × 600 px (vertical skyscraper)',
+};
+
+/** White box that visually shows the recommended creative size for a placement.
+ *  The box keeps the true aspect ratio of the ad (scaled to fit) and prints
+ *  the pixel dimensions inside. */
+function PlacementSizeBox({ placement }: { placement: AdPlacement }) {
+  const match = AD_PLACEMENT_RECOMMENDED[placement].match(/(\d+)\s*×\s*(\d+)/);
+  const w = match ? parseInt(match[1], 10) : 160;
+  const h = match ? parseInt(match[2], 10) : 600;
+  // Scale to fit a ~200×150 area while preserving the real aspect ratio.
+  const scale = Math.min(200 / w, 150 / h, 1);
+  const boxW = Math.max(28, Math.round(w * scale));
+  const boxH = Math.max(14, Math.round(h * scale));
+  return (
+    <div
+      className="bg-white rounded-sm shadow-inner flex items-center justify-center shrink-0"
+      style={{ width: boxW, height: boxH }}
+      title={AD_PLACEMENT_RECOMMENDED[placement]}
+    >
+      <span className="text-[8px] font-bold text-gray-800 whitespace-nowrap leading-none">
+        {w}×{h}
+      </span>
+    </div>
+  );
+}
 
 export interface AdCampaign {
   id: string;
@@ -132,16 +166,8 @@ export function AdminAds() {
   const toggleStatus = async (ad: AdCampaign) => {
     try {
       const newStatus = ad.status === 'active' ? 'inactive' : 'active';
-      // Usually, if there's only one slot, we deactivate the rest. Let's deactivate all others if we set this to active.
-      if (newStatus === 'active') {
-        const batchUpdates = ads.map(async (a) => {
-          if (a.id !== ad.id && a.status === 'active') {
-            await updateDoc(doc(db, 'ads', a.id), { status: 'inactive' });
-          }
-        });
-        await Promise.all(batchUpdates);
-      }
-      
+      // Multiple campaigns can be active at once — each renders in its own
+      // placement slot (top / bottom / right / corner) on the map page.
       await updateDoc(doc(db, 'ads', ad.id), { status: newStatus });
       fetchAds();
       setToast({ type: 'success', message: `Ad is now ${newStatus}` });
@@ -247,10 +273,16 @@ export function AdminAds() {
               >
                 {(Object.keys(AD_PLACEMENT_LABELS) as AdPlacement[]).map((p) => (
                   <option key={p} value={p} className="bg-surface">
-                    {AD_PLACEMENT_LABELS[p]}
+                    {AD_PLACEMENT_LABELS[p]} — {AD_PLACEMENT_RECOMMENDED[p]}
                   </option>
                 ))}
               </select>
+              <div className="flex items-center gap-3 mt-2">
+                <PlacementSizeBox placement={placement} />
+                <p className="text-xs text-gray-500">
+                  Recommended image size: <span className="text-purple-400 font-semibold">{AD_PLACEMENT_RECOMMENDED[placement]}</span>
+                </p>
+              </div>
             </div>
 
             <div className="md:col-span-2">
@@ -275,7 +307,9 @@ export function AdminAds() {
                   <div className="flex flex-col items-center gap-2 text-gray-400">
                     <Upload className="w-8 h-8" />
                     <span className="text-sm">Click to browse or drag file here</span>
-                    <span className="text-xs text-gray-500">Recommended ratio 16:9. Max size 20MB.</span>
+                    <span className="text-xs text-gray-500">
+                      Recommended for {AD_PLACEMENT_LABELS[placement].toLowerCase()}: {AD_PLACEMENT_RECOMMENDED[placement]}. Max size 20MB.
+                    </span>
                   </div>
                 )}
               </div>
@@ -346,10 +380,16 @@ export function AdminAds() {
                 >
                   {(Object.keys(AD_PLACEMENT_LABELS) as AdPlacement[]).map((p) => (
                     <option key={p} value={p} className="bg-surface">
-                      {AD_PLACEMENT_LABELS[p]}
+                      {AD_PLACEMENT_LABELS[p]} — {AD_PLACEMENT_RECOMMENDED[p]}
                     </option>
                   ))}
                 </select>
+                <div className="flex items-center gap-3 mt-1.5">
+                  <PlacementSizeBox placement={ad.placement || 'corner'} />
+                  <p className="text-[10px] text-gray-500">
+                    Ideal size: <span className="text-purple-400">{AD_PLACEMENT_RECOMMENDED[ad.placement || 'corner']}</span>
+                  </p>
+                </div>
               </div>
               
               <div className="mt-auto flex items-center justify-between pt-4 border-t border-white/5">

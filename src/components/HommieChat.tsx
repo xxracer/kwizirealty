@@ -5,6 +5,7 @@ import { useChat } from 'ai/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { MessageSquare, X, Send, Bot, User, Maximize2, Minimize2, Trash2 } from 'lucide-react';
 import { BoundaryKey } from '@/lib/engine';
+import { METRICS } from '@/lib/metrics';
 
 interface HommieChatProps {
   boundary: BoundaryKey | null;
@@ -23,6 +24,23 @@ interface HommieChatProps {
    *  report is ready" the moment the report finishes generating. */
   reportReadyMsg?: { id: number; text: string } | null;
 }
+
+/**
+ * Values the map actually accepts. The model was previously offered
+ * 'counties'/'cities'/'school_districts' and metrics like 'DOM'/'MOI' that
+ * don't exist in the engine — setting them blanked the map or silently
+ * re-colored it by close price. Validate every bot-driven change against
+ * these lists and bounce invalid values back to the model.
+ */
+const VALID_BOUNDARIES: BoundaryKey[] = [
+  'subdivisions',
+  'zipcodes',
+  'highschools',
+  'elementary',
+  'middle',
+  'neighborhoods',
+  'areas',
+];
 
 /** Shown locally (no AI call) when the user clicks the 🚀 Get Started button. */
 const GET_STARTED_HELP = `👋 Welcome! Here's how to use me:
@@ -184,13 +202,37 @@ export default function HommieChat({
         }
       } else if (toolCall.toolName === 'setMapBoundary') {
         if (setBoundary) {
-          setBoundary((toolCall.args as any).boundary);
-          addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map boundary set to ${(toolCall.args as any).boundary}` } });
+          const requested = (toolCall.args as any).boundary as BoundaryKey;
+          if (VALID_BOUNDARIES.includes(requested)) {
+            setBoundary(requested);
+            addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map boundary set to ${requested}` } });
+          } else {
+            addToolResult({
+              toolCallId: toolCall.toolCallId,
+              result: {
+                error: `"${requested}" is not a valid boundary. Valid options: ${VALID_BOUNDARIES.join(', ')}. Retry with one of those exact values.`,
+              },
+            });
+          }
         }
       } else if (toolCall.toolName === 'setMapMetric') {
         if (setMetric) {
-          setMetric((toolCall.args as any).metric);
-          addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map metric set to ${(toolCall.args as any).metric}` } });
+          const requested = (toolCall.args as any).metric as string;
+          // Accept either the canonical key or its display label ("Sales Price").
+          const validMetric = METRICS.find(
+            (m) => m.key === requested || m.label.toLowerCase() === String(requested || '').toLowerCase()
+          );
+          if (validMetric) {
+            setMetric(validMetric.key as any);
+            addToolResult({ toolCallId: toolCall.toolCallId, result: { success: true, message: `Map metric set to ${validMetric.key}` } });
+          } else {
+            addToolResult({
+              toolCallId: toolCall.toolCallId,
+              result: {
+                error: `"${requested}" is not a valid metric. Valid metric keys: ${METRICS.map((m) => m.key).join(', ')}. Retry with one of those exact keys.`,
+              },
+            });
+          }
         }
       } else if (toolCall.toolName === 'setMapFilters') {
         if (setFilters) {
@@ -232,7 +274,7 @@ export default function HommieChat({
     return (
       <button
         onClick={() => setIsOpen(true)}
-        className="fixed bottom-6 right-6 w-14 h-14 bg-gradient-to-tr from-blue-600 to-indigo-600 rounded-full shadow-2xl flex items-center justify-center text-white hover:scale-110 transition-transform z-[1000] border-2 border-white"
+        className="fixed bottom-6 right-6 w-14 h-14 bg-gradient-to-tr from-blue-600 to-indigo-600 rounded-full shadow-2xl flex items-center justify-center text-white hover:scale-110 transition-transform z-[1000] border-2 border-white mb-[env(safe-area-inset-bottom)]"
         title="Open Hommie AI Assistant"
       >
         <Bot className="w-7 h-7" />
@@ -244,15 +286,15 @@ export default function HommieChat({
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0, y: 50, scale: 0.95 }}
-        animate={{ 
-          opacity: 1, 
-          y: 0, 
+        animate={{
+          opacity: 1,
+          y: 0,
           scale: 1,
-          height: isMinimized ? 'auto' : '600px'
+          height: isMinimized ? 'auto' : 'min(600px, 70vh)'
         }}
         exit={{ opacity: 0, y: 50, scale: 0.95 }}
         transition={{ duration: 0.2 }}
-        className={`fixed bottom-6 right-6 w-96 bg-white/90 backdrop-blur-xl border border-white/40 shadow-2xl rounded-2xl overflow-hidden flex flex-col z-[1000] ${isMinimized ? '' : 'max-h-[80vh]'}`}
+        className={`fixed bottom-6 right-3 left-3 sm:left-auto w-[calc(100vw-1.5rem)] sm:w-96 bg-white/90 backdrop-blur-xl border border-white/40 shadow-2xl rounded-2xl overflow-hidden flex flex-col z-[1000] ${isMinimized ? '' : 'max-h-[80vh]'}`}
       >
         <div className="flex items-center justify-between p-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-t-2xl shadow-md">
           <div className="flex items-center space-x-3">

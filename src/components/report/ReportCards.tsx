@@ -350,6 +350,19 @@ function MarketHealthGauge({ score, label, color, compact = false }: { score: nu
   );
 }
 
+/** Short labels for the Close Period selector shown in the Market Health
+ *  header — must stay in sync with PropertyFilters['period'] in engine.ts. */
+const PERIOD_SHORT: { key: string; label: string }[] = [
+  { key: 'all', label: 'All data' },
+  { key: '30d', label: '30d' },
+  { key: '90d', label: '90d' },
+  { key: '6m', label: '6mo' },
+  { key: 'ytd', label: 'YTD' },
+  { key: '1y', label: '1y' },
+  { key: '3y', label: '3y' },
+  { key: '5y', label: '5y' },
+];
+
 export function MarketHealthCard({
   marketHealth,
   timeSeries,
@@ -358,8 +371,8 @@ export function MarketHealthCard({
   pinned,
   onTogglePin,
   headerExtra,
-  onSet90Days,
-  is90Days,
+  period,
+  onSetPeriod,
 }: {
   marketHealth: MarketHealth | null;
   timeSeries: { period: string; value: number; n: number }[];
@@ -369,8 +382,10 @@ export function MarketHealthCard({
   onTogglePin?: () => void;
   headerExtra?: React.ReactNode;
   dragHandle?: React.ReactNode;
-  onSet90Days?: () => void;
-  is90Days?: boolean;
+  /** Currently applied close period (e.g. '5y'). Undefined hides the selector. */
+  period?: string;
+  /** Called when the user picks a period in this card's selector. */
+  onSetPeriod?: (p: string) => void;
 }) {
   const volumeTrend = useMemo(() => {
     if (timeSeries.length < 2) return null;
@@ -390,27 +405,21 @@ export function MarketHealthCard({
       onTogglePin={onTogglePin}
       headerExtra={
         <>
-          {onSet90Days && (
-            <div className="relative flex items-center bg-white/5 border border-white/10 rounded-md overflow-hidden">
-              <button
-                onClick={() => { if (is90Days) onSet90Days(); }}
-                className={`text-[10px] px-1.5 py-0.5 font-semibold transition-colors ${
-                  !is90Days ? 'bg-blue-500/30 text-blue-300' : 'text-gray-400 hover:text-white'
-                }`}
-                title="Last 30 days"
-              >
-                30d
-              </button>
-              <button
-                onClick={() => { if (!is90Days) onSet90Days(); }}
-                className={`text-[10px] px-1.5 py-0.5 font-semibold transition-colors ${
-                  is90Days ? 'bg-blue-500/30 text-blue-300' : 'text-gray-400 hover:text-white'
-                }`}
-                title="Last 90 days"
-              >
-                90d
-              </button>
-            </div>
+          {/* Period selector — always reflects the real Close Period filter,
+              it used to be hardcoded 30d/90d which ignored e.g. a 5y filter. */}
+          {onSetPeriod && (
+            <select
+              value={period ?? 'all'}
+              onChange={(e) => onSetPeriod(e.target.value)}
+              title="Close period used by this card"
+              className="text-[10px] font-semibold bg-white/5 border border-white/10 rounded-md px-1.5 py-0.5 text-blue-300 outline-none cursor-pointer"
+            >
+              {PERIOD_SHORT.map((p) => (
+                <option key={p.key} value={p.key} className="bg-[#121620] text-white">
+                  {p.label}
+                </option>
+              ))}
+            </select>
           )}
           {headerExtra}
         </>

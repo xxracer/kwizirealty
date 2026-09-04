@@ -9,6 +9,13 @@ import { MousePointer2, Square, Trash2, BarChart3, Loader2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
 
+// navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
+// with ≤4 GB get lean constants everywhere: fewer point markers, and the
+// engine keeps a sampled row set (see engine.memoryRowCap).
+const DEVICE_MEM_GB: number =
+  typeof navigator !== 'undefined' ? (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8 : 8;
+export const LOW_MEMORY_DEVICE = DEVICE_MEM_GB <= 4;
+
 function LassoIcon({ className = 'w-4 h-4' }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -196,6 +203,9 @@ interface MapComponentProps {
   onGenerateReport?: () => void;
   reportGenerated?: boolean;
   isReportLoading?: boolean;
+  /** True while the full dataset is streaming in for the map itself (not a
+   *  report) — shows a "Loading Data…" overlay instead of "Generating Report…". */
+  isDataLoading?: boolean;
   /** Incremented by the parent (e.g. after a search) to fly the map to the current selection. */
   focusSelectionTick?: number;
 }
@@ -219,6 +229,7 @@ export default function MapComponent({
   onGenerateReport,
   reportGenerated,
   isReportLoading,
+  isDataLoading,
   focusSelectionTick,
 }: MapComponentProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -237,6 +248,13 @@ export default function MapComponent({
   const [geoJsonData, setGeoJsonData] = useState<GeoJSON.FeatureCollection | null>(null);
   const geoJsonDataRef = useRef(geoJsonData);
   geoJsonDataRef.current = geoJsonData;
+  // bbox/centroid per feature (boundary|key), computed once — see
+  // buildAreaFeatures. Cleared whenever the geojson source itself changes
+  // (a custom CMS upload can replace the geometry for the same keys).
+  const geometryAuxCacheRef = useRef<Map<string, { bbox: [number, number, number, number] | null; centroid: ReturnType<typeof turf.centroid> | null }>>(new Map());
+  useEffect(() => {
+    geometryAuxCacheRef.current.clear();
+  }, [geoJsonData]);
   const [boundaryLoading, setBoundaryLoading] = useState(false);
   const [boundarySwitching, setBoundarySwitching] = useState(true);
   const [areaLayerReady, setAreaLayerReady] = useState(false);
@@ -266,8 +284,6 @@ export default function MapComponent({
   toolRef.current = tool;
 
   const buildAreaFeatures = (): GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>[] => {
-    console.log('Building area features for boundary:', boundary);
-    console.log('GeoJSON Data:', geoJsonData ? 'loaded' : 'null', 'features:', geoJsonData?.features?.length);
     if (!geoJsonData || !geoJsonData.features) return [];
 
     const features: GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>[] = [];
@@ -294,7 +310,9 @@ export default function MapComponent({
       if (!key) return;
 
       const value = metricValues[key];
-      const hasMetric = value && isFinite(value);
+      // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing
+      // or non-finite values mean "no data" for this area.
+      const hasMetric = typeof value === 'number' && isFinite(value);
       // Don't render grey placeholder areas with no data.
       if (!hasMetric) return;
       const color = getColorForValue(value, colorStops);
@@ -303,11 +321,21 @@ export default function MapComponent({
 
       // Only push if there's valid geometry
       if (feature.geometry && (feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon')) {
-        // Precompute the feature's bbox and centroid once so box/lasso hit
-        // tests can use fast numeric comparisons instead of calling expensive
-        // turf helpers on every selection.
-        const bbox = computeFeatureBBox(feature as GeoJSON.Feature);
-        const centroid = bbox ? turf.centroid(feature as GeoJSON.Feature) : null;
+        // Precompute the feature's bbox and centroid ONCE and cache them —
+        // turf.centroid over ~59k polygons on every rebuild allocated gigabytes
+        // of churn and was a major contributor to out-of-memory crashes when
+        // filters changed.
+        const cacheKey = boundary + '|' + key;
+        let aux = geometryAuxCacheRef.current.get(cacheKey);
+        if (!aux) {
+          const bbox = computeFeatureBBox(feature as GeoJSON.Feature);
+          aux = {
+            bbox,
+            centroid: bbox ? turf.centroid(feature as GeoJSON.Feature) : null,
+          };
+          geometryAuxCacheRef.current.set(cacheKey, aux);
+        }
+        const { bbox, centroid } = aux;
         features.push({
           type: 'Feature',
           id: key,
@@ -318,27 +346,6 @@ export default function MapComponent({
     });
 
     return features;
-  };
-
-  const buildPointFeatures = (data: PropertyData[]): GeoJSON.Feature<GeoJSON.Point>[] => {
-    return data
-      .filter((d) => isValidCoord(d.lng, d.lat))
-      .map((d) => ({
-        type: 'Feature' as const,
-        properties: { price: d.closePrice },
-        geometry: { type: 'Point' as const, coordinates: [d.lng, d.lat] },
-      }));
-  };
-
-  const buildRentalFeatures = (data: PropertyData[]): GeoJSON.Feature<GeoJSON.Point>[] => {
-    const rentals = engine.generateRentalPoints(data);
-    return rentals
-      .filter((d) => isValidCoord(d.lng, d.lat))
-      .map((d) => ({
-        type: 'Feature' as const,
-        properties: { rent: d.listPrice || d.closePrice },
-        geometry: { type: 'Point' as const, coordinates: [d.lng, d.lat] },
-      }));
   };
 
   const makePopupHtml = (feature: GeoJSON.Feature): string => {
@@ -480,16 +487,40 @@ export default function MapComponent({
       zoomControl: true,
       attributionControl: true,
       boxZoom: false,
+      // The subdivisions boundary alone renders ~59k polygons. The default SVG
+      // renderer creates a DOM node per polygon, which pegs the CPU and bloats
+      // memory; the canvas renderer draws them into a single bitmap and keeps
+      // pan/zoom smooth. Hover/click still work on canvas layers.
+      preferCanvas: true,
     }).setView([29.76, -95.37], 10);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      subdomains: 'abcd',
-      maxZoom: 19,
-    }).addTo(map);
+    // CARTO now enforces API keys on production domains (tiles come back as an
+    // "api key required" placeholder image — see carto.com/basemaps/apikey),
+    // so only use them when a key is provided; otherwise fall back to Esri's
+    // keyless Light Gray canvas, which looks very similar.
+    const cartoKey = process.env.NEXT_PUBLIC_CARTO_API_KEY;
+    if (cartoKey) {
+      L.tileLayer(`https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?apikey=${cartoKey}`, {
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        subdomains: 'abcd',
+        maxZoom: 19,
+      }).addTo(map);
+    } else {
+      L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+        {
+          attribution: 'Tiles &copy; Esri — Source: Esri, HERE, Garmin, USGS, NGA',
+          maxZoom: 19,
+        }
+      ).addTo(map);
+    }
 
     mapRef.current = map;
+    // Set in cleanup — every async callback (RAF frames, timers) checks this so
+    // nothing draws against the destroyed canvas renderer after teardown (the
+    // "Cannot read properties of undefined (reading 'clearRect')" crash).
+    let tornDown = false;
 
     // Disable Leaflet's native box-zoom handler so our custom Box tool is the
     // only one reacting to shift/mouse-drag and to avoid event conflicts.
@@ -598,7 +629,7 @@ export default function MapComponent({
       const start = boxStart;
       boxRaf = requestAnimationFrame(() => {
         boxRaf = 0;
-        if (!isBoxDrawing || !boxLayer) return;
+        if (tornDown || !isBoxDrawing || !boxLayer) return;
         boxLayer.setBounds(L.latLngBounds([start.lat, start.lng], [latlng.lat, latlng.lng]));
       });
     };
@@ -642,7 +673,7 @@ export default function MapComponent({
       if (lassoRaf) return;
       lassoRaf = requestAnimationFrame(() => {
         lassoRaf = 0;
-        if (!isLassoDrawing || !lassoLayer) return;
+        if (tornDown || !isLassoDrawing || !lassoLayer) return;
         lassoPoints.push(latlng);
         lassoLayer.setLatLngs(lassoPoints);
       });
@@ -759,7 +790,37 @@ export default function MapComponent({
     };
     document.addEventListener('keydown', onKeyDown);
 
+    // Re-measure the map whenever its container resizes (phone rotation,
+    // mobile filter sidebar toggling, browser chrome collapsing). Without
+    // this Leaflet keeps rendering grey/offset tiles until the next data
+    // update happens to call invalidateSize().
+    let resizeObserver: ResizeObserver | null = null;
+    if (containerRef.current && typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        // Skip if the map was already torn down (callback can still be queued
+        // for the frame the cleanup runs in).
+        if (!mapRef.current) return;
+        map.invalidateSize();
+      });
+      resizeObserver.observe(containerRef.current);
+    }
+
     return () => {
+      // Tear down async draw paths BEFORE destroying the map: pending box/lasso
+      // RAF frames would otherwise redraw onto the destroyed canvas renderer
+      // and throw "Cannot read properties of undefined (reading 'clearRect')".
+      tornDown = true;
+      if (boxRaf) cancelAnimationFrame(boxRaf);
+      if (lassoRaf) cancelAnimationFrame(lassoRaf);
+      isBoxDrawing = false;
+      isLassoDrawing = false;
+      try {
+        boxLayer?.remove();
+        lassoLayer?.remove();
+      } catch {
+        /* map may already be partially torn down */
+      }
+      resizeObserver?.disconnect();
       clearBoundsInterval();
       popupRef.current?.remove();
       overlay.removeEventListener('pointerdown', onOverlayPointerDown);
@@ -793,9 +854,11 @@ export default function MapComponent({
 
   // Load boundary GeoJSON for the active boundary. We prefer same-domain files in
   // /geojson so Vercel serves them instantly, and fall back to Firebase CMS only
-  // when the local copy is missing. All loaded boundaries are cached in memory
-  // so switching between them is nearly instant after the first visit.
-  const loadBoundary = async (key: BoundaryKey, { preloadOthers = false } = {}) => {
+  // when the local copy is missing. Only the ACTIVE boundary is kept in RAM —
+  // the old eager preload of all seven decompressed GeoJSONs (subdivisions
+  // alone is ~59k polygons) consumed hundreds of MB and crashed low-RAM
+  // machines. Switching boundaries refetches from the HTTP cache instead.
+  const loadBoundary = async (key: BoundaryKey) => {
     setBoundaryLoading(true);
     setBoundarySwitching(true);
     setAreaLayerReady(false);
@@ -804,17 +867,18 @@ export default function MapComponent({
     if (cached) {
       setGeoJsonData(cached);
       setBoundaryLoading(false);
-      if (preloadOthers) preloadRemainingBoundaries(key);
       return;
     }
 
     const localPath = `/geojson/${key}.geojson.gz`;
     try {
       const data = await engine.fetchGzJson<GeoJSON.FeatureCollection>(localPath);
+      for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
+        if (k !== key) delete boundaryCacheRef.current[k];
+      }
       boundaryCacheRef.current[key] = data;
       setGeoJsonData(data);
       setBoundaryLoading(false);
-      if (preloadOthers) preloadRemainingBoundaries(key);
       return;
     } catch (err) {
       console.warn(`[Kwizi Map] local GeoJSON missing for ${key}, falling back to CMS`, err);
@@ -841,21 +905,8 @@ export default function MapComponent({
     }
   };
 
-  const preloadRemainingBoundaries = async (current: BoundaryKey) => {
-    const others = BOUNDARY_KEYS.filter((k) => k !== current && !boundaryCacheRef.current[k]);
-    await Promise.all(
-      others.map(async (k) => {
-        try {
-          boundaryCacheRef.current[k] = await engine.fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${k}.geojson.gz`);
-        } catch {
-          // Silent: preloading is optional; the active boundary is already loaded.
-        }
-      })
-    );
-  };
-
   useEffect(() => {
-    loadBoundary(boundary, { preloadOthers: true });
+    loadBoundary(boundary);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boundary]);
 
@@ -1064,56 +1115,143 @@ export default function MapComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusSelectionTick]);
 
-  // Sales / rental point layers update only when data or visibility toggles.
+  // Sales / rental point layers. Only the points inside the current viewport
+  // (+25% padding) are ever drawn: with the full 763k-row dataset loaded,
+  // creating a marker per row would freeze the tab. The full point lists are
+  // computed once per dataset (rental estimation is expensive) and cached in
+  // refs; panning/zooming just re-filters them against the viewport.
+  const salesPointsRef = useRef<PropertyData[] | null>(null);
+  const salesPointsKeyRef = useRef<PropertyData[] | null>(null);
+  const rentalPointsRef = useRef<{ lat: number; lng: number }[] | null>(null);
+  const rentalPointsKeyRef = useRef<PropertyData[] | null>(null);
+  const showSalesRef = useRef(showSales);
+  const showRentalsRef = useRef(showRentals);
+  showSalesRef.current = showSales;
+  showRentalsRef.current = showRentals;
+
+  const MAX_POINT_MARKERS = LOW_MEMORY_DEVICE ? 8000 : 30000;
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    if (salesLayerRef.current) {
-      salesLayerRef.current.remove();
-      salesLayerRef.current = null;
-    }
-    if (rentalsLayerRef.current) {
-      rentalsLayerRef.current.remove();
-      rentalsLayerRef.current = null;
-    }
+    const removeLayers = () => {
+      if (salesLayerRef.current) {
+        salesLayerRef.current.remove();
+        salesLayerRef.current = null;
+      }
+      if (rentalsLayerRef.current) {
+        rentalsLayerRef.current.remove();
+        rentalsLayerRef.current = null;
+      }
+    };
 
-    const salesFeatures = buildPointFeatures(rawData);
-    if (showSales) {
-      salesLayerRef.current = L.geoJSON(salesFeatures as any, {
-        pointToLayer: (feature, latlng) => {
-          return L.circleMarker(latlng, {
-            radius: 3,
-            fillColor: '#2c7be5',
-            color: '#ffffff',
-            weight: 1,
-            opacity: 0.6,
-            fillOpacity: 0.6,
-          });
-        },
-      }).addTo(map);
-    }
+    // The throttled rebuild below schedules work with setTimeout; if the map
+    // is removed (unmount / StrictMode remount) before the timer fires, any
+    // draw against the destroyed canvas renderer throws
+    // "Cannot read properties of undefined (reading 'clearRect')". Guard
+    // every rebuild with this flag and cancel the pending timer on cleanup.
+    let disposed = false;
 
-    const rentalFeatures = buildRentalFeatures(rawData);
-    if (showRentals) {
-      rentalsLayerRef.current = L.geoJSON(rentalFeatures as any, {
-        pointToLayer: (feature, latlng) => {
-          return L.circleMarker(latlng, {
-            radius: 3,
-            fillColor: '#fb923c',
-            color: '#ffffff',
-            weight: 1,
-            opacity: 0.6,
-            fillOpacity: 0.6,
-          });
-        },
-      }).addTo(map);
-    }
+    const rebuild = () => {
+      if (disposed) return;
+      removeLayers();
+      if (!showSalesRef.current && !showRentalsRef.current) return;
+
+      const bounds = map.getBounds().pad(0.25);
+      const inView = (rows: PropertyData[]): PropertyData[] => {
+        const out: PropertyData[] = [];
+        for (const d of rows) {
+          if (isValidCoord(d.lng, d.lat) && bounds.contains([d.lat, d.lng])) {
+            out.push(d);
+            if (out.length >= MAX_POINT_MARKERS) break;
+          }
+        }
+        return out;
+      };
+
+      if (showSalesRef.current) {
+        if (!salesPointsRef.current || salesPointsKeyRef.current !== rawDataRef.current) {
+          salesPointsKeyRef.current = rawDataRef.current;
+          salesPointsRef.current = rawDataRef.current.filter((d) => isValidCoord(d.lng, d.lat));
+        }
+        const group = L.layerGroup();
+        for (const d of salesPointsRef.current) {
+          if (!bounds.contains([d.lat, d.lng])) continue;
+          if (group.getLayers().length >= MAX_POINT_MARKERS) break;
+          group.addLayer(
+            L.circleMarker([d.lat, d.lng], {
+              radius: 3,
+              fillColor: '#2c7be5',
+              color: '#ffffff',
+              weight: 1,
+              opacity: 0.6,
+              fillOpacity: 0.6,
+            })
+          );
+        }
+        group.addTo(map);
+        salesLayerRef.current = group as unknown as L.GeoJSON;
+      }
+
+      if (showRentalsRef.current) {
+        if (!rentalPointsRef.current || rentalPointsKeyRef.current !== rawDataRef.current) {
+          rentalPointsKeyRef.current = rawDataRef.current;
+          // generateRentalPoints already returns only valid-coordinate points.
+          rentalPointsRef.current = engine.generateRentalPoints(rawDataRef.current);
+        }
+        const group = L.layerGroup();
+        let n = 0;
+        for (const d of rentalPointsRef.current) {
+          if (!bounds.contains([d.lat, d.lng])) continue;
+          if (n >= MAX_POINT_MARKERS) break;
+          n++;
+          group.addLayer(
+            L.circleMarker([d.lat, d.lng], {
+              radius: 3,
+              fillColor: '#fb923c',
+              color: '#ffffff',
+              weight: 1,
+              opacity: 0.6,
+              fillOpacity: 0.6,
+            })
+          );
+        }
+        group.addTo(map);
+        rentalsLayerRef.current = group as unknown as L.GeoJSON;
+      }
+    };
+
+    rebuild();
+
+    // Re-cull on pan/zoom so new points stream in as the user moves.
+    let lastRebuild = 0;
+    let pendingTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+    const throttledRebuild = () => {
+      const now = Date.now();
+      if (now - lastRebuild >= 250) {
+        lastRebuild = now;
+        rebuild();
+      } else {
+        clearTimeout(pendingTimer);
+        pendingTimer = setTimeout(rebuild, 250 - (now - lastRebuild));
+      }
+    };
+    map.on('moveend zoomend', throttledRebuild);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      map.off('moveend zoomend', throttledRebuild);
+    };
   }, [rawData, showSales, showRentals]);
 
-  // Flood layer toggles a FEMA ArcGIS MapServer. We use the geoplatform host which
-  // proxies FEMA NFHL — it's faster and more reliable than the legacy NFHL WMS
-  // endpoint and exposes the same OGC WMS interface.
+  // Flood layer toggles the FEMA NFHL WMS service. The previous host
+  // (hazards.geoplatform.gov) was retired — its DNS record now points to an
+  // empty load balancer, so every tile request failed. FEMA's own ArcGIS
+  // NFHLWMS service only supports CRS:84 / EPSG:4326 / EPSG:4269, so we pin
+  // the layer CRS to EPSG:4326 and let Leaflet transform tile bounds per
+  // request (v1.3.0 handles the axis order correctly).
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -1133,14 +1271,15 @@ export default function MapComponent({
     if (floodLayerRef.current) return;
 
     const wms = L.tileLayer.wms(
-      'https://hazards.geoplatform.gov/server/services/FEMA/FEMA_FLOODPLAIN/MapServer/WMSServer',
+      'https://hazards.fema.gov/arcgis/services/public/NFHLWMS/MapServer/WmsServer',
       {
-        layers: '0', // FEMA Flood Hazard Areas
+        layers: '12,13', // 12 = Flood Hazard Zones, 13 = Flood Hazard Boundaries
         format: 'image/png',
         transparent: true,
         opacity: 0.55,
         version: '1.3.0',
-        attribution: 'FEMA NFHL via geoplatform.gov',
+        crs: L.CRS.EPSG4326,
+        attribution: 'FEMA NFHL',
         // If the host is slow / down, Leaflet will keep retrying silently — we
         // don't want an error toast every minute, so we just log.
       }
@@ -1188,7 +1327,7 @@ export default function MapComponent({
       </AnimatePresence>
 
       <AnimatePresence>
-        {isReportLoading && (
+        {(isReportLoading || isDataLoading) && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1196,9 +1335,18 @@ export default function MapComponent({
             className="absolute inset-0 z-[1001] bg-black/40 flex items-center justify-center backdrop-blur-sm"
           >
             <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-4 shadow-2xl max-w-[260px] text-center">
-              <Loader2 className="w-10 h-10 text-emerald-500 animate-spin" />
-              <p className="text-sm text-gray-200 font-medium tracking-wide">Generating Report...</p>
-              <p className="text-xs text-gray-400">Loading property data for the selected areas.</p>
+              <Loader2 className={`w-10 h-10 animate-spin ${isDataLoading ? 'text-blue-500' : 'text-emerald-500'}`} />
+              {isDataLoading ? (
+                <>
+                  <p className="text-sm text-gray-200 font-medium tracking-wide">Loading Data...</p>
+                  <p className="text-xs text-gray-400">Fetching the market dataset for the map.</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-gray-200 font-medium tracking-wide">Generating Report...</p>
+                  <p className="text-xs text-gray-400">Loading property data for the selected areas.</p>
+                </>
+              )}
             </div>
           </motion.div>
         )}
@@ -1210,7 +1358,7 @@ export default function MapComponent({
             initial={{ opacity: 0, y: -20, x: '-50%' }}
             animate={{ opacity: 1, y: 0, x: '-50%' }}
             exit={{ opacity: 0, y: -20, x: '-50%' }}
-            className="absolute top-4 left-1/2 z-[1001] bg-blue-600/90 backdrop-blur text-white px-5 py-2.5 rounded-full text-sm font-semibold shadow-2xl pointer-events-none border border-white/20 whitespace-nowrap"
+            className="absolute top-4 left-1/2 z-[1001] bg-blue-600/90 backdrop-blur text-white px-3 sm:px-5 py-2 sm:py-2.5 rounded-full text-xs sm:text-sm font-semibold shadow-2xl pointer-events-none border border-white/20 max-w-[92vw] text-center whitespace-normal sm:whitespace-nowrap"
           >
             {tool === 'box'
               ? 'Click and drag on the map to draw a selection box'
@@ -1295,7 +1443,7 @@ export default function MapComponent({
       {/* Map legend — mirrors the sidebar palette so the colors on the map
           always match the gradient in the sidebar. */}
       {colorStops && colorStops.length >= 2 && (
-        <div className="absolute bottom-3 left-3 z-[400] bg-[#121620]/85 backdrop-blur border border-white/[0.08] rounded-lg px-3 py-2 shadow-lg pointer-events-none max-w-[260px]">
+        <div className="absolute bottom-3 left-3 z-[400] bg-[#121620]/85 backdrop-blur border border-white/[0.08] rounded-lg px-2 py-1.5 sm:px-3 sm:py-2 shadow-lg pointer-events-none max-w-[170px] sm:max-w-[260px]">
           <div className="text-[9px] uppercase font-bold text-gray-400 mb-1 tracking-wider">{metricLabel}</div>
           <div
             className="h-2 w-full rounded-full"
