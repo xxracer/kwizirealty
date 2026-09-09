@@ -1,6 +1,14 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
+  // There is a second package-lock.json in the PARENT folder
+  // (../package-lock.json). Without this, Turbopack misdetects the project
+  // root as that parent folder and resolves node_modules from there — where
+  // dependencies like lucide-react don't exist ("Cannot find module").
+  turbopack: {
+    root: path.join(__dirname),
+  },
   async headers() {
     return [
       {

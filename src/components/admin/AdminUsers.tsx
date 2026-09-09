@@ -19,6 +19,7 @@ import {
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import type { UserSubscription } from '@/lib/authContext';
+import { useAuthGate, saveAuthGateConfig } from '@/lib/authGate';
 import {
   Users,
   Plus,
@@ -155,6 +156,105 @@ function SubscriptionEditor({
       >
         {saving ? 'Saving…' : 'Save subscription'}
       </button>
+    </div>
+  );
+}
+
+function ToggleSwitch({
+  checked,
+  onChange,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+        checked ? 'bg-emerald-500' : 'bg-gray-600'
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+          checked ? 'translate-x-6' : 'translate-x-1'
+        }`}
+      />
+    </button>
+  );
+}
+
+/** Remote login switches (Firestore cms_config/auth) — see src/lib/authGate.ts. */
+function AccessControlCard() {
+  const { config, loading } = useAuthGate();
+  const [saving, setSaving] = useState<'map' | 'admin' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const update = async (key: 'mapLoginRequired' | 'adminLoginRequired', value: boolean) => {
+    setSaving(key === 'mapLoginRequired' ? 'map' : 'admin');
+    setError(null);
+    try {
+      await saveAuthGateConfig({ ...config, [key]: value });
+    } catch (err: any) {
+      console.error('[AccessControl] Failed to save:', err);
+      setError(err?.message || 'Could not save the setting.');
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const rows = [
+    {
+      key: 'mapLoginRequired' as const,
+      savingKey: 'map' as const,
+      title: 'Map login',
+      desc: 'Require sign-in (email + password) to open /map.',
+    },
+    {
+      key: 'adminLoginRequired' as const,
+      savingKey: 'admin' as const,
+      title: 'Admin login',
+      desc: 'Require admin sign-in to open the CMS (/admin).',
+    },
+  ];
+
+  return (
+    <div className="bg-surface border border-border-subtle rounded-2xl p-5">
+      <h4 className="font-semibold text-white flex items-center gap-2">
+        <Shield className="w-4 h-4 text-emerald-400" /> Access Control
+      </h4>
+      <p className="text-xs text-gray-400 mt-1">
+        Login switches apply to every visitor instantly and stay in sync live.
+        If the setting is unavailable, the default is protected (login required).
+      </p>
+      <div className="mt-4 grid sm:grid-cols-2 gap-4">
+        {rows.map((row) => (
+          <div key={row.key} className="border border-border-subtle rounded-xl p-4 flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-white">{row.title}</p>
+              <p className="text-xs text-gray-400 mt-0.5">{row.desc}</p>
+              <p
+                className={`text-[11px] mt-2 font-medium ${
+                  config[row.key] ? 'text-emerald-400' : 'text-amber-400'
+                }`}
+              >
+                {config[row.key] ? '● Required' : '○ Open — anyone can enter'}
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={config[row.key]}
+              disabled={loading || saving === row.savingKey}
+              onChange={(value) => update(row.key, value)}
+            />
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
     </div>
   );
 }
@@ -417,6 +517,8 @@ export function AdminUsers() {
           {isFormOpen ? 'Cancel' : 'New User'}
         </button>
       </div>
+
+      <AccessControlCard />
 
       {isFormOpen && (
         <form

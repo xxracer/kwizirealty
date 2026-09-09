@@ -29,6 +29,8 @@ import {
   type SqlAggregates,
 } from '@/lib/sqlData';
 import { resolveQueriesToZips } from '@/lib/areaAliases';
+import { formatMetricValue } from '@/lib/legendFormat';
+import { useWorkerAggregates } from './useWorkerAggregates';
 import { METRICS } from '@/lib/metrics';
 import { cmsStore, type CMSMetricOverride } from '@/lib/cmsStore';
 import { db } from '@/lib/firebase';
@@ -130,30 +132,25 @@ function generateColorStops(
     (v) => isFinite(v) && (v > 0 || metric === 'Appreciation Rate' || metric === 'Investor Index' || metric === 'Last Year Tax Rate')
   );
   if (!vals.length) {
-    return metric === 'Days on Market' || metric === 'Rental Days On Market'
-      ? ([[0, colors[0]], [30, colors[1]], [60, colors[2]], [90, colors[3]], [120, colors[4]]] as [number, string][])
-      : ([[150000, colors[0]], [300000, colors[1]], [450000, colors[2]], [600000, colors[3]], [800000, colors[4]]] as [number, string][]);
+    // Neutral fallback: no real values yet, so don't invent a price/DOM scale —
+    // spread the palette over a plain unitless 0–100 range.
+    return colors.map((c, i) => [i * 25, c]) as [number, string][];
   }
-  let min = customMin ?? Math.min(...vals);
-  let max = customMax ?? Math.max(...vals);
+  // Linear scans instead of Math.min(...vals): with ~60k area values a spread
+  // risks a RangeError ("Maximum call stack size exceeded").
+  let min = customMin ?? Infinity;
+  let max = customMax ?? -Infinity;
+  if (customMin === undefined || customMax === undefined) {
+    for (const v of vals) {
+      if (customMin === undefined && v < min) min = v;
+      if (customMax === undefined && v > max) max = v;
+    }
+  }
   if (min >= max) {
     return [[min, colors[2]], [min + 1, colors[4]]] as [number, string][];
   }
   const step = (max - min) / (colors.length - 1);
   return colors.map((c, i) => [min + step * i, c]) as [number, string][];
-}
-
-function formatMetricValue(metric: MetricKey, value: number): string {
-  if (!isFinite(value)) return '-';
-  if (metric === 'Days on Market' || metric === 'Rental Days On Market') return Math.round(value).toLocaleString() + ' d';
-  if (metric === 'List-to-Sale Ratio') return value.toFixed(1) + '%';
-  if (metric === 'Appreciation Rate') return value.toFixed(2) + '%';
-  if (metric === 'Investor Index') return value.toFixed(0);
-  if (metric === 'Rent-to-Sale Ratio') return value.toFixed(3);
-  if (metric === 'Lot Size') return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
-  if (metric === 'Last Year Tax Rate') return value.toFixed(2) + '%';
-  if (metric === 'Elem ETA Score' || metric === 'Middle ETA Score' || metric === 'High ETA Score') return value.toFixed(0);
-  return formatMoney(value);
 }
 
 function useMediaQuery(query: string): boolean {
@@ -559,6 +556,18 @@ function MapPageInner() {
     else setSidebarOpen(true);
   }, [isMobile]);
 
+  // Aggregation worker binding — the worker OWNS the ~763k rows; the page only
+  // receives small aggregates. Must be declared before loadFullData uses it.
+  const workerAgg = useWorkerAggregates();
+  // Stable references for callbacks that must not re-fire effects (the hook's
+  // return object is a fresh literal every render).
+  const {
+    loadDataset: workerLoadDataset,
+    requestAggregate: workerRequestAggregate,
+    search: workerSearch,
+    chatStats: workerChatStats,
+  } = workerAgg;
+
   // Load (or re-load) the full dataset into the engine. Until it lands, every
   // filter that acts on real rows — Market Metric, Property Filters, Scale
   // Range, period — looks dead because the map colors come from the static
@@ -569,21 +578,41 @@ function MapPageInner() {
     setDataLoadKind('data');
     setReportError(null);
     setReportPhase('loading');
-    engine
-      .loadAllCSV(false, (loaded, total) => setReportProgress({ loaded, total }))
-      .then((result) => {
-        if (result.ok) {
+    // Preferred path: the worker materializes the dataset itself (chunk gzip →
+    // IndexedDB) and keeps the ~763k rows out of the main-thread heap.
+    const runWorker = async (): Promise<boolean> => {
+      if (workerAgg.workerUnavailable) return false;
+      await engine.ensureSchoolRatings();
+      const plan = await engine.resolveDataSource();
+      if (!plan) return false;
+      const overrides = await engine.getPropertyOverrideLites();
+      return workerLoadDataset(plan, engine.getTeaScoresSnapshot(), overrides);
+    };
+    runWorker()
+      .then((workerOk) => {
+        if (workerOk) {
           setReportPhase('ready');
           setReportGeneration((g) => g + 1);
           setReportError(null);
-        } else {
-          // Keep the snapshot view, but SAY IT: a silent failure here is what
-          // made the map look like filters do nothing — without the dataset
-          // the polygons can only show the static snapshot.
-          setReportPhase('idle');
-          setReportProgress(null);
-          setReportError(`Dataset load failed: ${result.error || 'unknown error'}. Filters are inactive until the data loads.`);
+          return undefined;
         }
+        // Fallback: main-thread engine load (same behavior as before workers).
+        return engine
+          .loadAllCSV(false, (loaded, total) => setReportProgress({ loaded, total }))
+          .then((result) => {
+            if (result.ok) {
+              setReportPhase('ready');
+              setReportGeneration((g) => g + 1);
+              setReportError(null);
+            } else {
+              // Keep the snapshot view, but SAY IT: a silent failure here is what
+              // made the map look like filters do nothing — without the dataset
+              // the polygons can only show the static snapshot.
+              setReportPhase('idle');
+              setReportProgress(null);
+              setReportError(`Dataset load failed: ${result.error || 'unknown error'}. Filters are inactive until the data loads.`);
+            }
+          });
       })
       .catch((err) => {
         setReportPhase('idle');
@@ -591,7 +620,7 @@ function MapPageInner() {
         const msg = err instanceof Error ? err.message : String(err);
         setReportError(`Dataset load failed: ${msg}. Filters are inactive until the data loads.`);
       });
-  }, []);
+  }, [workerAgg.workerUnavailable, workerLoadDataset]);
 
   useEffect(() => {
     if (selectedIds.length === 0) {
@@ -629,6 +658,13 @@ function MapPageInner() {
   // flips and the client engine below takes over exactly as before.
   const [sqlFailed, setSqlFailed] = useState(false);
   const useSql = isSQLEnabled() && !sqlFailed && (hasActiveFilters(deferredAppliedFilters) || selectedIds.length > 0);
+
+  // Worker mode: the aggregation worker owns the rows and computes EVERY
+  // aggregate off the main thread (one job covers all the memos below).
+  // Disabled while SQL is active (server-side aggregates win) or when the
+  // worker could not be created — the page then falls back to the synchronous
+  // engine memos, identical numbers, just back on the main thread.
+  const useWorker = !workerAgg.workerUnavailable && workerAgg.datasetCount !== null && !useSql;
 
   useEffect(() => {
     if (!useSql) {
@@ -679,11 +715,33 @@ function MapPageInner() {
     setSqlFailed(false);
   }, [filters]);
 
+  // Worker mode: ONE aggregate job covers every memo below (map values, report
+  // stats, market health, time series, forecast, year built, points). The hook
+  // coalesces bursts into the newest request and keeps the last good result
+  // while a newer job runs — the main thread never blocks.
+  useEffect(() => {
+    if (!useWorker) return;
+    workerRequestAggregate(boundary, metric, deferredAppliedFilters, cmsOverrides, selectedIds);
+    // reportGeneration re-fires the job after a dataset reload so the values
+    // reflect the fresh worker rows.
+  }, [
+    useWorker,
+    workerRequestAggregate,
+    deferredAppliedFilters,
+    boundary,
+    metric,
+    selectedIds,
+    cmsOverrides,
+    reportGeneration,
+  ]);
+
   const filteredData = useMemo(() => {
-    if (useSql) return [];
+    // Rows live server-side (SQL) or in the aggregation worker — the main
+    // thread never materializes them in those modes.
+    if (useSql || useWorker) return [];
     if (reportPhase !== 'ready') return [];
     return engine.filterProperties(deferredAppliedFilters);
-  }, [useSql, reportPhase, deferredAppliedFilters, reportGeneration]);
+  }, [useSql, useWorker, reportPhase, deferredAppliedFilters, reportGeneration]);
 
   const { values: metricValues, counts: sampleCounts, names: nameMap } = useMemo(() => {
     if (useSql) {
@@ -700,10 +758,20 @@ function MapPageInner() {
         names: {},
       };
     }
+    if (useWorker) {
+      // The worker already applied the CMS overrides inside its aggregate.
+      const r = workerAgg.result;
+      if (!r) return { values: {}, counts: {}, names: {} };
+      return { values: r.mapValues.values, counts: r.mapValues.counts, names: r.mapValues.names };
+    }
     return engine.getMapValues(filteredData, boundary, metric);
-  }, [useSql, sqlAgg, cmsOverrides, filteredData, boundary, metric, reportGeneration]);
+  }, [useSql, useWorker, workerAgg.result, sqlAgg, cmsOverrides, filteredData, boundary, metric, reportGeneration]);
 
-  const dataReady = useSql ? !!sqlAgg : reportPhase === 'ready' && filteredData.length > 0;
+  const dataReady = useSql
+    ? !!sqlAgg
+    : useWorker
+    ? reportPhase === 'ready' && workerAgg.result !== null
+    : reportPhase === 'ready' && filteredData.length > 0;
 
   // Use the lightweight pre-computed snapshot for instant map coloring while
   // the full CSV dataset is still loading in the background.
@@ -726,8 +794,15 @@ function MapPageInner() {
     prevAutoScaleRef.current = autoScale;
     const vals = Object.values(effectiveMetricValues).filter((v) => isFinite(v));
     if (!vals.length || !reseed) return;
-    setCustomMin(Math.min(...vals));
-    setCustomMax(Math.max(...vals));
+    // Linear scan — Math.min(...vals) with ~60k values risks a RangeError.
+    let min = Infinity;
+    let max = -Infinity;
+    for (const v of vals) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    setCustomMin(min);
+    setCustomMax(max);
   }, [effectiveMetricValues, autoScale]);
 
   const colorStops = useMemo(() => {
@@ -746,12 +821,14 @@ function MapPageInner() {
 
   const reportStats = useMemo(() => {
     if (useSql) return sqlAgg?.reportStats ?? emptyStats;
+    if (useWorker) return workerAgg.result?.reportStats ?? emptyStats;
     if (!dataReady) return emptyStats;
     return engine.getStatsForSelection(filteredData, boundary, selectedIds);
-  }, [useSql, sqlAgg, dataReady, filteredData, selectedIds, boundary, emptyStats]);
+  }, [useSql, sqlAgg, useWorker, workerAgg.result, dataReady, filteredData, selectedIds, boundary, emptyStats]);
 
   const marketHealth = useMemo(() => {
     if (useSql) return sqlAgg?.marketHealth ?? null;
+    if (useWorker) return workerAgg.result?.marketHealth ?? null;
     if (!dataReady) return null;
     const isRental =
       metric === 'Est. Rental Price' ||
@@ -759,13 +836,14 @@ function MapPageInner() {
       metric === 'Rental Days On Market' ||
       metric === 'Rent-to-Sale Ratio';
     return engine.getMarketHealth(filteredData, boundary, selectedIds, isRental ? 'rental' : 'sale');
-  }, [useSql, sqlAgg, dataReady, filteredData, selectedIds, boundary, metric]);
+  }, [useSql, sqlAgg, useWorker, workerAgg.result, dataReady, filteredData, selectedIds, boundary, metric]);
 
   const timeSeries = useMemo(() => {
     if (useSql) return sqlAgg?.timeSeries ?? [];
+    if (useWorker) return workerAgg.result?.timeSeries ?? [];
     if (!dataReady) return [];
     return engine.getTimeSeries(filteredData, boundary, metric, selectedIds);
-  }, [useSql, sqlAgg, dataReady, filteredData, boundary, metric, selectedIds]);
+  }, [useSql, sqlAgg, useWorker, workerAgg.result, dataReady, filteredData, boundary, metric, selectedIds]);
 
   const forecast = useMemo(() => {
     if (!timeSeries.length) return null;
@@ -774,11 +852,12 @@ function MapPageInner() {
 
   const forecastComparison = useMemo(() => {
     if (useSql) return sqlAgg?.forecastComparison ?? [];
+    if (useWorker) return workerAgg.result?.forecastComparison ?? [];
     if (!dataReady) return [];
     const full = engine.getForecastForSelection(filteredData, boundary, metric, selectedIds);
     // Sort by baseline descending to get the top 5 areas
     return full.sort((a, b) => b.baseline - a.baseline).slice(0, 5);
-  }, [useSql, sqlAgg, dataReady, filteredData, boundary, metric, selectedIds]);
+  }, [useSql, sqlAgg, useWorker, workerAgg.result, dataReady, filteredData, boundary, metric, selectedIds]);
 
   const chartData = useMemo(() => {
     if (!dataReady) return [];
@@ -792,6 +871,7 @@ function MapPageInner() {
 
   const yearBuiltData = useMemo(() => {
     if (useSql) return sqlAgg?.yearBuiltData ?? [];
+    if (useWorker) return workerAgg.result?.yearBuiltData ?? [];
     if (!dataReady) return [];
     const buckets: Record<string, number> = {
       'Before 1970': 0,
@@ -813,7 +893,7 @@ function MapPageInner() {
     return Object.entries(buckets)
       .map(([name, value]) => ({ name, value }))
       .filter((d) => d.value > 0);
-  }, [useSql, sqlAgg, filteredData, selectedIds, boundary, dataReady]);
+  }, [useSql, useWorker, workerAgg.result, sqlAgg, filteredData, selectedIds, boundary, dataReady]);
 
   // MapComponent only reads lat/lng from rawData (points + bounds), so when SQL
   // is active we hand it the capped point set from the server instead of the
@@ -823,13 +903,19 @@ function MapPageInner() {
     return filteredData;
   }, [useSql, sqlAgg, filteredData]);
 
+  // Numeric point list for the map's sales/rental layers in worker mode
+  // (transferable Float32Array — the main thread never touches row objects).
+  const workerPoints = useWorker ? (workerAgg.result?.points ?? null) : null;
+  const workerPointsBounds = useWorker ? (workerAgg.result?.pointsBounds ?? null) : null;
+
   // Property count shown in the map footer / report header. Under SQL the raw
   // rows aren't in the browser, so we use the server's report count (exact for
   // a selection, the capped sample otherwise).
   const displayPropertyCount = useMemo(() => {
     if (useSql) return sqlAgg?.reportStats.count ?? 0;
+    if (useWorker) return workerAgg.result?.filteredCount ?? 0;
     return filteredData.length;
-  }, [useSql, sqlAgg, filteredData]);
+  }, [useSql, sqlAgg, useWorker, workerAgg.result, filteredData]);
 
   const handleFilterChange = useCallback(
     (key: keyof PropertyFilters, value: number | string | string[]) => {
@@ -851,6 +937,14 @@ function MapPageInner() {
   const MIN_APPLY_POPUP_MS = 900;
   const applyFilters = useCallback(() => {
     if (!filtersDirty) return;
+    // Worker mode: the aggregate runs OFF the main thread, so there is nothing
+    // to paint a guaranteed popup for — commit immediately. The "Updating…"
+    // pill on the map is driven by the worker's `updating` flag instead.
+    if (useWorker) {
+      setAppliedFilters(filters);
+      if (reportPhase !== 'ready') loadFullData();
+      return;
+    }
     setFiltersApplying(true);
     setTimeout(() => {
       setAppliedFilters(filters);
@@ -861,7 +955,7 @@ function MapPageInner() {
       // only starts counting once the main thread is free again.
       setTimeout(() => setFiltersApplying(false), MIN_APPLY_POPUP_MS);
     }, 250);
-  }, [filters, filtersDirty, reportPhase, loadFullData]);
+  }, [filters, filtersDirty, reportPhase, loadFullData, useWorker]);
 
   // For changes that must take effect immediately (chat bot, toggles): apply
   // to BOTH the draft and the applied state in one go.
@@ -973,6 +1067,23 @@ function MapPageInner() {
     }
   }, [searchQuery, filteredData, boundary, effectiveNameMap, boundaryLookup]);
 
+  // Worker mode: the rows live in the worker, so applySearch's row-level pass
+  // can't run on the main thread. The worker's search supplements the
+  // boundary-name matching in applySearch — a non-empty result wins, mirroring
+  // the old precedence (row matches beat name matches).
+  useEffect(() => {
+    if (!useWorker || !searchQuery.trim()) return;
+    let cancelled = false;
+    workerSearch(boundary, searchQuery).then((ids) => {
+      if (cancelled || !ids || ids.length === 0) return;
+      setSelectedIds(Array.from(new Set(ids)));
+      setSearchFocusTick((t) => t + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery, useWorker, boundary, workerSearch]);
+
   // Live search: debounce the input so we filter as the user types.
   useEffect(() => {
     const id = setTimeout(() => {
@@ -983,12 +1094,33 @@ function MapPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
-  const uniquePropertyTypes = useMemo(() => engine.getUniqueValues('propertyType'), [reportGeneration]);
-  const uniqueCities = useMemo(() => engine.getUniqueValues('city').slice(0, 120), [reportGeneration]);
-  const uniqueDistricts = useMemo(() => engine.getUniqueValues('schoolDistrict').slice(0, 80), [reportGeneration]);
-  const uniqueElementary = useMemo(() => engine.getUniqueValues('elementary').slice(0, 80), [reportGeneration]);
-  const uniqueMiddle = useMemo(() => engine.getUniqueValues('middle').slice(0, 80), [reportGeneration]);
-  const uniqueHigh = useMemo(() => engine.getUniqueValues('highschools').slice(0, 80), [reportGeneration]);
+  // Dropdown options come straight from the worker's datasetReady payload in
+  // worker mode (engine.getUniqueValues needs main-thread rows — only used by
+  // the fallback path).
+  const uniquePropertyTypes = useMemo(() => {
+    if (workerAgg.uniqueValues) return workerAgg.uniqueValues.propertyType;
+    return engine.getUniqueValues('propertyType');
+  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  const uniqueCities = useMemo(() => {
+    if (workerAgg.uniqueValues) return workerAgg.uniqueValues.city.slice(0, 120);
+    return engine.getUniqueValues('city').slice(0, 120);
+  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  const uniqueDistricts = useMemo(() => {
+    if (workerAgg.uniqueValues) return workerAgg.uniqueValues.schoolDistrict.slice(0, 80);
+    return engine.getUniqueValues('schoolDistrict').slice(0, 80);
+  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  const uniqueElementary = useMemo(() => {
+    if (workerAgg.uniqueValues) return workerAgg.uniqueValues.elementary.slice(0, 80);
+    return engine.getUniqueValues('elementary').slice(0, 80);
+  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  const uniqueMiddle = useMemo(() => {
+    if (workerAgg.uniqueValues) return workerAgg.uniqueValues.middle.slice(0, 80);
+    return engine.getUniqueValues('middle').slice(0, 80);
+  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  const uniqueHigh = useMemo(() => {
+    if (workerAgg.uniqueValues) return workerAgg.uniqueValues.highschools.slice(0, 80);
+    return engine.getUniqueValues('highschools').slice(0, 80);
+  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
 
   const selectedNames = useMemo(() => {
     return selectedIds.map((id) => nameMap[id] || id);
@@ -1132,7 +1264,7 @@ function MapPageInner() {
     return matchedNames.length > 0 ? matchedNames : null;
   }, [effectiveNameMap, boundary, boundaryLookup]);
 
-  const getStatsForChatQueries = useCallback((queries: string[]) => {
+  const getStatsForChatQueries = useCallback(async (queries: string[]) => {
     if (!queries || queries.length === 0 || !dataReady) return null;
     // SQL mode: the raw rows live server-side, so an arbitrary-area preview
     // can't be computed client-side. The chat still works — it just skips the
@@ -1190,47 +1322,108 @@ function MapPageInner() {
 
     if (matchedIds.length === 0) return null;
 
-    const stats = engine.getStatsForSelection(filteredData, boundary, matchedIds);
     const isRental =
       metric === 'Est. Rental Price' ||
       metric === 'Rental Price per Sqft' ||
       metric === 'Rental Days On Market' ||
       metric === 'Rent-to-Sale Ratio';
+
+    // Worker mode: name matching ran on the main thread (cheap, area ids
+    // only); the row-level stats come from the worker, which owns the rows.
+    if (useWorker) {
+      const res = await workerChatStats(
+        boundary,
+        deferredAppliedFilters,
+        matchedIds,
+        isRental ? 'rental' : 'sale'
+      );
+      if (!res) return null;
+      return { stats: res.stats, health: res.health ?? null, matchedNames };
+    }
+
+    const stats = engine.getStatsForSelection(filteredData, boundary, matchedIds);
     const health = engine.getMarketHealth(filteredData, boundary, matchedIds, isRental ? 'rental' : 'sale');
 
     return { stats, health, matchedNames };
-  }, [dataReady, useSql, filteredData, boundary, effectiveNameMap, metric, boundaryLookup]);
+  }, [
+    dataReady,
+    useSql,
+    useWorker,
+    filteredData,
+    boundary,
+    effectiveNameMap,
+    metric,
+    boundaryLookup,
+    deferredAppliedFilters,
+    workerChatStats,
+  ]);
 
   // Real-time stats for chat-driven property filters. The bot merges the
   // requested filters on top of the applied ones and this returns the matching
-  // rows' aggregates in ONE synchronous pass, so the model can answer
+  // rows' aggregates in ONE pass, so the model can answer
   // "how many / what's the average / where" in the same turn it applies them.
-  // Null in SQL mode (rows live server-side) or before the dataset has loaded.
-  const getStatsForChatFilters = useCallback((newFilters: Partial<PropertyFilters>) => {
-    if (useSql || reportPhase !== 'ready') return null;
-    const merged = { ...appliedFilters, ...newFilters } as PropertyFilters;
-    const rows = engine.filterProperties(merged);
-    const stats = engine.getStatsForSelection(rows, boundary, []);
-    // Top 5 areas by match count so the bot can say where these homes cluster.
-    const counts: Record<string, number> = {};
-    for (const d of rows) {
-      const pid = engine.getBoundaryKey(boundary, d);
-      if (!pid) continue;
-      counts[pid] = (counts[pid] || 0) + 1;
-    }
-    const nameSource: Record<string, string> = {};
-    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
-      nameSource[id] = info.name;
-    }
-    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
-      if (!nameSource[id]) nameSource[id] = name;
-    }
-    const topAreas = Object.entries(counts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([id, n]) => ({ name: nameSource[id] || id, count: n }));
-    return { stats, topAreas };
-  }, [useSql, reportPhase, appliedFilters, boundary, boundaryLookup, effectiveNameMap]);
+  // In worker mode the pass runs in the worker; the returned promise resolves
+  // with small aggregates only. Null in SQL mode (rows live server-side) or
+  // before the dataset has loaded.
+  const getStatsForChatFilters = useCallback(
+    async (newFilters: Partial<PropertyFilters>) => {
+      if (useSql || reportPhase !== 'ready') return null;
+
+      // Worker mode: the worker filters + aggregates, and returns top-5 area
+      // ids (the page maps them to display names — the worker has no lookup).
+      if (useWorker) {
+        const merged = { ...deferredAppliedFilters, ...newFilters } as PropertyFilters;
+        const res = await workerChatStats(boundary, merged, undefined);
+        if (!res) return null;
+        const nameSource: Record<string, string> = {};
+        for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+          nameSource[id] = info.name;
+        }
+        for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+          if (!nameSource[id]) nameSource[id] = name;
+        }
+        const topAreas = (res.topAreas || []).map(({ id, count }) => ({
+          name: nameSource[id] || id,
+          count,
+        }));
+        return { stats: res.stats, topAreas };
+      }
+
+      const merged = { ...appliedFilters, ...newFilters } as PropertyFilters;
+      const rows = engine.filterProperties(merged);
+      const stats = engine.getStatsForSelection(rows, boundary, []);
+      // Top 5 areas by match count so the bot can say where these homes cluster.
+      const counts: Record<string, number> = {};
+      for (const d of rows) {
+        const pid = engine.getBoundaryKey(boundary, d);
+        if (!pid) continue;
+        counts[pid] = (counts[pid] || 0) + 1;
+      }
+      const nameSource: Record<string, string> = {};
+      for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+        nameSource[id] = info.name;
+      }
+      for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+        if (!nameSource[id]) nameSource[id] = name;
+      }
+      const topAreas = Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([id, n]) => ({ name: nameSource[id] || id, count: n }));
+      return { stats, topAreas };
+    },
+    [
+      useSql,
+      useWorker,
+      reportPhase,
+      appliedFilters,
+      deferredAppliedFilters,
+      boundary,
+      boundaryLookup,
+      effectiveNameMap,
+      workerChatStats,
+    ]
+  );
 
   const generateReport = useCallback(() => {
     if (reportPhase === 'loading') return;
@@ -1437,21 +1630,7 @@ function MapPageInner() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {reportPhase === 'loading' && reportProgress && (
-            <div className="flex flex-col gap-1 mr-2 min-w-[140px]">
-              <div className="flex items-center justify-between text-[10px] text-blue-300">
-                <span>Loading market data {reportProgress.loaded}/{reportProgress.total}</span>
-                <span>{Math.round((reportProgress.loaded / reportProgress.total) * 100)}%</span>
-              </div>
-              <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-blue-500 transition-all duration-300"
-                  style={{ width: `${(reportProgress.loaded / reportProgress.total) * 100}%` }}
-                />
-              </div>
-            </div>
-          )}
-          {reportPhase === 'loading' && !reportProgress && (
+          {reportPhase === 'loading' && (
             <div className="flex items-center gap-2 text-blue-300 text-sm mr-2">
               <div className="w-4 h-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
               <span className="hidden sm:inline">Loading market data…</span>
@@ -1526,9 +1705,7 @@ function MapPageInner() {
           {reportPhase === 'loading' ? (
             <span className="flex items-center gap-2 text-blue-300 text-xs">
               <span className="w-3.5 h-3.5 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
-              {reportProgress && reportProgress.total > 0
-                ? `Loading report data ${reportProgress.loaded}/${reportProgress.total}…`
-                : 'Loading report data…'}
+              Loading report data…
             </span>
           ) : (
             <>
@@ -2066,13 +2243,9 @@ function MapPageInner() {
                     <TrendingUp className="w-4 h-4" />
                     <span className="text-xs font-bold uppercase tracking-wider">Interactive Map</span>
                     <span className="text-xs text-gray-500 hidden sm:inline">
-                      {reportPhase === 'loading' ? (
-                        reportProgress && reportProgress.total > 0
-                          ? `Loading market data ${reportProgress.loaded}/${reportProgress.total}…`
-                          : 'Loading market data…'
-                      ) : (
-                        `${displayPropertyCount.toLocaleString()} properties · ${Object.keys(metricValues).length} areas`
-                      )}
+                      {reportPhase === 'loading'
+                        ? 'Loading market data…'
+                        : `${displayPropertyCount.toLocaleString()} properties · ${Object.keys(metricValues).length} areas`}
                     </span>
                   </div>
                   <div className="flex items-center gap-3">
@@ -2121,10 +2294,13 @@ function MapPageInner() {
                     selectedIds={selectedIds}
                     onSelectionChange={(ids) => setSelectedIds(ids)}
                     rawData={mapRawData}
+                    points={workerPoints}
+                    pointsBounds={workerPointsBounds}
                     showSales={layerSales}
                     showRentals={layerRentals}
                     showFlood={layerFlood}
                     metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
+                    metric={metric}
                     fillOpacity={fillOpacity}
                     onClear={() => setSelectedIds([])}
                     onGenerateReport={generateReport}
@@ -2152,9 +2328,21 @@ function MapPageInner() {
                 </button>
               )}
 
+              {/* Worker-mode "Updating…" pill: the aggregate is computed in the
+                  worker, so the main thread stays responsive — a small pill
+                  (not a blocking overlay) tells the user a newer result is
+                  still in flight. The last good map keeps rendering. */}
+              {useWorker && workerAgg.updating && !filtersApplying && (
+                <div className="absolute left-4 top-4 z-[800] flex items-center gap-2 bg-[#121620]/90 border border-white/10 rounded-full px-3 py-2 shadow-lg no-print">
+                  <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin" />
+                  <span className="text-xs font-medium text-gray-200">Updating…</span>
+                </div>
+              )}
+
               {/* Applying-filters popup — anchored to the MAP (not the whole
                   viewport), plain div, no framer-motion (main-thread blocking
-                  would freeze it at opacity 0). */}
+                  would freeze it at opacity 0). Only used by the synchronous
+                  fallback path. */}
               {filtersApplying && (
                 <div className="absolute inset-0 z-[900] bg-black/50 backdrop-blur-sm flex items-center justify-center print:hidden no-print">
                   <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-3 shadow-2xl max-w-[280px] text-center">

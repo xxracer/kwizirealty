@@ -1,5 +1,5 @@
 const { initializeApp } = require('firebase/app');
-const { getStorage, ref, getDownloadURL } = require('firebase/storage');
+const { getStorage, ref, getDownloadURL, getMetadata } = require('firebase/storage');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -52,7 +52,20 @@ async function main() {
   // The GeoJSON is gzip-compressed at build time so Vercel serves a tiny file
   // and the client decompresses it in the browser.
   const downloaded = new Map();
+  // Per-key freshness markers: the Storage `updated` timestamp of the source
+  // object each committed .gz came from. The client compares these against the
+  // CMS metadata (src/components/MapComponent.tsx isCmsBoundaryNewer) so a
+  // boundary uploaded to the CMS after this build is served from Firebase
+  // instead of the stale local copy.
+  const versions = {};
   for (const { name, key } of BOUNDARY_FILES) {
+    try {
+      const meta = await getMetadata(ref(storage, `cms_files/${name}`));
+      if (meta.updated) versions[key] = meta.updated;
+    } catch {
+      // Source object may be missing; the marker simply stays absent and the
+      // client keeps its current local-first behavior for this key.
+    }
     const dest = path.join(outDir, `${key}.geojson`);
     const gzDest = `${dest}.gz`;
     try {
@@ -84,6 +97,12 @@ async function main() {
   for (const tmp of downloaded.values()) {
     if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
   }
+
+  fs.writeFileSync(
+    path.join(outDir, 'versions.json'),
+    JSON.stringify(versions, null, 2)
+  );
+  console.log(`✓ versions.json (${Object.keys(versions).length} markers)`);
 }
 
 main().catch((err) => {

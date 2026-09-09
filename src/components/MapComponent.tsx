@@ -5,6 +5,8 @@ import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import * as turf from '@turf/turf';
 import { PropertyData, BoundaryKey, engine, cleanBoundaryName, cleanSchoolName } from '@/lib/engine';
+import type { MetricKey } from '@/lib/engineCore';
+import { formatMetricValue } from '@/lib/legendFormat';
 import { MousePointer2, Square, Trash2, BarChart3, Loader2, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
@@ -210,6 +212,16 @@ interface MapComponentProps {
   isDataLoading?: boolean;
   /** Incremented by the parent (e.g. after a search) to fly the map to the current selection. */
   focusSelectionTick?: number;
+  /** Numeric [lat, lng, lat, lng, …] point list from the aggregation worker.
+   *  When present it REPLACES rawData for the sales/rental point layers: the
+   *  cull becomes a plain float scan instead of touching PropertyData objects. */
+  points?: Float32Array | null;
+  /** Bounding box of `points` — lets the cull early-out when the viewport
+   *  doesn't intersect the point cloud at all. */
+  pointsBounds?: { minLat: number; maxLat: number; minLng: number; maxLng: number } | null;
+  /** The active metric key — makes legend/popup formatting metric-aware
+   *  (sqft as plain numbers, DOM with "d", ratios with "%", money otherwise). */
+  metric?: MetricKey;
 }
 
 export default function MapComponent({
@@ -234,6 +246,9 @@ export default function MapComponent({
   isReportLoading,
   isDataLoading,
   focusSelectionTick,
+  points,
+  pointsBounds,
+  metric,
 }: MapComponentProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -268,6 +283,7 @@ export default function MapComponent({
   const selectedRef = useRef(selectedIds);
   const rawDataRef = useRef(rawData);
   const metricLabelRef = useRef(metricLabel);
+  const metricRef = useRef<MetricKey | undefined>(metric);
   const fillOpacityRef = useRef(fillOpacity);
   const metricValuesRef = useRef(metricValues);
   const sampleCountsRef = useRef(sampleCounts);
@@ -279,6 +295,7 @@ export default function MapComponent({
   selectedRef.current = selectedIds;
   rawDataRef.current = rawData;
   metricLabelRef.current = metricLabel;
+  metricRef.current = metric;
   fillOpacityRef.current = fillOpacity;
   metricValuesRef.current = metricValues;
   sampleCountsRef.current = sampleCounts;
@@ -357,14 +374,8 @@ export default function MapComponent({
     const value = Number(props.value ?? 0);
     const count = Number(props.count ?? 0);
     const hasMetric = props.hasMetric !== false;
-    const lowerLabel = metricLabelRef.current.toLowerCase();
-    const valueText = !hasMetric
-      ? 'No data'
-      : lowerLabel.includes('price') || lowerLabel.includes('$/sqft')
-      ? formatMoney(value)
-      : lowerLabel.includes('ratio') || lowerLabel.includes('%')
-      ? value.toFixed(1) + '%'
-      : value.toFixed(1);
+    // Metric-aware formatting — same source as the sidebar legend.
+    const valueText = !hasMetric ? 'No data' : formatMetricValue(metricRef.current, value);
     const valueColor = hasMetric ? '#2c7be5' : '#9ca3af';
 
     return `
@@ -857,10 +868,56 @@ export default function MapComponent({
 
   // Load boundary GeoJSON for the active boundary. We prefer same-domain files in
   // /geojson so Vercel serves them instantly, and fall back to Firebase CMS only
-  // when the local copy is missing. Only the ACTIVE boundary is kept in RAM —
+  // when the local copy is missing OR the CMS upload is newer (see
+  // isCmsBoundaryNewer). Only the ACTIVE boundary is kept in RAM —
   // the old eager preload of all seven decompressed GeoJSONs (subdivisions
   // alone is ~59k polygons) consumed hundreds of MB and crashed low-RAM
   // machines. Switching boundaries refetches from the HTTP cache instead.
+
+  // One-per-session freshness state: local markers (versions.json, written at
+  // build time) vs CMS metadata timestamps, keyed by source file name. Both
+  // are tiny metadata reads; resolving them lazily on the first boundary load
+  // keeps the fast path untouched.
+  const boundaryFreshnessRef = useRef<{
+    local: Record<string, number> | null;
+    cms: Record<string, number> | null;
+  } | null>(null);
+
+  const isCmsBoundaryNewer = async (key: BoundaryKey): Promise<boolean> => {
+    const fileName = BOUNDARY_SOURCES[key];
+    if (!fileName) return false;
+
+    if (!boundaryFreshnessRef.current) {
+      const asTime = (v: unknown): number =>
+        typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) : NaN;
+      const [local, cms] = await Promise.all([
+        fetch('/geojson/versions.json')
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+        cmsStore
+          .listFilesMetadataByCategory('boundary')
+          .then((files) => {
+            const map: Record<string, number> = {};
+            files.forEach((f) => {
+              const t = asTime(f.uploadedAt);
+              if (isFinite(t)) map[f.name] = t;
+            });
+            return map;
+          })
+          .catch(() => null),
+      ]);
+      boundaryFreshnessRef.current = { local, cms };
+    }
+
+    const { local, cms } = boundaryFreshnessRef.current;
+    const cmsAt = cms?.[fileName];
+    const localAt = local?.[key];
+    // Missing markers (pre-first-prebuild build) keep the current local-first
+    // behavior instead of forcing every visitor onto the cross-origin copy.
+    if (!cmsAt || !localAt) return false;
+    return cmsAt > localAt;
+  };
+
   const loadBoundary = async (key: BoundaryKey) => {
     setBoundaryLoading(true);
     setBoundarySwitching(true);
@@ -873,18 +930,37 @@ export default function MapComponent({
       return;
     }
 
-    const localPath = `/geojson/${key}.geojson.gz`;
+    // Start the local fetch IMMEDIATELY and probe CMS freshness in parallel —
+    // the freshness probe must never serialize in front of the local load
+    // (a slow or hanging Firestore read would block the GeoJSON on every
+    // boundary switch). The probe is capped at 4s: if it doesn't answer,
+    // the local copy wins.
+    const localDataP = engine
+      .fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${key}.geojson.gz`)
+      .catch(() => null);
+
+    let cmsIsNewer = false;
     try {
-      const data = await engine.fetchGzJson<GeoJSON.FeatureCollection>(localPath);
-      for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
-        if (k !== key) delete boundaryCacheRef.current[k];
+      cmsIsNewer = await Promise.race([
+        isCmsBoundaryNewer(key),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 4000)),
+      ]);
+    } catch {
+      // Freshness check is best-effort — keep the local fast path on any error.
+    }
+
+    if (!cmsIsNewer) {
+      const data = await localDataP;
+      if (data) {
+        for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
+          if (k !== key) delete boundaryCacheRef.current[k];
+        }
+        boundaryCacheRef.current[key] = data;
+        setGeoJsonData(data);
+        setBoundaryLoading(false);
+        return;
       }
-      boundaryCacheRef.current[key] = data;
-      setGeoJsonData(data);
-      setBoundaryLoading(false);
-      return;
-    } catch (err) {
-      console.warn(`[Kwizi Map] local GeoJSON missing for ${key}, falling back to CMS`, err);
+      console.warn(`[Kwizi Map] local GeoJSON missing for ${key}, falling back to CMS`);
     }
 
     // Fallback to Firebase CMS storage URL.
@@ -916,7 +992,10 @@ export default function MapComponent({
   const areaLayerJustBuiltRef = useRef(false);
 
   const makeAreaStyle = (id: string, value: number | undefined, selected: boolean) => ({
-    fillColor: value && isFinite(value) ? getColorForValue(value, colorStopsRef.current) : '#374151',
+    // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing or
+    // non-finite values mean "no data", otherwise a true 0 would paint grey
+    // and contradict the legend.
+    fillColor: typeof value === 'number' && isFinite(value) ? getColorForValue(value, colorStopsRef.current) : '#374151',
     color: selected ? '#ec4899' : '#ffffff',
     weight: selected ? 2.5 : 0.75,
     opacity: Math.min(0.65, fillOpacityRef.current + 0.15),
@@ -933,7 +1012,8 @@ export default function MapComponent({
       const value = metricValuesRef.current[id];
       const count = sampleCountsRef.current[id] || 0;
       const name = nameMapRef.current[id] || id;
-      const hasMetric = value && isFinite(value);
+      // 0 is a legitimate metric value — see makeAreaStyle.
+      const hasMetric = typeof value === 'number' && isFinite(value);
       const color = hasMetric ? getColorForValue(value, colorStopsRef.current) : '#374151';
 
       props.value = value ?? 0;
@@ -1162,6 +1242,74 @@ export default function MapComponent({
       if (!showSalesRef.current && !showRentalsRef.current) return;
 
       const bounds = map.getBounds().pad(0.25);
+
+      // Worker mode: numeric [lat, lng, …] pairs. Culling is a plain float
+      // scan (~ms at 763k points) — no PropertyData objects, no per-row
+      // method calls, and the array itself is a transferable from the worker.
+      if (points && points.length >= 2) {
+        const pb = pointsBounds;
+        if (
+          pb &&
+          (pb.maxLat < bounds.getSouth() ||
+            pb.minLat > bounds.getNorth() ||
+            pb.maxLng < bounds.getWest() ||
+            pb.minLng > bounds.getEast())
+        ) {
+          // The whole point cloud is outside the viewport — nothing to draw.
+          return;
+        }
+        if (showSalesRef.current) {
+          const group = L.layerGroup();
+          let added = 0;
+          for (let i = 0; i + 1 < points.length && added < MAX_POINT_MARKERS; i += 2) {
+            const lat = points[i];
+            const lng = points[i + 1];
+            if (!isValidCoord(lng, lat) || !bounds.contains([lat, lng])) continue;
+            added++;
+            group.addLayer(
+              L.circleMarker([lat, lng], {
+                radius: 3,
+                fillColor: '#2c7be5',
+                color: '#ffffff',
+                weight: 1,
+                opacity: 0.6,
+                fillOpacity: 0.6,
+                // No popup is attached to point markers — skip the hit-test
+                // plumbing Leaflet otherwise builds per marker (30k markers ×
+                // event wiring is a real freeze on low-end machines).
+                interactive: false,
+              })
+            );
+          }
+          group.addTo(map);
+          salesLayerRef.current = group as unknown as L.GeoJSON;
+        }
+        if (showRentalsRef.current) {
+          const group = L.layerGroup();
+          let added = 0;
+          for (let i = 0; i + 1 < points.length && added < MAX_POINT_MARKERS; i += 2) {
+            const lat = points[i];
+            const lng = points[i + 1];
+            if (!isValidCoord(lng, lat) || !bounds.contains([lat, lng])) continue;
+            added++;
+            group.addLayer(
+              L.circleMarker([lat, lng], {
+                radius: 3,
+                fillColor: '#fb923c',
+                color: '#ffffff',
+                weight: 1,
+                opacity: 0.6,
+                fillOpacity: 0.6,
+                interactive: false,
+              })
+            );
+          }
+          group.addTo(map);
+          rentalsLayerRef.current = group as unknown as L.GeoJSON;
+        }
+        return;
+      }
+
       const inView = (rows: PropertyData[]): PropertyData[] => {
         const out: PropertyData[] = [];
         for (const d of rows) {
@@ -1179,9 +1327,11 @@ export default function MapComponent({
           salesPointsRef.current = rawDataRef.current.filter((d) => isValidCoord(d.lng, d.lat));
         }
         const group = L.layerGroup();
+        let added = 0;
         for (const d of salesPointsRef.current) {
           if (!bounds.contains([d.lat, d.lng])) continue;
-          if (group.getLayers().length >= MAX_POINT_MARKERS) break;
+          if (added >= MAX_POINT_MARKERS) break;
+          added++;
           group.addLayer(
             L.circleMarker([d.lat, d.lng], {
               radius: 3,
@@ -1190,6 +1340,7 @@ export default function MapComponent({
               weight: 1,
               opacity: 0.6,
               fillOpacity: 0.6,
+              interactive: false,
             })
           );
         }
@@ -1217,6 +1368,7 @@ export default function MapComponent({
               weight: 1,
               opacity: 0.6,
               fillOpacity: 0.6,
+              interactive: false,
             })
           );
         }
@@ -1247,7 +1399,7 @@ export default function MapComponent({
       if (pendingTimer) clearTimeout(pendingTimer);
       map.off('moveend zoomend', throttledRebuild);
     };
-  }, [rawData, showSales, showRentals]);
+  }, [rawData, showSales, showRentals, points, pointsBounds]);
 
   // Flood layer toggles the FEMA NFHL WMS service. The previous host
   // (hazards.geoplatform.gov) was retired — its DNS record now points to an
@@ -1322,7 +1474,7 @@ export default function MapComponent({
             className="absolute inset-0 z-[1000] bg-black/30 flex items-center justify-center backdrop-blur-sm"
           >
             <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-4 shadow-2xl">
-              <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
+              <Loader2 className="w-10 h-10 text-blue-500 animate-spin [animation-duration:0.6s]" />
               <p className="text-sm text-gray-200 font-medium tracking-wide">Loading Boundary Data...</p>
             </div>
           </motion.div>
@@ -1338,7 +1490,7 @@ export default function MapComponent({
             className="absolute inset-0 z-[1001] bg-black/40 flex items-center justify-center backdrop-blur-sm"
           >
             <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-4 shadow-2xl max-w-[260px] text-center">
-              <Loader2 className={`w-10 h-10 animate-spin ${isDataLoading ? 'text-blue-500' : 'text-emerald-500'}`} />
+              <Loader2 className={`w-10 h-10 animate-spin [animation-duration:0.6s] ${isDataLoading ? 'text-blue-500' : 'text-emerald-500'}`} />
               {isDataLoading ? (
                 <>
                   <p className="text-sm text-gray-200 font-medium tracking-wide">Loading Data...</p>
@@ -1467,9 +1619,9 @@ export default function MapComponent({
             }}
           />
           <div className="flex items-center justify-between text-[10px] font-semibold text-gray-200 mt-1 tabular-nums">
-            <span>{formatLegendValue(colorStops[0][0])}</span>
+            <span>{formatMetricValue(metric, colorStops[0][0])}</span>
             <span className="text-gray-500">·</span>
-            <span>{formatLegendValue(colorStops[colorStops.length - 1][0])}</span>
+            <span>{formatMetricValue(metric, colorStops[colorStops.length - 1][0])}</span>
           </div>
         </div>
       )}
@@ -1478,6 +1630,8 @@ export default function MapComponent({
 }
 
 function formatLegendValue(v: number): string {
+  // Kept for non-metric displays; the legend itself now uses
+  // formatMetricValue(metric, …) so both legends render identically.
   if (!isFinite(v)) return '–';
   const abs = Math.abs(v);
   if (abs >= 1_000_000) return '$' + (v / 1_000_000).toFixed(1) + 'M';

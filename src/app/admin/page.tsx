@@ -22,6 +22,7 @@ import {
 import { AdminAds } from '@/components/admin/AdminAds';
 import { AdminUsers } from '@/components/admin/AdminUsers';
 import { RequireAdmin } from '@/components/RequireAuth';
+import DatasetRebuildBanner from '@/components/admin/DatasetRebuildBanner';
 import {
   Upload,
   FileSpreadsheet,
@@ -369,8 +370,18 @@ async function buildDedupeKeySet(
   if (!columns.length) return set;
 
   if ((section === 'sales' || section === 'rent' || section === 'current') && eng.isLoaded) {
-    for (const d of eng.data) {
-      set.add(makeEngineDedupeKey(d));
+    // Only treat engine rows as duplicates when the CMS still registers files
+    // for this section. After a mass delete (empty CMS), the engine's stale
+    // in-memory dataset must NOT mark re-uploaded rows as duplicates — those
+    // rows are exactly what needs to be re-uploaded to restore the dataset.
+    const config = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
+    const cats = config ? (Array.isArray(config.category) ? config.category : [config.category]) : [];
+    const metadatas = await cmsStore.listFilesMetadata();
+    const hasFiles = metadatas.some((f) => cats.includes(f.category));
+    if (hasFiles) {
+      for (const d of eng.data) {
+        set.add(makeEngineDedupeKey(d));
+      }
     }
   }
 
@@ -388,19 +399,66 @@ async function buildDedupeKeySet(
   return set;
 }
 
+/**
+ * Recursively collect files from a DataTransferItemList so dropping a folder
+ * (or a folder containing folders) explores every level.
+ */
+async function collectFilesFromDataTransfer(items: DataTransferItemList | null): Promise<File[]> {
+  if (!items) return [];
+  const files: File[] = [];
+  const entries: FileSystemEntry[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const entry = items[i].webkitGetAsEntry?.();
+    if (entry) entries.push(entry);
+  }
+  await Promise.all(entries.map((entry) => readEntryRecursive(entry, files)));
+  return files;
+}
+
+function readEntryRecursive(entry: FileSystemEntry, files: File[]): Promise<void> {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      (entry as FileSystemFileEntry).file((f) => {
+        files.push(f);
+        resolve();
+      }, () => resolve());
+    } else if (entry.isDirectory) {
+      const dirReader = (entry as FileSystemDirectoryEntry).createReader();
+      const readBatch = () => {
+        dirReader.readEntries(async (entries) => {
+          if (entries.length === 0) {
+            resolve();
+            return;
+          }
+          await Promise.all(entries.map((e) => readEntryRecursive(e, files)));
+          readBatch();
+        }, () => resolve());
+      };
+      readBatch();
+    } else {
+      resolve();
+    }
+  });
+}
+
+/**
+ * Detect the real data category from the file/folder path.
+ * If the path/folder name explicitly says "sale", "rent", etc., that wins.
+ * Otherwise the category defaults to the active section's main category so
+ * generic displayGrid filenames do not leak into every data section.
+ */
 function detectCategory(fileName: string, section: AdminSection): CMSFileCategory {
   const parts = fileName.toLowerCase().split('/');
-  
-  // Evaluate from the innermost file/folder upwards
+
   for (let i = parts.length - 1; i >= 0; i--) {
     const part = parts[i];
-    if (section === 'boundaries' || part.endsWith('.geojson') || part.endsWith('.json')) return 'boundary';
-    if (section === 'tax' || part.includes('tax')) return 'tax';
-    if (section === 'schools' || part.includes('school')) {
+    if (part.endsWith('.geojson') || part.endsWith('.json')) return 'boundary';
+    if (part.includes('tax')) return 'tax';
+    if (part.includes('school')) {
       if (part.includes('elem')) return 'school-elementary';
       if (part.includes('middle')) return 'school-middle';
       if (part.includes('high')) return 'school-high';
-      if (section === 'schools') return 'school-elementary';
+      return 'school-elementary';
     }
     if (part.includes('current')) {
       if (part.includes('rent')) return 'current-rent';
@@ -409,8 +467,45 @@ function detectCategory(fileName: string, section: AdminSection): CMSFileCategor
     if (part.includes('rent')) return 'rent';
     if (part.includes('sale')) return 'sales';
   }
-  
-  return 'property';
+
+  const fallback =
+    section === 'sales'
+      ? 'sales'
+      : section === 'rent'
+      ? 'rent'
+      : section === 'current'
+      ? 'current-sale'
+      : section === 'tax'
+      ? 'tax'
+      : section === 'schools'
+      ? 'school-elementary'
+      : 'property';
+
+  return fallback;
+}
+
+function categorySectionName(category: CMSFileCategory): string {
+  switch (category) {
+    case 'sales':
+      return 'Sales Data';
+    case 'rent':
+      return 'Rent Data';
+    case 'current-sale':
+    case 'current-rent':
+      return 'Current Listings';
+    case 'tax':
+      return 'Tax Records';
+    case 'school-elementary':
+    case 'school-middle':
+    case 'school-high':
+      return 'School Ratings';
+    case 'boundary':
+      return 'Boundaries';
+    case 'custom-area':
+      return 'Area Metrics';
+    case 'property':
+      return 'Sales Data';
+  }
 }
 
 type TreeNode = {
@@ -509,6 +604,13 @@ function AdminPageInner() {
   const [summary, setSummary] = useState<CMSStoreSummary>({ files: 0, rows: 0, overrides: 0, propertyOverrides: 0, lastUploadAt: null });
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{
+    current: number;
+    total: number;
+    fileName: string;
+    phase: string;
+    startedAt: number;
+  } | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [previewFile, setPreviewFile] = useState<PreviewState | null>(null);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -629,7 +731,10 @@ function AdminPageInner() {
     setSchoolScore('');
   }, [section]);
 
-  const handleFiles = async (fileList: FileList | null, section: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>) => {
+  const handleFiles = async (
+    fileList: FileList | File[] | null,
+    section: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>
+  ) => {
     if (!fileList?.length) return;
     setProcessing(true);
 
@@ -662,7 +767,20 @@ function AdminPageInner() {
     const newStaged: StagedFile[] = [];
     const batchKeySet = new Set<string>();
 
-    for (const file of Array.from(fileList)) {
+    const inputFiles = Array.from(fileList);
+    const acceptedExt =
+      section === 'boundaries'
+        ? ['.geojson', '.json']
+        : section === 'areas'
+        ? ['.geojson', '.json', '.csv']
+        : ['.csv'];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const file = inputFiles[i];
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+      if (!acceptedExt.includes(ext)) continue;
+
+      const relativePath = (file as any).webkitRelativePath || file.name;
       if (section === 'boundaries' || section === 'areas') {
         const lowerName = file.name.toLowerCase();
         const isGeoJson = lowerName.endsWith('.geojson') || lowerName.endsWith('.json');
@@ -719,10 +837,10 @@ function AdminPageInner() {
           if (section === 'areas') {
             const existingFiles = files.filter((f) => f.category === 'custom-area');
             const existingFeatures: GeoJsonFeatureCollection = { type: 'FeatureCollection', features: [] };
-            for (const f of existingFiles) {
-              if (!f.storageUrl) continue;
+            for (const existing of existingFiles) {
+              if (!existing.storageUrl) continue;
               try {
-                const r = await fetch(f.storageUrl);
+                const r = await fetch(existing.storageUrl);
                 if (!r.ok) continue;
                 const json = await r.json();
                 if (json && Array.isArray(json.features)) {
@@ -797,7 +915,19 @@ function AdminPageInner() {
           continue;
         }
 
-        const category = detectCategory(file.name, section);
+        const category = detectCategory(relativePath, section);
+
+        // Reject files whose detected category belongs to a different data section.
+        // This prevents a "Sale 2024.csv" from being stored as Rent data just
+        // because the user had the Rent tab open.
+        if (category !== 'property' && !categories.includes(category)) {
+          setToast({
+            type: 'error',
+            message: `${relativePath} looks like ${categorySectionName(category)} data — upload it in the ${categorySectionName(category)} section instead.`,
+          });
+          continue;
+        }
+
         const actualCategory = categories.includes(category) ? category : categories[0];
 
         const columns = getDedupeColumns(dataSection);
@@ -816,7 +946,7 @@ function AdminPageInner() {
         const id = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const record: CMSFileRecord = {
           id,
-          name: file.name,
+          name: relativePath,
           size: file.size,
           category: actualCategory,
           rows: newRows,
@@ -840,6 +970,10 @@ function AdminPageInner() {
         console.error('File read error', err);
         setToast({ type: 'error', message: `Error processing ${file.name}` });
       }
+
+      // Yield every few files so the GC can reclaim parse buffers when a folder
+      // contains many CSVs.
+      if ((i + 1) % 5 === 0) await new Promise((r) => setTimeout(r, 0));
     }
 
     if (newStaged.length > 0) {
@@ -949,10 +1083,19 @@ function AdminPageInner() {
         await cmsStore.saveFile(recordToSave);
         setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
         await loadData();
+        // Wait for any dataset rebuild to finish so the user sees live data.
+        const { waitForDatasetRebuild } = await import('@/lib/datasetRebuild/client');
+        try {
+          await waitForDatasetRebuild();
+        } catch (rebuildErr) {
+          setToast({ type: 'error', message: (rebuildErr as Error).message || 'Map data update failed.' });
+          setProcessing(false);
+          return;
+        }
         await reloadEngine();
         setToast({
           type: 'success',
-          message: `${staged.record.name} uploaded (${combined.features.length.toLocaleString()} areas).`,
+          message: `${staged.record.name} uploaded and map data is now available (${combined.features.length.toLocaleString()} areas).`,
         });
       } catch (err) {
         console.error('Upload error', err);
@@ -995,10 +1138,20 @@ function AdminPageInner() {
       if (existingFile) await cmsStore.removeFile(existingFile.id);
       setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
       await loadData();
+      // Dataset rebuild is asynchronous; wait for it to publish before
+      // refreshing the engine so the user sees the new data immediately.
+      const { waitForDatasetRebuild } = await import('@/lib/datasetRebuild/client');
+      try {
+        await waitForDatasetRebuild();
+      } catch (rebuildErr) {
+        setToast({ type: 'error', message: (rebuildErr as Error).message || 'Map data update failed.' });
+        setProcessing(false);
+        return;
+      }
       await reloadEngine();
       setToast({
         type: 'success',
-        message: `${staged.record.name} added successfully (${rowsToSave.length.toLocaleString()} rows).`,
+        message: `${staged.record.name} added successfully and map data is now available (${rowsToSave.length.toLocaleString()} rows).`,
       });
     } catch (err) {
       console.error('Upload error', err);
@@ -1009,6 +1162,37 @@ function AdminPageInner() {
 
   const handleDiscardStaged = (stagedId: string) => {
     setStagedFiles(prev => prev.filter(s => s.id !== stagedId));
+  };
+
+  const handleConfirmAllUploads = async () => {
+    if (stagedFiles.length === 0) return;
+    setProcessing(true);
+    const total = stagedFiles.length;
+    setUploadProgress({ current: 0, total, fileName: '', phase: 'Uploading files…', startedAt: Date.now() });
+
+    // Process sequentially to respect the "no heavy things in parallel" rule
+    // and keep memory pressure low. Each upload triggers one coalesced rebuild.
+    for (let i = 0; i < total; i++) {
+      const staged = stagedFiles[i];
+      setUploadProgress({
+        current: i,
+        total,
+        fileName: staged.record.name,
+        phase: 'Uploading file…',
+        startedAt: Date.now(),
+      });
+      await handleConfirmUpload(staged.id);
+    }
+
+    setUploadProgress({
+      current: total,
+      total,
+      fileName: '',
+      phase: 'Finishing up…',
+      startedAt: Date.now(),
+    });
+    setUploadProgress(null);
+    setProcessing(false);
   };
 
   const handleDelete = async (id: string) => {
@@ -1066,11 +1250,19 @@ function AdminPageInner() {
   };
 
   const handleClearAll = async () => {
-    if (confirm('Are you sure you want to delete ALL uploaded files? This cannot be undone.')) {
+    const sectionConfig =
+      section === 'dashboard' || section === 'ads' || section === 'users'
+        ? null
+        : SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
+    const categories = sectionConfig
+      ? (Array.isArray(sectionConfig.category) ? sectionConfig.category : [sectionConfig.category])
+      : [];
+    const scope = sectionConfig?.title.toLowerCase() ?? 'uploaded';
+    if (confirm(`Are you sure you want to delete ALL ${scope} files? This cannot be undone.`)) {
       setProcessing(true);
-      await cmsStore.clearFiles();
+      await cmsStore.clearFiles(categories.length ? categories : undefined);
       await reloadEngine();
-      setToast({ type: 'success', message: 'All files have been deleted.' });
+      setToast({ type: 'success', message: `All ${scope} files have been deleted.` });
       setProcessing(false);
     }
   };
@@ -1500,12 +1692,13 @@ function AdminPageInner() {
     else if (e.type === 'dragleave') setDragActive(false);
   };
 
-  const onDrop = (e: React.DragEvent) => {
+  const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
     if (section !== 'dashboard' && section !== 'ads' && section !== 'users') {
-      handleFiles(e.dataTransfer.files, section as Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>);
+      const files = await collectFilesFromDataTransfer(e.dataTransfer.items);
+      handleFiles(files, section as Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>);
     }
   };
 
@@ -2251,8 +2444,8 @@ function AdminPageInner() {
                     }`}
                   >
                     <Upload className="w-8 h-8 text-gray-500 mx-auto mb-2" />
-                    <p className="text-sm text-gray-300 mb-1">Drop CSV files here</p>
-                    <p className="text-xs text-gray-500 mb-3">or click to browse</p>
+                    <p className="text-sm text-gray-300 mb-1">Drop files or folders here</p>
+                    <p className="text-xs text-gray-500 mb-3">or click to browse (folders with subfolders supported)</p>
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -2266,6 +2459,7 @@ function AdminPageInner() {
                       multiple
                       className="hidden"
                       onChange={(e) => handleFiles(e.target.files, key)}
+                      {...{ webkitdirectory: '', directory: '' }}
                     />
                     <div className="text-[10px] text-gray-500">
                       {key === 'boundaries'
@@ -2275,21 +2469,24 @@ function AdminPageInner() {
                         : 'Duplicate rows are detected and skipped; only new rows are uploaded.'}
                     </div>
                   </div>
-                  {processing && (
-                    <div className="mt-4 flex items-center gap-2 text-xs text-blue-400">
-                      <RefreshCw className="w-3 h-3 animate-spin" />
-                      Reloading engine…
-                    </div>
-                  )}
                 </div>
               </div>
 
               <div className="lg:col-span-2">
                 {stagedFiles.length > 0 && (
                   <div className="bg-surface border border-blue-500/50 rounded-2xl p-5 mb-6 shadow-[0_0_15px_rgba(59,130,246,0.1)]">
-                    <h3 className="text-sm font-bold text-white flex items-center gap-2 mb-4">
-                      <AlertTriangle className="w-4 h-4 text-blue-400" /> Staging Area: Review New Rows
-                    </h3>
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-blue-400" /> Staging Area: Review New Rows
+                      </h3>
+                      <button
+                        onClick={() => handleConfirmAllUploads()}
+                        disabled={processing}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Add all
+                      </button>
+                    </div>
                     <div className="space-y-3">
                       {stagedFiles.map((staged) => (
                         <div key={staged.id} className="bg-background border border-border-subtle rounded-xl p-4">
@@ -2408,7 +2605,7 @@ function AdminPageInner() {
                         onClick={handleClearAll}
                         className="px-4 py-2 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
                       >
-                        <Trash2 className="w-4 h-4" /> Delete All
+                        <Trash2 className="w-4 h-4" /> Delete {config?.title ?? 'All'} Files
                       </button>
                     </div>
                   </div>
@@ -2527,7 +2724,59 @@ function AdminPageInner() {
         </div>
       </aside>
 
-      <main className="flex-1 min-w-0 flex flex-col">
+      <main className="flex-1 min-w-0 flex flex-col relative">
+        {processing && (
+          <div className="fixed inset-0 z-[9999] bg-[#11131a]/90 backdrop-blur-sm flex flex-col items-center justify-center">
+            <div className="bg-surface border border-border-subtle rounded-2xl p-8 shadow-2xl flex flex-col items-center gap-5 max-w-md w-[90%] text-center">
+              <div className="relative">
+                <div className="w-12 h-12 rounded-full border-2 border-blue-500/30 border-t-blue-500 animate-spin" />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <RefreshCw className="w-5 h-5 text-blue-400 animate-spin" style={{ animationDirection: 'reverse' }} />
+                </div>
+              </div>
+
+              <div className="w-full">
+                <p className="text-base font-bold text-white">{uploadProgress ? 'Uploading map data…' : 'Reloading map data…'}</p>
+                <p className="text-xs text-gray-400 mt-1">
+                  {uploadProgress
+                    ? uploadProgress.fileName
+                      ? `Uploading ${uploadProgress.fileName}`
+                      : uploadProgress.phase
+                    : 'Please wait while the dataset refreshes.'}
+                </p>
+              </div>
+
+              {uploadProgress && uploadProgress.total > 0 && (
+                <div className="w-full">
+                  <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                    <span>
+                      File {uploadProgress.current + 1} of {uploadProgress.total}
+                    </span>
+                    <span>{Math.round((uploadProgress.current / uploadProgress.total) * 100)}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-background rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                      style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}
+                    />
+                  </div>
+                  <div className="text-[10px] text-gray-500 mt-2">
+                    {uploadProgress.current < uploadProgress.total
+                      ? (() => {
+                          const rawMinutes = (uploadProgress.total - uploadProgress.current) * 0.5;
+                          const pessimisticLow = Math.max(1, Math.round(rawMinutes * 3));
+                          const pessimisticHigh = Math.max(1, Math.round(rawMinutes * 4.5));
+                          return pessimisticLow === pessimisticHigh
+                            ? `Estimated time remaining: about ${pessimisticLow} minutes`
+                            : `Estimated time remaining: about ${pessimisticLow} to ${pessimisticHigh} minutes`;
+                        })()
+                      : 'Almost done…'}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         <header className="bg-surface border-b border-border-subtle px-6 py-4 flex items-center justify-between shrink-0">
           <div>
             <h2 className="text-lg font-bold text-white">{SECTIONS.find((s) => s.id === section)?.label}</h2>
@@ -2617,6 +2866,8 @@ function AdminPageInner() {
           {toast.message}
         </div>
       )}
+
+      <DatasetRebuildBanner />
     </div>
   );
 }

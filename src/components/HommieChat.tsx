@@ -20,10 +20,10 @@ interface HommieChatProps {
    *  layer, or null when nothing matched — so the chat can report failures. */
   onAreaSelect?: (queries: string[], generateReportAfter?: boolean) => string[] | null | void;
   onGenerateReport?: () => void;
-  getStatsForChatQueries?: (queries: string[]) => any;
+  getStatsForChatQueries?: (queries: string[]) => Promise<any> | any;
   /** Real-time aggregates for the filters the bot is about to apply, so the
    *  model can answer "how many / what average" in the same turn. */
-  getStatsForChatFilters?: (filters: any) => any;
+  getStatsForChatFilters?: (filters: any) => Promise<any> | any;
   setBoundary?: (boundary: BoundaryKey) => void;
   setMetric?: any;
   setFilters?: any;
@@ -213,7 +213,9 @@ export default function HommieChat({
             // matched them.
             matchedNames = (onAreaSelect(areasToSearch, generateReport && !!onGenerateReport) as string[] | null) ?? null;
             if (getStatsForChatQueries) {
-              toolResultData = getStatsForChatQueries(areasToSearch);
+              // Worker mode resolves this asynchronously — the tool call is
+              // already async, so await the stats (null on any failure).
+              toolResultData = await getStatsForChatQueries(areasToSearch);
             }
           } else if (generateReport && onGenerateReport) {
             // No areas to select — fire the report immediately.
@@ -327,7 +329,7 @@ export default function HommieChat({
             // user's question with these instead of inventing numbers.
             let stats: any = null;
             try {
-              stats = getStatsForChatFilters ? getStatsForChatFilters(raw) : null;
+              stats = getStatsForChatFilters ? await getStatsForChatFilters(raw) : null;
             } catch {
               stats = null; // never block the tool result on a stats failure
             }

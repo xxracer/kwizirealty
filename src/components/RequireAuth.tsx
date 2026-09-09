@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { Loader2, LogOut, ShieldAlert, MailQuestion } from 'lucide-react';
 import { useAuth } from '@/lib/authContext';
+import { useAuthGate } from '@/lib/authGate';
 import { db } from '@/lib/firebase';
 
 interface Props {
@@ -18,21 +19,32 @@ interface Props {
 export function RequireAuth({ children, loginPath = '/login', redirectTo }: Props) {
   const router = useRouter();
   const { user, profile, loading, isAuthorized, signOut } = useAuth();
+  const { config: gate, loading: gateLoading } = useAuthGate();
   const [requestSent, setRequestSent] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
+  // Admin switch: with map login off, anyone opens the map — no redirect,
+  // no "access pending" screen. While the gate config loads, the previous
+  // (protected) behavior applies.
+  const gateOpen = !gateLoading && !gate.mapLoginRequired;
+
   useEffect(() => {
-    if (loading) return;
+    // Wait for BOTH auth and the remote gate config: deciding before the
+    // gate snapshot arrives would redirect users on a switch that is
+    // actually OFF. And when the gate is open, never redirect at all.
+    if (loading || gateLoading || gateOpen) return;
     if (!user) {
       const target = redirectTo
         ? `${loginPath}?next=${encodeURIComponent(redirectTo)}`
         : loginPath;
       router.replace(target);
     }
-  }, [loading, user, redirectTo, loginPath, router]);
+  }, [loading, gateLoading, gateOpen, user, redirectTo, loginPath, router]);
 
-  if (loading) {
+  if (gateOpen) return <>{children}</>;
+
+  if (loading || gateLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0a0c10] text-white">
         <div className="flex items-center gap-3 text-gray-300">
@@ -136,17 +148,25 @@ export function RequireAuth({ children, loginPath = '/login', redirectTo }: Prop
 export function RequireAdmin({ children }: { children: ReactNode }) {
   const router = useRouter();
   const { user, profile, loading, isAdmin } = useAuth();
+  const { config: gate, loading: gateLoading } = useAuthGate();
+
+  // Admin switch: with admin login off, /admin opens for anyone (testing
+  // mode — flip it back on after). While the gate config loads, the
+  // protected behavior applies.
+  const gateOpen = !gateLoading && !gate.adminLoginRequired;
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || gateLoading || gateOpen) return;
     if (!user) {
       router.replace('/login?next=/admin');
     } else if (!isAdmin) {
       router.replace('/map');
     }
-  }, [loading, user, isAdmin, router]);
+  }, [loading, gateLoading, gateOpen, user, isAdmin, router]);
 
-  if (loading || !user || !profile || !isAdmin) {
+  if (gateOpen) return <>{children}</>;
+
+  if (loading || gateLoading || !user || !profile || !isAdmin) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0a0c10] text-white">
         <div className="flex items-center gap-3 text-gray-300">

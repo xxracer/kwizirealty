@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/build-worker.js && next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "prebuild": "node scripts/download-boundaries.js && node scripts/download-chunked-cache.js && node scripts/build-initial-metrics.js",
+    "worker:build": "node scripts/build-worker.js",
+    "prebuild": "node scripts/download-boundaries.js && node scripts/download-chunked-cache.js && node scripts/build-initial-metrics.js && node scripts/build-worker.js",
     "simplify:boundaries": "node scripts/simplify-boundaries.js",
     "import:sql": "node scripts/import-properties-to-sql.js"
   },
@@ -41,6 +42,7 @@
     "@types/papaparse": "^5.5.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
     "playwright": "^1.62.1",

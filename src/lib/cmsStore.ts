@@ -69,6 +69,26 @@ const PROPERTY_OVERRIDES_STORE = 'cms_property_overrides';
 
 const listeners = new Set<() => void>();
 
+/**
+ * Categories whose rows feed the map dataset (boundary-chunked cache).
+ * Tax/school CSVs are dropped by the normalizer (no lat/lng) and boundary
+ * geojson goes live immediately, so none of those trigger a rebuild.
+ */
+const DATASET_CATEGORIES = new Set<CMSFileCategory>(['property', 'sales', 'rent', 'current-sale', 'current-rent']);
+
+/**
+ * Fires the automatic dataset rebuild in the admin's browser. Dynamic import
+ * keeps the rebuild code (and its worker chunk) out of every page that
+ * imports cmsStore. Deltas accumulate in the client singleton, so several
+ * saves/deletes in a row produce ONE sequential rebuild — never parallel
+ * heavy jobs (memory care).
+ */
+function triggerDatasetRebuild(delta: { addedRows?: number; removedRows?: number } = {}) {
+  void import('./datasetRebuild/client')
+    .then((m) => m.requestDatasetRebuild(delta))
+    .catch(() => {});
+}
+
 /** Files that live in Storage only as engine caches — never shown as uploads. */
 const STORAGE_SKIP_PATTERN = /(master_cache|property-manifest|manifest|chunk|\.gz$)/i;
 
@@ -91,7 +111,12 @@ function detectStorageCategory(name: string, fallback?: CMSFileCategory): CMSFil
   }
   if (lower.includes('rent')) return 'rent';
   if (lower.includes('sale') || lower.includes('sold')) return 'sales';
-  return fallback ?? 'property';
+  // Generic displayGrid filenames from the data provider carry no category clue.
+  // Do NOT fall back to the shared 'property' bucket — that makes them appear
+  // in every property-data section. Only tag them when a fallback is provided
+  // from the active admin section.
+  if (fallback) return fallback;
+  return 'property';
 }
 
 function emit() {
@@ -121,8 +146,18 @@ export const cmsStore = {
     
     // Create organized storage path preserving original folders
     const cleanName = record.name.replace(/[^a-zA-Z0-9.\-_ /]/g, '');
-    // If the name already has a path (from migration), use it. Otherwise, put it in root.
-    const storagePath = `cms_files/${cleanName}`;
+    // CSV uploads must live under cms_files/csv/ — the dataset rebuild
+    // (build-cache-from-cms.js) lists that folder recursively, so a CSV at
+    // the cms_files/ root would silently never reach the map. Boundaries and
+    // other geojson keep their root location (resolved via metadata URLs).
+    const isCsvUpload =
+      cleanName.toLowerCase().endsWith('.csv') &&
+      record.category !== 'boundary' &&
+      record.category !== 'custom-area';
+    const storagePath =
+      isCsvUpload && !cleanName.startsWith('csv/')
+        ? `cms_files/csv/${cleanName}`
+        : `cms_files/${cleanName}`;
     const storageRef = ref(storage, storagePath);
     
     const uploadMetadata = { contentType: record.category === 'boundary' ? 'application/geo+json' : 'text/csv' };
@@ -140,13 +175,24 @@ export const cmsStore = {
 
     await setDoc(doc(db, FILES_STORE, record.id), metadata);
     emit();
+
+    // Auto-rebuild: this CSV feeds the map dataset, so its rows go live once
+    // the worker finishes. For a replace flow the following removeFile of the
+    // old file adds its removedRows to the same coalesced rebuild.
+    if (isCsvUpload && DATASET_CATEGORIES.has(record.category)) {
+      triggerDatasetRebuild({ addedRows: record.rows.length });
+    }
   },
 
   async removeFile(id: string): Promise<void> {
+    let removedRowCount = 0;
+    let removedCategory: CMSFileCategory | null = null;
     try {
       const docSnap = await getDoc(doc(db, FILES_STORE, id));
       if (docSnap.exists()) {
         const metadata = docSnap.data() as CMSFileRecord;
+        removedRowCount = metadata.rowCount || 0;
+        removedCategory = metadata.category;
         const pathToDelete = metadata.storagePath || `cms_files/${id}.csv`;
         const storageRef = ref(storage, pathToDelete);
         await deleteObject(storageRef);
@@ -156,6 +202,10 @@ export const cmsStore = {
     }
     await deleteDoc(doc(db, FILES_STORE, id));
     emit();
+
+    if (removedCategory && DATASET_CATEGORIES.has(removedCategory)) {
+      triggerDatasetRebuild({ removedRows: removedRowCount });
+    }
   },
 
   async getFile(id: string): Promise<CMSFileRecord | undefined> {
@@ -325,18 +375,29 @@ export const cmsStore = {
     }
   },
 
-  async clearFiles(): Promise<void> {
+  /**
+   * Delete all files whose category belongs to `categories`. If omitted,
+   * deletes every file in the CMS (legacy global behaviour).
+   */
+  async clearFiles(categories?: CMSFileCategory[]): Promise<void> {
     const querySnapshot = await getDocs(collection(db, FILES_STORE));
     const batch = writeBatch(db);
+    let removedRows = 0;
     querySnapshot.docs.forEach((docSnap) => {
+      const data = docSnap.data() as CMSFileRecord;
+      if (categories && !categories.includes(data.category)) return;
+      if (DATASET_CATEGORIES.has(data.category)) removedRows += data.rowCount || 0;
       batch.delete(docSnap.ref);
+      // Files live at their descriptive storagePath (e.g. cms_files/csv/<name>.csv),
+      // not at cms_files/<docId>.csv — deleting the doc-id path silently no-ops.
       try {
-         const storageRef = ref(storage, `cms_files/${docSnap.id}.csv`);
-         deleteObject(storageRef).catch(() => {});
+        const pathToDelete = data.storagePath || `cms_files/${docSnap.id}.csv`;
+        deleteObject(ref(storage, pathToDelete)).catch(() => {});
       } catch (e) {}
     });
     await batch.commit();
     emit();
+    if (removedRows > 0) triggerDatasetRebuild({ removedRows });
   },
 
   async saveOverride(override: CMSMetricOverride): Promise<void> {

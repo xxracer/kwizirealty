@@ -21,7 +21,11 @@ import {
   PlayCircle
 } from 'lucide-react';
 
-const MapComponent = dynamic(() => import('@/components/MapComponent'), {
+// Decorative phone-mockup map: a tiny canvas painter (no Leaflet/Turf/engine/
+// Firebase). The full MapComponent was dragging hundreds of KB of JS and a
+// whole interactive map initialization into the landing page for a
+// pointer-events-none decoration.
+const PhoneMapPreview = dynamic(() => import('@/components/PhoneMapPreview'), {
   ssr: false,
   loading: () => (
     <div className="h-full w-full bg-[#0a0c10] flex items-center justify-center">
@@ -154,22 +158,7 @@ export default function Home() {
                     
                     {/* Live Map Component inside the Phone */}
                     <div className="absolute inset-0 z-0 pointer-events-none opacity-90">
-                      <MapComponent
-                        boundary="zipcodes"
-                        metricValues={{}}
-                        sampleCounts={{}}
-                        nameMap={{}}
-                        colorStops={[]}
-                        selectedIds={[]}
-                        onSelectionChange={() => {}}
-                        multiSelect={false}
-                        rawData={[]}
-                        showSales={false}
-                        showRentals={false}
-                        showFlood={false}
-                        metricLabel=""
-                        fillOpacity={0.6}
-                      />
+                      <PhoneMapPreview />
                     </div>
 
                     {/* Gradient Overlay for Chatbot visibility */}
