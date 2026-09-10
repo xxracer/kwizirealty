@@ -66,6 +66,12 @@ export interface CMSStoreSummary {
 const FILES_STORE = 'cms_files';
 const OVERRIDES_STORE = 'cms_overrides';
 const PROPERTY_OVERRIDES_STORE = 'cms_property_overrides';
+// Single-flag marker: once any boundary GeoJSON is managed through the CMS,
+// the CMS is the authority for polygons — an empty CMS list then means
+// "deleted everywhere", while a never-initialized project keeps serving the
+// bundled /geojson copies.
+const BOUNDARY_META_STORE = 'cms_meta';
+const BOUNDARY_META_DOC = 'boundaries';
 
 const listeners = new Set<() => void>();
 
@@ -141,6 +147,29 @@ export const cmsStore = {
     return () => listeners.delete(cb);
   },
 
+  /** True once any boundary GeoJSON has been managed through the CMS. */
+  async isBoundaryAuthority(): Promise<boolean> {
+    try {
+      const snap = await getDoc(doc(db, BOUNDARY_META_STORE, BOUNDARY_META_DOC));
+      if (!snap.exists()) return false;
+      return (snap.data() as { authoritative?: boolean }).authoritative === true;
+    } catch {
+      return false;
+    }
+  },
+
+  async markBoundaryAuthority(): Promise<void> {
+    try {
+      await setDoc(
+        doc(db, BOUNDARY_META_STORE, BOUNDARY_META_DOC),
+        { authoritative: true, at: Date.now() },
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn('[CMS Store] Could not mark boundary authority:', err);
+    }
+  },
+
   async saveFile(record: CMSFileRecord): Promise<void> {
     const fileContent = record.rawContent || rowsToCsv(record.headers, record.rows);
     
@@ -174,6 +203,8 @@ export const cmsStore = {
     };
 
     await setDoc(doc(db, FILES_STORE, record.id), metadata);
+    // From the first boundary upload on, the CMS decides which polygons exist.
+    if (record.category === 'boundary') await this.markBoundaryAuthority();
     emit();
 
     // Auto-rebuild: this CSV feeds the map dataset, so its rows go live once
@@ -181,6 +212,10 @@ export const cmsStore = {
     // old file adds its removedRows to the same coalesced rebuild.
     if (isCsvUpload && DATASET_CATEGORIES.has(record.category)) {
       triggerDatasetRebuild({ addedRows: record.rows.length });
+    } else if (isCsvUpload && record.category === 'tax') {
+      // Tax CSVs reach the map through the rebuild's MLS merge and add zero
+      // property rows, so the safety-gate delta stays at zero.
+      triggerDatasetRebuild({});
     }
   },
 
@@ -205,6 +240,10 @@ export const cmsStore = {
 
     if (removedCategory && DATASET_CATEGORIES.has(removedCategory)) {
       triggerDatasetRebuild({ removedRows: removedRowCount });
+    } else if (removedCategory === 'tax') {
+      // Removing a tax source only drops the merged tax fields (no property
+      // rows disappear), so the rebuild runs with a zero delta.
+      triggerDatasetRebuild({});
     }
   },
 
@@ -341,6 +380,13 @@ export const cmsStore = {
     if (imported.length > 0) {
       const batch = writeBatch(db);
       imported.forEach((m) => batch.set(doc(db, FILES_STORE, m.id), m));
+      if (imported.some((m) => m.category === 'boundary')) {
+        batch.set(
+          doc(db, BOUNDARY_META_STORE, BOUNDARY_META_DOC),
+          { authoritative: true, at: Date.now() },
+          { merge: true }
+        );
+      }
       await batch.commit();
       emit();
 

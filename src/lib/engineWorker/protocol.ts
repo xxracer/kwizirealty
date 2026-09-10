@@ -90,6 +90,10 @@ export interface AggregateResult {
     totalVolume: number;
     avgList: number;
     avgLotSize: number;
+    avgTaxAmount: number;
+    avgTaxRate: number;
+    /** Share of the selected rows that carry tax data (0–1). */
+    taxCoverage: number;
   };
   marketHealth: MarketHealthResult | null;
   timeSeries: TimeSeriesPoint[];
@@ -117,6 +121,9 @@ export interface ChatStatsResult {
     totalVolume: number;
     avgList: number;
     avgLotSize: number;
+    avgTaxAmount: number;
+    avgTaxRate: number;
+    taxCoverage: number;
   };
   /** Present for area queries. */
   health?: MarketHealthResult | null;

@@ -230,7 +230,7 @@ export async function POST(req: Request) {
     const yearBuiltData = buildYearBuiltData(engine, reportProps, boundary, selectedIds || []);
 
     return NextResponse.json({
-      mapValues: { values: mapValues.values, counts: mapValues.counts },
+      mapValues: { values: mapValues.values, counts: mapValues.counts, names: mapValues.names },
       reportStats,
       marketHealth,
       timeSeries,

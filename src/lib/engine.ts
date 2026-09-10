@@ -166,7 +166,6 @@ export class RealEstateEngine {
     if (chunked.boundaries) {
       return {
         bucket: this.storageBucket,
-        localBase: chunked.localBase,
         boundaries: chunked.boundaries,
         totalRows: chunked.totalRows,
         version: chunked.version ?? 0,
@@ -175,7 +174,6 @@ export class RealEstateEngine {
     if (chunked.chunks && chunked.chunks.length) {
       return {
         bucket: this.storageBucket,
-        localBase: chunked.localBase,
         chunks: chunked.chunks,
         totalRows: chunked.totalRows,
         version: chunked.version ?? 0,
@@ -291,66 +289,39 @@ export class RealEstateEngine {
         chunks?: string[];
         boundaries?: Partial<Record<core.BoundaryKey, { chunks: string[] }>>;
         totalRows: number;
-        localBase?: string;
         version?: number;
       }
     | null
   > {
-    const manifestName = 'master_cache_chunks.json';
-    const manifestPath = `cms_files/csv/${manifestName}`;
+    const manifestPath = 'cms_files/csv/master_cache_chunks.json';
 
-    // The local build-time copy in /cache is still the fast path (same-domain,
-    // no cross-origin handshake), but it goes stale whenever the CMS rebuilds
-    // the dataset after the last deploy. So fetch BOTH manifests in parallel —
-    // they're a few KB each — and pick the newer one by the `version`
-    // timestamp the cache build script stamps into every manifest. When the
-    // CMS copy wins, chunks resolve from Firebase Storage instead of /cache.
-    const localManifestP = (async (): Promise<any | null> => {
-      try {
-        const localRes = await fetch(`/cache/${manifestName}`, { method: 'GET' });
-        if (localRes.ok) return await localRes.json();
-      } catch {
-        // ignore
+    // Firebase Storage is the SINGLE source of truth for the dataset. There is
+    // deliberately no build-time /cache snapshot here: a baked-in copy would
+    // resurrect rows the admin deleted (a full wipe must stay empty until new
+    // files are uploaded), so when Firebase has no manifest there is NO data.
+    let manifest: any | null = null;
+    try {
+      let url = await this.getFirebaseDownloadUrl(manifestPath);
+      if (!url) {
+        const direct = this.directStorageUrl(manifestPath);
+        const head = await this.fetchWithTimeout(direct, 10000);
+        if (head.ok) url = direct;
       }
-      return null;
-    })();
-
-    const firebaseManifestP = (async (): Promise<any | null> => {
-      try {
-        let url = await this.getFirebaseDownloadUrl(manifestPath);
-        if (!url) {
-          const direct = this.directStorageUrl(manifestPath);
-          const head = await this.fetchWithTimeout(direct, 10000);
-          if (head.ok) url = direct;
-        }
-        if (!url) return null;
+      if (url) {
         const res = await this.fetchWithTimeout(url, 30000);
-        if (!res.ok) return null;
-        return await res.json();
-      } catch {
-        return null;
+        if (res.ok) manifest = await res.json();
       }
-    })();
-
-    const [localManifest, firebaseManifest] = await Promise.all([
-      localManifestP,
-      firebaseManifestP.catch(() => null),
-    ]);
-    if (!localManifest && !firebaseManifest) return null;
-
-    const localVersion = typeof localManifest?.version === 'number' ? localManifest.version : 0;
-    const firebaseVersion =
-      typeof firebaseManifest?.version === 'number' ? firebaseManifest.version : 0;
-    // Strictly newer wins; ties (fresh deploy) keep the fast local copy.
-    const useFirebase = !!firebaseManifest && firebaseVersion > localVersion;
-    const manifest = useFirebase ? firebaseManifest : localManifest;
+    } catch {
+      manifest = null;
+    }
+    if (!manifest) return null;
+    const version = typeof manifest.version === 'number' ? manifest.version : 0;
 
     if (manifest.format === 'boundary-chunks' && manifest.boundaries) {
       return {
         boundaries: manifest.boundaries,
         totalRows: manifest.totalRows || 0,
-        localBase: useFirebase ? undefined : '/cache/',
-        version: useFirebase ? firebaseVersion : localVersion,
+        version,
       };
     }
 
@@ -358,25 +329,14 @@ export class RealEstateEngine {
       return {
         chunks: manifest.chunks,
         totalRows: manifest.totalRows || 0,
-        localBase: useFirebase ? undefined : '/cache/',
-        version: useFirebase ? firebaseVersion : localVersion,
+        version,
       };
     }
 
     return null;
   }
 
-  private async resolveChunkUrl(path: string, localBase?: string): Promise<string> {
-    const fileName = path.split('/').pop();
-    if (localBase) {
-      const localUrl = `${localBase}${fileName}`;
-      try {
-        const head = await fetch(localUrl, { method: 'HEAD' });
-        if (head.ok) return localUrl;
-      } catch {
-        // ignore
-      }
-    }
+  private async resolveChunkUrl(path: string): Promise<string> {
     let url = await this.getFirebaseDownloadUrl(path);
     if (!url) {
       const direct = this.directStorageUrl(path);
@@ -393,7 +353,6 @@ export class RealEstateEngine {
 
   private async loadChunksOnMainThread(
     chunkPaths: string[],
-    localBase?: string,
     onProgress?: (loaded: number, total: number) => void,
     rowCap: number = Infinity
   ): Promise<core.PropertyData[]> {
@@ -416,7 +375,7 @@ export class RealEstateEngine {
       if (index >= chunkPaths.length) return Promise.resolve(null);
       return (async () => {
         try {
-          const url = await this.resolveChunkUrl(chunkPaths[index], localBase);
+          const url = await this.resolveChunkUrl(chunkPaths[index]);
           const res = await this.fetchWithTimeout(url, 120000);
           if (!res.ok) return null;
           return await res.arrayBuffer();
@@ -501,7 +460,6 @@ export class RealEstateEngine {
 
   private async loadChunkedCache(
     chunkPaths: string[],
-    localBase?: string,
     onProgress?: (loaded: number, total: number) => void,
     rowCap: number = Infinity
   ): Promise<core.PropertyData[]> {
@@ -509,7 +467,7 @@ export class RealEstateEngine {
     // a Web Worker is slower than parsing on the main thread. We run on the main
     // thread while a tiny pre-computed metric snapshot lets the map render
     // instantly in parallel.
-    return this.loadChunksOnMainThread(chunkPaths, localBase, onProgress, rowCap);
+    return this.loadChunksOnMainThread(chunkPaths, onProgress, rowCap);
   }
 
   private async parseCsvText(text: string): Promise<Record<string, string>[]> {
@@ -574,26 +532,15 @@ export class RealEstateEngine {
     if (this.chunkAreaIndex) return;
     const chunkedCache = await this.findChunkedCache().catch(() => null);
 
-    const candidates: string[] = [];
-    if (chunkedCache?.localBase) {
-      // Local manifest won (fresh deploy) — the local index is the match.
-      candidates.push(`${chunkedCache.localBase}chunk_area_index.json.gz`);
-    }
-    candidates.push('cms_files/csv/chunk_area_index.json.gz');
-    if (!chunkedCache?.localBase) {
-      candidates.push('/cache/chunk_area_index.json.gz');
-    }
+    // Firebase-only: the index must match the manifest that actually loaded,
+    // and a build-time local copy could pair a stale index with fresh chunks.
+    const candidates: string[] = ['cms_files/csv/chunk_area_index.json.gz'];
 
     for (const candidate of candidates) {
       try {
         let index: ChunkAreaIndex | null = null;
-        if (candidate.startsWith('/')) {
-          index = await this.fetchGzJson<ChunkAreaIndex>(candidate);
-        } else {
-          const url = await this.resolveChunkUrl(candidate);
-          if (!url) continue;
-          index = await this.fetchGzJson<ChunkAreaIndex>(url);
-        }
+        const url = await this.resolveChunkUrl(candidate);
+        index = await this.fetchGzJson<ChunkAreaIndex>(url);
         if (!index?.boundaries) continue;
         // The index must describe the manifest we actually loaded; otherwise
         // give up on selective loading (empty index = fetch all chunks, which
@@ -677,13 +624,18 @@ export class RealEstateEngine {
     if (chunkedCache.boundaries) {
       const boundaryInfo = chunkedCache.boundaries[boundary];
       if (!boundaryInfo || !Array.isArray(boundaryInfo.chunks) || boundaryInfo.chunks.length === 0) {
-        return { ok: false, error: `No chunked data for boundary ${boundary}`, count: 0 };
+        // An empty published dataset (admin wiped every CSV) is a valid
+        // 0-row selection, not an error — the report must still generate and
+        // show its "no data" state. Same for a boundary with zero coverage.
+        console.log(`[Kwizi Engine] No chunks for boundary ${boundary} — report runs with 0 rows.`);
+        return { ok: true, count: 0 };
       }
       chunkPaths = boundaryInfo.chunks;
     } else {
       chunkPaths = chunkedCache.chunks || [];
       if (chunkPaths.length === 0) {
-        return { ok: false, error: 'No chunked cache available', count: 0 };
+        console.log('[Kwizi Engine] Published dataset has no chunks — report runs with 0 rows.');
+        return { ok: true, count: 0 };
       }
     }
 
@@ -707,7 +659,7 @@ export class RealEstateEngine {
     onProgress?.(0, selectedPaths.length);
 
     try {
-      const rows = await this.loadChunkedCache(selectedPaths, chunkedCache.localBase, onProgress);
+      const rows = await this.loadChunkedCache(selectedPaths, onProgress);
       const selectedSet = new Set(selectedIds);
       const filtered = rows.filter((d) => selectedSet.has(this.getBoundaryKey(boundary, d)));
 
@@ -811,6 +763,11 @@ export class RealEstateEngine {
       const zipSet = new Set<string>();
       let allItems: core.PropertyData[] = [];
       let loadError: string | undefined;
+      // True when the published dataset is legitimately EMPTY (the admin wiped
+      // every CSV, or nothing was ever published and no fallback file exists).
+      // That is a successful 0-row load — treating it as an error used to drop
+      // the map onto the stale baked static snapshot and resurrect deleted data.
+      let emptyPublished = false;
 
       // 3. Load from the chunked JSON cache (fastest path: skip CSV parse/normalize).
       if (chunkedCache) {
@@ -825,12 +782,13 @@ export class RealEstateEngine {
         }
 
         if (fullLoadPaths.length === 0) {
-          loadError = 'Chunked cache manifest has no chunks to load.';
+          console.log('[Kwizi Engine] Published dataset is empty (0 chunks) — loading 0 rows.');
+          emptyPublished = true;
         } else {
           console.log(`[Kwizi Engine] Loading ${fullLoadPaths.length} pre-normalized JSON chunks`);
           onProgress?.(0, fullLoadPaths.length);
           try {
-            allItems = await this.loadChunkedCache(fullLoadPaths, chunkedCache.localBase, onProgress, this.memoryRowCap());
+            allItems = await this.loadChunkedCache(fullLoadPaths, onProgress, this.memoryRowCap());
             console.log(`[Kwizi Engine] Restored ${allItems.length} properties from chunked JSON cache`);
           } catch (err) {
             loadError = err instanceof Error ? err.message : String(err);
@@ -909,18 +867,33 @@ export class RealEstateEngine {
         }
       }
 
+      // Nothing published at all (no chunked manifest, no master file, no CSV
+      // manifest): that is an empty dataset, not a failure — the CMS decides
+      // what exists, and right now it says there is no data.
+      if (
+        !chunkedCache &&
+        !masterUrl &&
+        allItems.length === 0 &&
+        !loadError &&
+        !(manifestPaths && manifestPaths.some((p) => p.toLowerCase().endsWith('.csv')))
+      ) {
+        emptyPublished = true;
+      }
+
       // Safety net for the master/manifest paths (the chunked path caps
       // during load): never hold more than the device can survive.
       allItems = core.subsampleRows(allItems, this.memoryRowCap());
       core.internStrings(allItems);
       this.data = allItems;
-      if (allItems.length > 0) this.fullDatasetLoaded = true;
+      // An empty published dataset counts as a completed full load, so the UI
+      // shows "no data" instead of retrying the network on every mount.
+      if (allItems.length > 0 || emptyPublished) this.fullDatasetLoaded = true;
       // Start post-load work in the background; the UI can render as soon as
       // the data is in memory. applyPostLoadSteps sets this.isLoaded = true.
       this.applyPostLoadSteps(quality, zipSet, version).catch((err) =>
         console.error('[Kwizi] Post-load steps failed:', err)
       );
-      return { ok: this.data.length > 0, error: loadError, count: this.data.length };
+      return { ok: this.data.length > 0 || emptyPublished, error: loadError, count: this.data.length };
     })();
 
     try {

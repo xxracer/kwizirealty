@@ -1,4 +1,4 @@
-# Firebase SQL Connect (Data Connect) operations.
+# Firebase SQL Connect (Data Connect) operations — connector "default".
 #
 # Native SQL mode: the WHERE clause replicates src/lib/engine.ts
 # filterProperties() exactly (same defaults are no-ops, same derived fields:
@@ -175,5 +175,31 @@ query filteredPropertiesForSelection(
       $highschoolsExplicit, $highSchoolRating,
       $selectedIds, $boundary
     ]
+  )
+}
+
+# Wipes the table. Used when a NEW published dataset version is detected: SQL
+# must mirror the CMS exactly, and deletes in the CMS have to disappear here.
+# The sync route then re-ingests every chunk (upsert by mls_number).
+mutation clearProperties @auth(level: NO_ACCESS) {
+  _execute(sql: "DELETE FROM properties")
+}
+
+# Dropdown option lists (Property Type, City, School District, schools) in one
+# round trip. Empty strings are excluded, matching the engine's unique values.
+query distinctValues @auth(level: USER) {
+  values: _selectFirst(
+    sql: """
+    SELECT
+      count(*) AS total_rows,
+      array_agg(DISTINCT property_type) FILTER (WHERE property_type <> '') AS property_types,
+      array_agg(DISTINCT city) FILTER (WHERE city <> '') AS cities,
+      array_agg(DISTINCT school_district) FILTER (WHERE school_district <> '') AS school_districts,
+      array_agg(DISTINCT elementary) FILTER (WHERE elementary <> '') AS elementary,
+      array_agg(DISTINCT middle) FILTER (WHERE middle <> '') AS middle,
+      array_agg(DISTINCT highschools) FILTER (WHERE highschools <> '') AS highschools
+    FROM properties
+    """,
+    params: []
   )
 }

@@ -43,6 +43,8 @@ export class EngineWorkerClient {
   private worker: Worker | null = null;
   private loadPromise: Promise<LoadedDataset> | null = null;
   private loadedVersion: string | null = null;
+  /** False while a dataset load is still in flight, true once it settles. */
+  private loadSettled = false;
   private jobs = new Map<number, PendingJob>();
   private searches = new Map<number, PendingSearch>();
   private chatStatsJobs = new Map<number, PendingChatStats>();
@@ -183,6 +185,7 @@ export class EngineWorkerClient {
     const resolve = this.loadResolve;
     this.loadResolve = null;
     this.loadReject = null;
+    this.loadSettled = true;
     resolve?.(value);
   }
 
@@ -190,6 +193,7 @@ export class EngineWorkerClient {
     const reject = this.loadReject;
     this.loadResolve = null;
     this.loadReject = null;
+    this.loadSettled = true;
     reject?.(err);
   }
 
@@ -202,6 +206,7 @@ export class EngineWorkerClient {
     if (this.loadPromise) return this.loadPromise;
     const w = this.ensureWorker();
     if (!w) throw new Error('worker unavailable');
+    this.loadSettled = false;
 
     const cacheVersionUrls = ['cms_files/csv/master_cache_chunks.json', `version:${plan.version ?? 'unknown'}`];
     const cacheVersion = await cacheVersionFor(cacheVersionUrls);
@@ -229,6 +234,20 @@ export class EngineWorkerClient {
     w.postMessage(request);
 
     return load;
+  }
+
+  /** Forces a fresh dataset load (a newer CMS version was detected by the
+   *  version watchdog). If a load is already in flight it joins that one
+   *  instead of stomping the worker mid-load. */
+  public async reloadDataset(
+    plan: DataSourcePlan,
+    schoolScores: core.TeaScoreMap,
+    propertyOverrides: core.PropertyOverrideLite[]
+  ): Promise<LoadedDataset> {
+    if (this.loadPromise && !this.loadSettled) return this.loadPromise;
+    this.loadPromise = null;
+    this.loadedVersion = null;
+    return this.loadDataset(plan, schoolScores, propertyOverrides);
   }
 
   /** True once the worker's dataset matches the given cache version. */

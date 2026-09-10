@@ -12,6 +12,7 @@ import {
   YearBuiltCard,
   TopAreasCard,
   ForecastComparisonCard,
+  SalesTaxRentCard,
   type MarketHealth,
   type Forecast,
   type ForecastRow,
@@ -25,7 +26,8 @@ export type WindowType =
   | 'forecast'
   | 'year-built'
   | 'top-areas'
-  | 'forecast-comparison';
+  | 'forecast-comparison'
+  | 'sales-tax-rent';
 
 interface ReportPanelProps {
   metric: MetricKey;
@@ -130,6 +132,35 @@ export default function ReportPanel({
         startY: cursorY,
         head: [['Statistic', 'Value']],
         body: statsData,
+        theme: 'striped',
+        margin: { left: 40, right: 40 }
+      });
+      cursorY = (doc as any).lastAutoTable.finalY + 30;
+
+      // Sales / Tax / Rent
+      if (cursorY > 700) { doc.addPage(); cursorY = 40; }
+      addText('Sales · Tax · Rent', 40, cursorY, 16, true);
+      cursorY += 15;
+
+      const estMonthlyRent = reportStats.avgSale * 0.008;
+      const taxRentData = reportStats.taxCoverage > 0
+        ? [
+            ['Avg Annual Tax', formatVal(reportStats.avgTaxAmount)],
+            ['Avg Tax Rate', reportStats.avgTaxRate.toFixed(2) + '%'],
+            ['Properties with Tax Data', Math.round(reportStats.taxCoverage * 100) + '%'],
+            ['Est. Monthly Rent', formatVal(estMonthlyRent)],
+            ['Est. Annual Rent', formatVal(estMonthlyRent * 12)]
+          ]
+        : [
+            ['Avg Annual Tax', 'No tax data uploaded yet'],
+            ['Est. Monthly Rent', formatVal(estMonthlyRent)],
+            ['Est. Annual Rent', formatVal(estMonthlyRent * 12)]
+          ];
+
+      autoTable(doc, {
+        startY: cursorY,
+        head: [['Metric', 'Value']],
+        body: taxRentData,
         theme: 'striped',
         margin: { left: 40, right: 40 }
       });
@@ -272,6 +303,14 @@ export default function ReportPanel({
           onTogglePin={() => onToggleWindow?.('market-health')}
         />
       </div>
+
+      {/* Sales / Tax / Rent breakdown for the selected areas */}
+      <SalesTaxRentCard
+        stats={reportStats}
+        isLoading={isLoading}
+        pinned={isPinned('sales-tax-rent')}
+        onTogglePin={() => onToggleWindow?.('sales-tax-rent')}
+      />
 
       {/* Time series + forecast */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

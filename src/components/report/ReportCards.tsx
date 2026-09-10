@@ -20,6 +20,7 @@ import {
   Pin,
   GripVertical,
   Info,
+  Receipt,
 } from 'lucide-react';
 import {
   BarChart,
@@ -144,6 +145,10 @@ export interface ReportStats {
   totalVolume: number;
   avgList: number;
   avgLotSize: number;
+  avgTaxAmount: number;
+  avgTaxRate: number;
+  /** Share of the selected rows that carry tax data (0–1). */
+  taxCoverage: number;
 }
 
 interface CardShellProps {
@@ -311,6 +316,100 @@ export function QuickStatsCard({
           </div>
         </div>
       )}
+    </CardShell>
+  );
+}
+
+// ---------- Sales · Tax · Rent ----------
+
+export function SalesTaxRentCard({
+  stats,
+  isLoading,
+  compact = false,
+  pinned,
+  onTogglePin,
+  headerExtra,
+  dragHandle,
+}: {
+  stats: ReportStats;
+  isLoading?: boolean;
+  compact?: boolean;
+  pinned?: boolean;
+  onTogglePin?: () => void;
+  headerExtra?: React.ReactNode;
+  dragHandle?: React.ReactNode;
+}) {
+  // Est. rent: no rental columns exist in the dataset, so rent is estimated
+  // at 0.8% of sale price (the same ratio the map's rent metrics use).
+  const estMonthlyRent = stats.avgSale * 0.008;
+  const estRentPerSqft = stats.avgSqft * 0.008; // avgSqft is the $/SqFt average
+  const hasTaxData = stats.taxCoverage > 0;
+
+  const section = (label: string, color: string, rows: { label: string; value: React.ReactNode }[]) => (
+    <div className="bg-[#0b0e14] border border-white/[0.06] rounded-xl p-3">
+      <div className={`uppercase font-bold tracking-wider mb-2 ${color} ${compact ? 'text-[9px]' : 'text-[10px]'}`}>{label}</div>
+      <div className="space-y-1.5">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-center justify-between gap-2">
+            <span className={`text-gray-500 ${compact ? 'text-[9px]' : 'text-[10px]'}`}>{row.label}</span>
+            <span className={`font-bold text-white ${compact ? 'text-[10px]' : 'text-xs'}`}>{row.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <CardShell
+      title="Sales · Tax · Rent"
+      icon={<Receipt className={compact ? 'w-3.5 h-3.5' : 'w-4 h-4'} />}
+      iconColor="text-emerald-400"
+      compact={compact}
+      pinned={pinned}
+      onTogglePin={onTogglePin}
+      headerExtra={headerExtra}
+      dragHandle={dragHandle}
+    >
+      {isLoading ? (
+        <div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-3'}`}>
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="bg-white/5 rounded-xl h-24 animate-pulse" />
+          ))}
+        </div>
+      ) : (
+        <div className={`grid gap-2 ${compact ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-3'}`}>
+          {section('Sales', 'text-blue-400', [
+            { label: 'Properties', value: formatNumberCompact(stats.count) },
+            { label: 'Avg Sale Price', value: formatMoney(stats.avgSale) },
+            { label: '$/SqFt', value: formatMoney(stats.avgSqft) },
+            { label: 'Avg DOM', value: `${Math.round(stats.avgDom)}d` },
+            { label: 'Total Volume', value: formatMoney(stats.totalVolume) },
+          ])}
+          {hasTaxData ? (
+            section('Tax', 'text-amber-400', [
+              { label: 'Avg Annual Tax', value: formatMoney(stats.avgTaxAmount) + '/yr' },
+              { label: 'Avg Tax Rate', value: stats.avgTaxRate.toFixed(2) + '%' },
+              { label: 'Data Coverage', value: Math.round(stats.taxCoverage * 100) + '%' },
+              { label: 'Properties with Tax', value: formatNumberCompact(Math.round(stats.taxCoverage * stats.count)) },
+            ])
+          ) : (
+            <div className="bg-[#0b0e14] border border-white/[0.06] rounded-xl p-3">
+              <div className={`uppercase font-bold tracking-wider mb-2 text-amber-400 ${compact ? 'text-[9px]' : 'text-[10px]'}`}>Tax</div>
+              <div className={`text-gray-500 ${compact ? 'text-[9px]' : 'text-[11px]'}`}>
+                No tax data yet. Upload Tax Data CSVs in the Admin panel — they merge into the map automatically by MLS number.
+              </div>
+            </div>
+          )}
+          {section('Rent (est.)', 'text-orange-400', [
+            { label: 'Est. Monthly Rent', value: formatMoney(estMonthlyRent) + '/mo' },
+            { label: 'Est. Rent $/SqFt', value: '$' + estRentPerSqft.toFixed(2) + '/sqft' },
+            { label: 'Est. Annual Rent', value: formatMoney(estMonthlyRent * 12) + '/yr' },
+          ])}
+        </div>
+      )}
+      <div className={`mt-2 text-gray-600 ${compact ? 'text-[8px]' : 'text-[9px]'}`}>
+        Rent is an estimate (0.8% of sale price) — no real rental columns exist in the dataset. Tax figures come from Tax Data CSVs merged by MLS number.
+      </div>
     </CardShell>
   );
 }
@@ -741,6 +840,24 @@ export function ForecastCard({
               </div>
             </div>
           </div>
+          {/* Line legend — visible in every size so the chart explains itself */}
+          <div className="flex items-center justify-center gap-3 mt-2 flex-wrap">
+            <span className="flex items-center gap-1.5 text-[9px] text-gray-400">
+              <span className="inline-block w-3 h-0.5 rounded-full bg-[#2c7be5]" /> Actual
+            </span>
+            <span className="flex items-center gap-1.5 text-[9px] text-gray-400">
+              <span className="inline-block w-3 h-0.5 rounded-full bg-[#94a3b8]" /> Fitted
+            </span>
+            <span className="flex items-center gap-1.5 text-[9px] text-gray-400">
+              <span className="inline-block w-3 border-t-2 border-dashed border-[#34d399]" /> Forecast
+            </span>
+            <span className="flex items-center gap-1.5 text-[9px] text-gray-400">
+              <span className="inline-block w-3 h-2 rounded-sm bg-emerald-400/40 border border-emerald-400/60" /> 95% interval
+            </span>
+            {compact && (
+              <span className={`text-[9px] font-semibold ${r2Color(forecast.r2)}`}>R² = {forecast.r2.toFixed(2)}</span>
+            )}
+          </div>
           {!compact && (
             <div className="text-center mt-2 flex items-center justify-center gap-2 flex-wrap">
               <span className={`text-[10px] font-semibold ${r2Color(forecast.r2)}`}>
@@ -1041,11 +1158,9 @@ export function ForecastComparisonCard({
                 <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('annualDelta')}>
                   <span className="inline-flex items-center gap-1">Δ {renderSortIcon(forecastSort.key === 'annualDelta', forecastSort.asc)}</span>
                 </th>
-                {!compact && (
-                  <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('annualPct')}>
-                    <span className="inline-flex items-center gap-1">% {renderSortIcon(forecastSort.key === 'annualPct', forecastSort.asc)}</span>
-                  </th>
-                )}
+                <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('annualPct')}>
+                  <span className="inline-flex items-center gap-1">% {renderSortIcon(forecastSort.key === 'annualPct', forecastSort.asc)}</span>
+                </th>
                 {!compact && (
                   <th className="text-right py-1.5 cursor-pointer hover:text-white" onClick={() => handleSort('r2')}>
                     <span className="inline-flex items-center gap-1">R² {renderSortIcon(forecastSort.key === 'r2', forecastSort.asc)}</span>
@@ -1070,11 +1185,9 @@ export function ForecastComparisonCard({
                   <td className={`py-1.5 text-right font-semibold ${row.annualDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {row.annualDelta >= 0 ? '+' : ''}{formatMetricValue(metric, row.annualDelta)}/yr
                   </td>
-                  {!compact && (
-                    <td className={`py-1.5 text-right font-semibold ${row.annualPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {row.annualPct >= 0 ? '+' : ''}{row.annualPct.toFixed(2)}%
-                    </td>
-                  )}
+                  <td className={`py-1.5 text-right font-semibold ${row.annualPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {row.annualPct >= 0 ? '+' : ''}{row.annualPct.toFixed(2)}%
+                  </td>
                   {!compact && (
                     <td className={`py-1.5 text-right ${r2Color(row.r2)} font-semibold`}>
                       <span className="inline-flex items-center gap-1">

@@ -6,6 +6,7 @@
     "rules": "storage.rules"
   },
   "dataconnect": {
+    "source": "dataconnect",
     "emulator": {
       "enabled": true,
       "host": "127.0.0.1",

@@ -670,6 +670,27 @@ function AdminPageInner() {
     return () => unsubscribe();
   }, [loadData]);
 
+  // Self-healing: when the admin opens, verify the published dataset actually
+  // matches the CSVs currently in the CMS and rebuild automatically if they
+  // diverged (e.g. a rebuild failed while the tab was closed). Runs once per
+  // mount, in the background — no buttons, no blocking.
+  useEffect(() => {
+    let cancelled = false;
+    import('@/lib/datasetRebuild/reconcile')
+      .then(({ reconcileDatasetWithCms }) => reconcileDatasetWithCms())
+      .catch((err) => {
+        if (!cancelled) console.warn('[datasetRebuild] Reconcile failed:', err);
+      });
+    // SQL mirror catch-up: if a previous sync loop died (tab closed before it
+    // finished), the admin mount resumes it. The route is idempotent per chunk.
+    import('@/lib/sqlSync')
+      .then((m) => m.runSqlSync())
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Register files that already exist in Firebase Storage but have no
   // Firestore metadata (uploaded outside the CMS) so they appear in the lists.
   // Runs automatically every time a data section is opened; if it takes longer

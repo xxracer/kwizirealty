@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, GripVertical, ArrowUp, ArrowDown, Activity, Clock, TrendingUp, BarChart3, Building, Ruler, Home } from 'lucide-react';
+import { X, GripVertical, ArrowUp, ArrowDown, Activity, Clock, TrendingUp, BarChart3, Building, Ruler, Home, Receipt } from 'lucide-react';
 import type { MetricKey, BoundaryKey } from '@/lib/engine';
 import {
   QuickStatsCard,
@@ -12,6 +12,7 @@ import {
   YearBuiltCard,
   TopAreasCard,
   ForecastComparisonCard,
+  SalesTaxRentCard,
   type MarketHealth,
   type Forecast,
   type ForecastRow,
@@ -25,7 +26,8 @@ export type WindowType =
   | 'forecast'
   | 'year-built'
   | 'top-areas'
-  | 'forecast-comparison';
+  | 'forecast-comparison'
+  | 'sales-tax-rent';
 
 interface WindowDef {
   key: WindowType;
@@ -37,6 +39,7 @@ interface WindowDef {
 
 export const WINDOW_DEFS: WindowDef[] = [
   { key: 'quick-stats', title: 'Quick Stats', icon: <Activity className="w-4 h-4" />, defaultWidth: 280, color: 'text-blue-400' },
+  { key: 'sales-tax-rent', title: 'Sales · Tax · Rent', icon: <Receipt className="w-4 h-4" />, defaultWidth: 320, color: 'text-emerald-400' },
   { key: 'market-health', title: 'Market Health', icon: <Activity className="w-4 h-4" />, defaultWidth: 280, color: 'text-pink-400' },
   { key: 'time-series', title: 'Time Series', icon: <Clock className="w-4 h-4" />, defaultWidth: 340, color: 'text-cyan-400' },
   { key: 'forecast', title: '5-Year Forecast', icon: <TrendingUp className="w-4 h-4" />, defaultWidth: 340, color: 'text-emerald-400' },
@@ -44,8 +47,6 @@ export const WINDOW_DEFS: WindowDef[] = [
   { key: 'top-areas', title: 'Top Areas', icon: <BarChart3 className="w-4 h-4" />, defaultWidth: 320, color: 'text-amber-400' },
   { key: 'forecast-comparison', title: 'Forecast Comparison', icon: <Ruler className="w-4 h-4" />, defaultWidth: 380, color: 'text-purple-400' },
 ];
-
-const STORAGE_KEY = 'kwizi-map-windows';
 
 interface DraggableMapWindowsProps {
   metric: MetricKey;
@@ -67,26 +68,10 @@ interface DraggableMapWindowsProps {
 }
 
 export function useDraggableWindows() {
+  // Session-only: windows open strictly when the user opens them. Restoring
+  // them from localStorage made old windows reappear on every reload as if
+  // they had been opened by themselves.
   const [active, setActive] = useState<WindowType[]>([]);
-  const [hydrated, setHydrated] = useState(false);
-
-  useEffect(() => {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || 'null');
-      if (Array.isArray(saved) && saved.every((k: unknown) => WINDOW_DEFS.some((d) => d.key === k))) {
-        setActive(saved.slice(0, 3));
-      }
-    } catch {
-      // ignore
-    }
-    setHydrated(true);
-  }, []);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(active));
-  }, [active, hydrated]);
-
   return { active, setActive };
 }
 
@@ -180,6 +165,14 @@ export default function DraggableMapWindows({
 
               {def.key === 'quick-stats' && (
                 <QuickStatsCard
+                  stats={reportStats}
+                  isLoading={isLoading}
+                  compact
+                  dragHandle={<div className="p-1 rounded bg-white/5 text-gray-500 cursor-move"><GripVertical className="w-3.5 h-3.5" /></div>}
+                />
+              )}
+              {def.key === 'sales-tax-rent' && (
+                <SalesTaxRentCard
                   stats={reportStats}
                   isLoading={isLoading}
                   compact

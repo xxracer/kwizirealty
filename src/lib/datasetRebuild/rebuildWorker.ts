@@ -360,8 +360,26 @@ async function runRebuild(addedRows: number, removedRows: number) {
 
   const allRows: RebuildRow[] = [];
 
+  // Every listed CSV is recorded as a consumed source in the manifest, so the
+  // admin can later verify the published dataset actually reflects the CMS
+  // contents (see datasetRebuild/reconcile.ts) and self-heal when they diverge.
+  const sourcePaths: string[] = [];
+  // File-type counters for the full-wipe rule: a wipe is only real when NO
+  // property CSV remains (tax-only CSVs never contribute rows) and no file
+  // failed before its type could be determined.
+  let propertyFileCount = 0;
+  let undeterminedFiles = 0;
+
+  // Standalone Tax Data CSVs (deduped on MLS #) carry tax fields but no
+  // Close Price/Latitude/Longitude, so normalizeRow drops every one of their
+  // rows. Instead of losing them, they are keyed by MLS here and merged into
+  // the property rows after the parse loop (see the enrichment step below).
+  const taxByMls = new Map<string, [number, number, number]>(); // [taxYear, taxAmount, taxRate]
+
   for (let i = 0; i < csvFiles.length; i++) {
     const file = csvFiles[i];
+    sourcePaths.push(file.fullPath);
+    let decidedAsProperty = false;
     try {
       const url = await getDownloadURL(ref(storage, file.fullPath));
       const res = await fetch(url);
@@ -370,17 +388,34 @@ async function runRebuild(addedRows: number, removedRows: number) {
 
       // Parse row-by-row so Papa never keeps the full CSV in parsed.data.
       await new Promise<void>((resolve, reject) => {
+        let isTaxFile: boolean | null = null;
         Papa.parse<Record<string, string>>(text, {
           header: true,
           skipEmptyLines: true,
           transformHeader: (h) => stripBom(h),
           step: (results) => {
-            const rawRow: Record<string, string> = {};
             const data = results.data as Record<string, string>;
-            for (const [k, v] of Object.entries(data)) {
-              rawRow[k] = v;
+            // A tax file is decided from its first row: it has the tax
+            // columns but none of the sale columns normalizeRow requires.
+            if (isTaxFile === null) {
+              isTaxFile =
+                !('Close Price' in data) &&
+                ('Tax Amount' in data || 'Tax Rate' in data || 'Tax Year' in data);
+              if (!isTaxFile) decidedAsProperty = true;
             }
-            const item = normalizeRow(rawRow, intern);
+            if (isTaxFile) {
+              const mls = String(data['MLS #'] || data['MLS Number'] || '').trim();
+              if (mls) {
+                const year = cleanNumber(data['Tax Year']);
+                const amount = cleanNumber(data['Tax Amount']);
+                const rate = cleanNumber(data['Tax Rate']);
+                const prev = taxByMls.get(mls);
+                // Keep the newest tax record per MLS (re-uploads repeat rows).
+                if (!prev || year >= prev[0]) taxByMls.set(mls, [year, amount, rate]);
+              }
+              return;
+            }
+            const item = normalizeRow(data, intern);
             if (item) allRows.push(item);
           },
           complete: () => resolve(),
@@ -392,9 +427,28 @@ async function runRebuild(addedRows: number, removedRows: number) {
       text = '';
     } catch (err) {
       console.warn('[datasetRebuild] Failed file:', file.fullPath, err);
+      undeterminedFiles++;
     }
+    if (decidedAsProperty) propertyFileCount++;
     // Yield periodically so the worker never stacks up huge parse buffers.
     if ((i + 1) % 10 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  // MLS merge: fill in the tax fields of property rows that were sold without
+  // tax columns, using the standalone Tax Data CSVs parsed above. Rows that
+  // already carry their own tax values (or have no MLS number) are untouched.
+  if (taxByMls.size > 0) {
+    let enriched = 0;
+    for (const row of allRows) {
+      if (row.taxRate || row.taxAmount || row.taxYear || !row.mlsNumber) continue;
+      const tax = taxByMls.get(row.mlsNumber);
+      if (!tax) continue;
+      row.taxYear = tax[0];
+      row.taxAmount = tax[1];
+      row.taxRate = tax[2];
+      enriched++;
+    }
+    console.log(`[datasetRebuild] Tax merge: ${enriched.toLocaleString()} rows enriched from ${taxByMls.size.toLocaleString()} tax records.`);
   }
 
   if ('performance' in self) {
@@ -423,6 +477,14 @@ async function runRebuild(addedRows: number, removedRows: number) {
   let expectedLower: number;
   let expectedUpper: number;
 
+  // Full wipe: the admin deleted every dataset CSV on purpose, so publishing
+  // an empty dataset is the intended outcome — the map shows "no data" until
+  // new files are uploaded instead of serving the old rows forever. The rule
+  // is file-based (zero property CSVs left, none failed mid-download), NOT
+  // delta-based: reconciliation calls run with zero deltas after deletions.
+  const isFullWipe =
+    allRows.length === 0 && propertyFileCount === 0 && undeterminedFiles === 0;
+
   if (baseTotal === 0) {
     // Fresh restore: the manifest was reset, so the expected count is unknown.
     // Allow any non-empty dataset to publish so the restore can complete.
@@ -443,10 +505,16 @@ async function runRebuild(addedRows: number, removedRows: number) {
     );
   }
 
-  if (allRows.length < expectedLower || allRows.length > expectedUpper) {
+  if (
+    !isFullWipe &&
+    (allRows.length < expectedLower || allRows.length > expectedUpper)
+  ) {
     throw new Error(
       `Safety check: ${allRows.length.toLocaleString()} rows were computed, expected between ${expectedLower.toLocaleString()} and ${expectedUpper.toLocaleString()}. The dataset was not modified.`
     );
+  }
+  if (isFullWipe) {
+    console.log('[datasetRebuild] Full wipe detected (all dataset CSVs deleted) — publishing an empty dataset.');
   }
 
   // Capture the kept count BEFORE we start streaming chunks out.
@@ -549,6 +617,10 @@ async function runRebuild(addedRows: number, removedRows: number) {
     totalRows: keptRows,
     format: 'boundary-chunks',
     defaultBoundary: 'subdivisions',
+    // FullPaths of every CSV consumed for this build. The admin compares
+    // these against the live Storage listing to detect drift (a file that
+    // was uploaded/deleted without triggering a rebuild) and self-heal.
+    sources: sourcePaths,
     boundaries: manifestBoundaries,
   };
 

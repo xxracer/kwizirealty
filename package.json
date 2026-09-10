@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "worker:build": "node scripts/build-worker.js",
-    "prebuild": "node scripts/download-boundaries.js && node scripts/download-chunked-cache.js && node scripts/build-initial-metrics.js && node scripts/build-worker.js",
+    "prebuild": "node scripts/download-boundaries.js && node scripts/build-initial-metrics.js && node scripts/build-worker.js",
     "simplify:boundaries": "node scripts/simplify-boundaries.js",
     "import:sql": "node scripts/import-properties-to-sql.js"
   },

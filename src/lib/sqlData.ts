@@ -10,6 +10,7 @@
  */
 import type { PropertyFilters, BoundaryKey, MetricKey } from '@/lib/engine';
 import type { RealEstateEngine } from '@/lib/engine';
+import type { DatasetUniqueValues } from '@/lib/engineWorker/protocol';
 import { DEFAULT_FILTERS } from '@/lib/engine';
 
 /** Gate: set NEXT_PUBLIC_SQL_ENABLED=true once dataconnect is deployed. */
@@ -21,7 +22,12 @@ export function isSQLEnabled(): boolean {
 const DEFAULT_FILTERS_SNAPSHOT = JSON.stringify(DEFAULT_FILTERS);
 
 export interface SqlAggregates {
-  mapValues: { values: Record<string, number>; counts: Record<string, number> };
+  mapValues: {
+    values: Record<string, number>;
+    counts: Record<string, number>;
+    /** Boundary id → display name (drives search + selection labels on SQL). */
+    names?: Record<string, string>;
+  };
   reportStats: {
     count: number;
     avgSale: number;
@@ -30,6 +36,9 @@ export interface SqlAggregates {
     totalVolume: number;
     avgList: number;
     avgLotSize: number;
+    avgTaxAmount: number;
+    avgTaxRate: number;
+    taxCoverage: number;
   };
   marketHealth: {
     score: number;
@@ -109,6 +118,28 @@ export function periodToWindow(
       start = null;
   }
   return { startTs: start ? start.getTime() : null, endTs: end.getTime() };
+}
+
+/**
+ * Dropdown option lists + total row count for the SQL-first map path (the
+ * browser holds no rows there, so the worker's datasetReady payload is not
+ * available). One small POST instead of a dataset download. Null on failure —
+ * the caller then keeps whatever it had (or the engine fallback).
+ */
+export async function fetchSqlDistinct(
+  idToken: string
+): Promise<{ uniqueValues: DatasetUniqueValues; totalRows: number } | null> {
+  try {
+    const res = await fetch('/api/sql/distinct', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 /**

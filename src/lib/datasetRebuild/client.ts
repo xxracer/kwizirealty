@@ -128,6 +128,11 @@ function ensureWorker(): Worker {
         version: data.version,
         doneAt: Date.now(),
       });
+      // The SQL mirror follows automatically: each finished publish kicks off
+      // the resumable chunk-sync loop (no buttons, no manual import script).
+      import('../sqlSync')
+        .then((m) => m.runSqlSync())
+        .catch(() => {});
       // Changes requested while this rebuild ran get their own rebuild.
       if (pendingAdded > 0 || pendingRemoved > 0) {
         scheduleRun();

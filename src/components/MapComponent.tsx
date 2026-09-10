@@ -306,6 +306,13 @@ export default function MapComponent({
   const buildAreaFeatures = (): GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>[] => {
     if (!geoJsonData || !geoJsonData.features) return [];
 
+    // When the boundary has NO metric values at all (empty CMS dataset, or a
+    // metric with zero coverage), still render the geography: the uploaded
+    // boundaries must be visible as no-data outlines, never a blank map.
+    // When data DOES exist, areas without a metric stay filtered out (that
+    // keeps ~60k grey placeholder paths off low-RAM machines).
+    const hasAnyMetric = Object.keys(metricValues).length > 0;
+
     const features: GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>[] = [];
 
     geoJsonData.features.forEach((feature) => {
@@ -333,9 +340,8 @@ export default function MapComponent({
       // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing
       // or non-finite values mean "no data" for this area.
       const hasMetric = typeof value === 'number' && isFinite(value);
-      // Don't render grey placeholder areas with no data.
-      if (!hasMetric) return;
-      const color = getColorForValue(value, colorStops);
+      if (!hasMetric && hasAnyMetric) return;
+      const color = hasMetric ? getColorForValue(value, colorStops) : '#374151';
       const count = sampleCounts[key] || 0;
       const name = nameMap[key] || String(rawName || key);
 
@@ -881,16 +887,19 @@ export default function MapComponent({
   const boundaryFreshnessRef = useRef<{
     local: Record<string, number> | null;
     cms: Record<string, number> | null;
+    authoritative: boolean;
   } | null>(null);
 
-  const isCmsBoundaryNewer = async (key: BoundaryKey): Promise<boolean> => {
+  const probeCmsBoundary = async (
+    key: BoundaryKey
+  ): Promise<{ newer: boolean; deleted: boolean }> => {
     const fileName = BOUNDARY_SOURCES[key];
-    if (!fileName) return false;
+    if (!fileName) return { newer: false, deleted: false };
 
     if (!boundaryFreshnessRef.current) {
       const asTime = (v: unknown): number =>
         typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) : NaN;
-      const [local, cms] = await Promise.all([
+      const [local, cms, authoritative] = await Promise.all([
         fetch('/geojson/versions.json')
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null),
@@ -905,17 +914,30 @@ export default function MapComponent({
             return map;
           })
           .catch(() => null),
+        // True once any boundary GeoJSON has been managed through the CMS:
+        // the CMS then decides which polygons exist, so an EMPTY list means
+        // "deleted everywhere" instead of "never uploaded, use the local copy".
+        cmsStore.isBoundaryAuthority().catch(() => false),
       ]);
-      boundaryFreshnessRef.current = { local, cms };
+      boundaryFreshnessRef.current = { local, cms, authoritative };
     }
 
-    const { local, cms } = boundaryFreshnessRef.current;
+    const { local, cms, authoritative } = boundaryFreshnessRef.current;
     const cmsAt = cms?.[fileName];
     const localAt = local?.[key];
+    // Deletion needs POSITIVE evidence: either the CMS has been explicitly
+    // initialized for boundaries (authoritative flag) or its metadata lists
+    // other boundary files — in both cases this file being absent means it
+    // was deleted, never "silently missing".
+    const cmsManagesBoundaries = authoritative || (cms !== null && Object.keys(cms).length > 0);
+    if (cmsManagesBoundaries && !cmsAt) {
+      console.warn(`[Kwizi Map] ${fileName} not found in CMS boundary files — treating as deleted.`);
+      return { newer: false, deleted: true };
+    }
     // Missing markers (pre-first-prebuild build) keep the current local-first
     // behavior instead of forcing every visitor onto the cross-origin copy.
-    if (!cmsAt || !localAt) return false;
-    return cmsAt > localAt;
+    if (!cmsAt || !localAt) return { newer: false, deleted: false };
+    return { newer: cmsAt > localAt, deleted: false };
   };
 
   const loadBoundary = async (key: BoundaryKey) => {
@@ -939,17 +961,30 @@ export default function MapComponent({
       .fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${key}.geojson.gz`)
       .catch(() => null);
 
-    let cmsIsNewer = false;
+    let probe: { newer: boolean; deleted: boolean } = { newer: false, deleted: false };
     try {
-      cmsIsNewer = await Promise.race([
-        isCmsBoundaryNewer(key),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 4000)),
+      probe = await Promise.race([
+        probeCmsBoundary(key),
+        new Promise<{ newer: boolean; deleted: boolean }>((resolve) =>
+          setTimeout(() => resolve(probe), 4000)
+        ),
       ]);
     } catch {
       // Freshness check is best-effort — keep the local fast path on any error.
     }
 
-    if (!cmsIsNewer) {
+    if (probe.deleted) {
+      // Deleted in the CMS = gone everywhere. Drop any cached polygons so the
+      // map renders this boundary as empty instead of serving the stale copy.
+      for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
+        delete boundaryCacheRef.current[k];
+      }
+      setGeoJsonData(null);
+      setBoundaryLoading(false);
+      return;
+    }
+
+    if (!probe.newer) {
       const data = await localDataP;
       if (data) {
         for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {

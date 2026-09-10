@@ -158,29 +158,44 @@ async function loadDataset(
   }
   if (!chunkPaths.length && plan.chunks) chunkPaths = plan.chunks;
   if (!chunkPaths.length) {
-    post({ type: 'datasetError', message: 'The data plan has no chunks to load.' });
+    // An EMPTY published dataset (every CSV wiped in the CMS) is a successful
+    // load with zero rows, NOT an error: erroring here made the map fall back
+    // to the stale baked static snapshot and resurrect deleted data.
+    rows = [];
+    datasetReady = true;
+    loadedCacheVersion = null;
+    post({ type: 'datasetReady', count: 0, uniqueValues: uniqueValuesFrom(rows) });
     return;
   }
 
   const candidatesPerChunk = chunkPaths.map((p) => chunkUrlCandidates(plan, p));
   const results: (core.PropertyData[] | null)[] = new Array(chunkPaths.length).fill(null);
+  const buffers: (ArrayBuffer | null)[] = new Array(chunkPaths.length).fill(null);
 
-  // One chunk in flight ahead, processing strictly sequential (memory).
-  const fetchOne = (index: number): Promise<ArrayBuffer | null> => {
-    if (index >= candidatesPerChunk.length) return Promise.resolve(null);
-    return fetchChunkBytes(candidatesPerChunk[index]);
+  // Fetch with a small pool (3 chunks in flight): parallel requests cut the
+  // first-load time substantially on real networks, while memory stays bounded
+  // — only the gzip bytes overlap; gunzip + parse below still run strictly one
+  // chunk at a time and release each buffer right after parsing.
+  const FETCH_POOL = 3;
+  let nextFetch = 0;
+  const fetchWorker = async (): Promise<void> => {
+    while (nextFetch < candidatesPerChunk.length) {
+      const index = nextFetch++;
+      buffers[index] = await fetchChunkBytes(candidatesPerChunk[index]);
+    }
   };
+  await Promise.all(
+    Array.from({ length: Math.min(FETCH_POOL, candidatesPerChunk.length) }, () => fetchWorker())
+  );
 
-  let inFlight = fetchOne(0);
   for (let index = 0; index < candidatesPerChunk.length; index++) {
-    const bufPromise = inFlight;
-    inFlight = fetchOne(index + 1);
-    const buf = await bufPromise;
+    const buf = buffers[index];
     if (!buf) {
       post({ type: 'datasetError', message: `Chunk fetch failed: ${chunkPaths[index]}` });
       return;
     }
     const text = await gunzipOrDecode(buf);
+    buffers[index] = null; // raw bytes released as soon as they are parsed
     results[index] = parseChunkRows(text);
     post({ type: 'datasetProgress', loaded: index + 1, total: chunkPaths.length, message: 'Loading map data…' });
   }
@@ -318,6 +333,9 @@ function computeChatStats(
     totalVolume: number;
     avgList: number;
     avgLotSize: number;
+    avgTaxAmount: number;
+    avgTaxRate: number;
+    taxCoverage: number;
   };
   health?: core.MarketHealthResult | null;
   topAreas?: { id: string; count: number }[];

@@ -22,12 +22,13 @@ import {
 } from '@/lib/engine';
 import {
   isSQLEnabled,
-  hasActiveFilters,
   resolveRatingFilters,
   periodToWindow,
   fetchSqlAggregates,
+  fetchSqlDistinct,
   type SqlAggregates,
 } from '@/lib/sqlData';
+import { readSqlSyncState, runSqlSync } from '@/lib/sqlSync';
 import { resolveQueriesToZips } from '@/lib/areaAliases';
 import { formatMetricValue } from '@/lib/legendFormat';
 import { useWorkerAggregates } from './useWorkerAggregates';
@@ -563,10 +564,33 @@ function MapPageInner() {
   // return object is a fresh literal every render).
   const {
     loadDataset: workerLoadDataset,
+    reloadDataset: workerReloadDataset,
     requestAggregate: workerRequestAggregate,
     search: workerSearch,
     chatStats: workerChatStats,
   } = workerAgg;
+
+  // Version watchdog state — the manifest version currently loaded into the
+  // worker (written by loadFullData) and a re-entrancy flag for the reload it
+  // triggers. Declared before loadFullData, which writes the version ref.
+  const loadedDatasetVersionRef = useRef<number | null>(null);
+
+  // SQL-first mode. When the SQL Connect mirror is COMPLETE for the CURRENT
+  // manifest version, the map NEVER downloads the dataset: it opens with
+  // GeoJSON only and every aggregate comes from /api/query (KB-sized). The
+  // mirror state lives in Firestore (cms_meta/sql_sync); a partial sync never
+  // feeds the map — the worker path stays active until it completes.
+  const [sqlSyncReady, setSqlSyncReady] = useState(false);
+  // Dropdown option lists for SQL mode (the browser holds no rows there, so
+  // the worker's datasetReady payload is unavailable — they come from SQL).
+  const [sqlDistinct, setSqlDistinct] = useState<Awaited<ReturnType<typeof fetchSqlDistinct>>>(null);
+  // Declared before loadFullData: a failed SQL fetch flips this and the next
+  // loadFullData skips the SQL gate and loads the worker dataset instead.
+  const [sqlFailed, setSqlFailed] = useState(false);
+  const sqlFailedRef = useRef(false);
+  useEffect(() => {
+    sqlFailedRef.current = sqlFailed;
+  }, [sqlFailed]);
 
   // Load (or re-load) the full dataset into the engine. Until it lands, every
   // filter that acts on real rows — Market Metric, Property Filters, Scale
@@ -574,7 +598,8 @@ function MapPageInner() {
   // per-boundary snapshot. Called on mount, after a boundary change and after
   // a reset so the live data path is always restored (it's instant once the
   // engine already holds the full dataset).
-  const loadFullData = useCallback(() => {
+  const loadFullData = useCallback((opts?: { force?: boolean }) => {
+    const force = opts?.force === true;
     setDataLoadKind('data');
     setReportError(null);
     setReportPhase('loading');
@@ -582,11 +607,35 @@ function MapPageInner() {
     // IndexedDB) and keeps the ~763k rows out of the main-thread heap.
     const runWorker = async (): Promise<boolean> => {
       if (workerAgg.workerUnavailable) return false;
+      // SQL-first gate: when the SQL mirror is complete for the CURRENT
+      // manifest version, skip the dataset download entirely — the map is
+      // served by /api/query and "loading data" only refreshes the dropdown
+      // lists (a few KB). A failed SQL fetch (sqlFailed) falls through to the
+      // worker so the map keeps working while SQL recovers.
+      if (isSQLEnabled() && !sqlFailedRef.current) {
+        const sqlPlan = await engine.resolveDataSource();
+        const syncState = sqlPlan ? await readSqlSyncState() : null;
+        if (sqlPlan && syncState?.done && syncState.version === (sqlPlan.version ?? 0)) {
+          setSqlSyncReady(true);
+          loadedDatasetVersionRef.current = sqlPlan.version ?? 0;
+          return true;
+        }
+        setSqlSyncReady(false);
+        // Mirror missing or stale (e.g. a fresh CMS publish not mirrored yet):
+        // drive the resumable sync from here too — no admin visit required.
+        // The worker path serves the map meanwhile (never a partial sync).
+        runSqlSync().catch(() => {});
+      }
       await engine.ensureSchoolRatings();
       const plan = await engine.resolveDataSource();
       if (!plan) return false;
+      // The version watchdog compares against the plan version actually being
+      // loaded here, so its first tick after mount never double-triggers.
+      loadedDatasetVersionRef.current = plan.version ?? 0;
       const overrides = await engine.getPropertyOverrideLites();
-      return workerLoadDataset(plan, engine.getTeaScoresSnapshot(), overrides);
+      return force
+        ? workerReloadDataset(plan, engine.getTeaScoresSnapshot(), overrides)
+        : workerLoadDataset(plan, engine.getTeaScoresSnapshot(), overrides);
     };
     runWorker()
       .then((workerOk) => {
@@ -598,7 +647,7 @@ function MapPageInner() {
         }
         // Fallback: main-thread engine load (same behavior as before workers).
         return engine
-          .loadAllCSV(false, (loaded, total) => setReportProgress({ loaded, total }))
+          .loadAllCSV(force, (loaded, total) => setReportProgress({ loaded, total }))
           .then((result) => {
             if (result.ok) {
               setReportPhase('ready');
@@ -646,18 +695,56 @@ function MapPageInner() {
     loadFullData();
   }, [boundary, loadFullData]);
 
+  // Dataset version watchdog — the CMS is the source of truth, so the map must
+  // pick up freshly published data without a manual reload. Every 30 seconds
+  // (only while the tab is visible) fetch the chunk manifest (a small JSON) and
+  // compare its version with the one the worker loaded; a newer version
+  // triggers an automatic reload that preserves the current filters, boundary
+  // and selection. The poll itself is cheap: one manifest fetch per tick.
+  useEffect(() => {
+    let stopped = false;
+    let checking = false;
+    const tick = async () => {
+      if (stopped || checking) return;
+      if (document.visibilityState !== 'visible') return;
+      if (loadedDatasetVersionRef.current === null) return; // no worker load yet
+      checking = true;
+      try {
+        const plan = await engine.resolveDataSource();
+        if (stopped || !plan) return;
+        const version = plan.version ?? 0;
+        if (version === loadedDatasetVersionRef.current) return;
+        // New CMS publish detected — reload the dataset through the same path
+        // as a manual reset, so every aggregate re-runs against the new rows.
+        loadedDatasetVersionRef.current = version;
+        console.log('[Kwizi Map] New dataset version detected — reloading automatically');
+        loadFullData({ force: true });
+      } catch {
+        // A failed poll (network hiccup, offline) is silently retried by the
+        // next tick — it must never surface as a map error.
+      } finally {
+        checking = false;
+      }
+    };
+    const id = setInterval(tick, 30000);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, [loadFullData]);
+
   // The full filter pipeline (filterProperties + all aggregations + map
   // rebuilds) processes ~763k rows synchronously. It reads APPLIED filters —
   // draft edits wait for the Apply Filters button. useDeferredValue still
   // coalesces any burst into a single pass.
   const deferredAppliedFilters = useDeferredValue(appliedFilters);
 
-  // SQL Connect path. When the user has active filters (or a report selection)
-  // and SQL is enabled, the aggregates are resolved server-side via /api/query
-  // instead of re-scanning the 763k rows in RAM. If the fetch fails, sqlFailed
-  // flips and the client engine below takes over exactly as before.
-  const [sqlFailed, setSqlFailed] = useState(false);
-  const useSql = isSQLEnabled() && !sqlFailed && (hasActiveFilters(deferredAppliedFilters) || selectedIds.length > 0);
+  // SQL Connect path. When the SQL mirror is ready (sqlSyncReady — complete
+  // for the current manifest version), SQL is the PRIMARY source: the map
+  // never downloaded the dataset, so /api/query serves EVERY aggregate,
+  // default filters included. sqlFailed (a failed fetch) flips back to the
+  // worker/engine paths until the next filter or metric change retries SQL.
+  const useSql = isSQLEnabled() && sqlSyncReady && !sqlFailed;
 
   // Worker mode: the aggregation worker owns the rows and computes EVERY
   // aggregate off the main thread (one job covers all the memos below).
@@ -707,13 +794,41 @@ function MapPageInner() {
     return () => {
       cancelled = true;
     };
-  }, [useSql, deferredAppliedFilters, boundary, metric, selectedIds, user]);
+    // reportGeneration re-fires the query after a dataset reload (the version
+    // watchdog's forced reload bumps it on the SQL path too).
+  }, [useSql, deferredAppliedFilters, boundary, metric, selectedIds, user, reportGeneration]);
+
+  // SQL mode dropdown lists: fetched whenever SQL becomes the primary source
+  // (and refreshed after each reload). A few KB — never a dataset download.
+  useEffect(() => {
+    if (!sqlSyncReady) return;
+    let cancelled = false;
+    (async () => {
+      const token = await user?.getIdToken();
+      if (!token || cancelled) return;
+      const d = await fetchSqlDistinct(token);
+      if (!cancelled && d) setSqlDistinct(d);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sqlSyncReady, user, reportGeneration]);
+
+  // SQL fetch failed → fall back to the worker dataset so the map keeps
+  // working. Retry happens on the next filter or metric change (below).
+  useEffect(() => {
+    if (!sqlFailed) return;
+    if (workerAgg.datasetCount !== null) return; // worker data already loaded
+    loadFullData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sqlFailed]);
 
   // A new filter attempt retries SQL (a transient failure shouldn't disable it
-  // for the whole session).
+  // for the whole session). A metric change retries too (ETA metrics are not
+  // supported server-side and flip sqlFailed — switching back must recover).
   useEffect(() => {
     setSqlFailed(false);
-  }, [filters]);
+  }, [filters, metric]);
 
   // Worker mode: ONE aggregate job covers every memo below (map values, report
   // stats, market health, time series, forecast, year built, points). The hook
@@ -755,7 +870,7 @@ function MapPageInner() {
       return {
         values,
         counts: sqlAgg?.mapValues.counts ?? {},
-        names: {},
+        names: sqlAgg?.mapValues.names ?? {},
       };
     }
     if (useWorker) {
@@ -817,6 +932,7 @@ function MapPageInner() {
 
   const emptyStats = useMemo(() => ({
     count: 0, avgSale: 0, avgSqft: 0, avgDom: 0, totalVolume: 0, avgList: 0, avgLotSize: 0,
+    avgTaxAmount: 0, avgTaxRate: 0, taxCoverage: 0,
   }), []);
 
   const reportStats = useMemo(() => {
@@ -937,10 +1053,10 @@ function MapPageInner() {
   const MIN_APPLY_POPUP_MS = 900;
   const applyFilters = useCallback(() => {
     if (!filtersDirty) return;
-    // Worker mode: the aggregate runs OFF the main thread, so there is nothing
-    // to paint a guaranteed popup for — commit immediately. The "Updating…"
-    // pill on the map is driven by the worker's `updating` flag instead.
-    if (useWorker) {
+    // Worker AND SQL mode: the aggregate runs OFF the main thread, so there is
+    // nothing to paint a guaranteed popup for — commit immediately. The
+    // "Updating…" pill on the map is driven by the updating flag instead.
+    if (useWorker || useSql) {
       setAppliedFilters(filters);
       if (reportPhase !== 'ready') loadFullData();
       return;
@@ -955,7 +1071,7 @@ function MapPageInner() {
       // only starts counting once the main thread is free again.
       setTimeout(() => setFiltersApplying(false), MIN_APPLY_POPUP_MS);
     }, 250);
-  }, [filters, filtersDirty, reportPhase, loadFullData, useWorker]);
+  }, [filters, filtersDirty, reportPhase, loadFullData, useWorker, useSql]);
 
   // For changes that must take effect immediately (chat bot, toggles): apply
   // to BOTH the draft and the applied state in one go.
@@ -1094,33 +1210,40 @@ function MapPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
-  // Dropdown options come straight from the worker's datasetReady payload in
-  // worker mode (engine.getUniqueValues needs main-thread rows — only used by
-  // the fallback path).
+  // Dropdown options. SQL mode: from /api/sql/distinct (the browser holds no
+  // rows). Worker mode: straight from the worker's datasetReady payload
+  // (engine.getUniqueValues needs main-thread rows — only used by the
+  // fallback path).
   const uniquePropertyTypes = useMemo(() => {
+    if (useSql) return sqlDistinct?.uniqueValues.propertyType ?? [];
     if (workerAgg.uniqueValues) return workerAgg.uniqueValues.propertyType;
     return engine.getUniqueValues('propertyType');
-  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  }, [useSql, sqlDistinct, workerAgg.uniqueValues, reportGeneration]);
   const uniqueCities = useMemo(() => {
+    if (useSql) return (sqlDistinct?.uniqueValues.city ?? []).slice(0, 120);
     if (workerAgg.uniqueValues) return workerAgg.uniqueValues.city.slice(0, 120);
     return engine.getUniqueValues('city').slice(0, 120);
-  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  }, [useSql, sqlDistinct, workerAgg.uniqueValues, reportGeneration]);
   const uniqueDistricts = useMemo(() => {
+    if (useSql) return (sqlDistinct?.uniqueValues.schoolDistrict ?? []).slice(0, 80);
     if (workerAgg.uniqueValues) return workerAgg.uniqueValues.schoolDistrict.slice(0, 80);
     return engine.getUniqueValues('schoolDistrict').slice(0, 80);
-  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  }, [useSql, sqlDistinct, workerAgg.uniqueValues, reportGeneration]);
   const uniqueElementary = useMemo(() => {
+    if (useSql) return (sqlDistinct?.uniqueValues.elementary ?? []).slice(0, 80);
     if (workerAgg.uniqueValues) return workerAgg.uniqueValues.elementary.slice(0, 80);
     return engine.getUniqueValues('elementary').slice(0, 80);
-  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  }, [useSql, sqlDistinct, workerAgg.uniqueValues, reportGeneration]);
   const uniqueMiddle = useMemo(() => {
+    if (useSql) return (sqlDistinct?.uniqueValues.middle ?? []).slice(0, 80);
     if (workerAgg.uniqueValues) return workerAgg.uniqueValues.middle.slice(0, 80);
     return engine.getUniqueValues('middle').slice(0, 80);
-  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  }, [useSql, sqlDistinct, workerAgg.uniqueValues, reportGeneration]);
   const uniqueHigh = useMemo(() => {
+    if (useSql) return (sqlDistinct?.uniqueValues.highschools ?? []).slice(0, 80);
     if (workerAgg.uniqueValues) return workerAgg.uniqueValues.highschools.slice(0, 80);
     return engine.getUniqueValues('highschools').slice(0, 80);
-  }, [useWorker, workerAgg.uniqueValues, reportGeneration]);
+  }, [useSql, sqlDistinct, workerAgg.uniqueValues, reportGeneration]);
 
   const selectedNames = useMemo(() => {
     return selectedIds.map((id) => nameMap[id] || id);
@@ -1341,6 +1464,36 @@ function MapPageInner() {
       return { stats: res.stats, health: res.health ?? null, matchedNames };
     }
 
+    // SQL mode: the rows live server-side — /api/query filters + aggregates
+    // there and returns the same stats/health shapes (KB-sized response).
+    if (useSql) {
+      const token = await user?.getIdToken();
+      if (!token) return null;
+      const resolved = resolveRatingFilters(engine, deferredAppliedFilters);
+      const { startTs, endTs } = periodToWindow(deferredAppliedFilters.period, engine.getReferenceDate());
+      try {
+        const res = await fetch('/api/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            filters: deferredAppliedFilters,
+            resolved,
+            boundary,
+            metric: isRental ? 'Est. Rental Price' : metric,
+            selectedIds: matchedIds,
+            startTs,
+            endTs,
+          }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data.unsupported || !data.reportStats) return null;
+        return { stats: data.reportStats, health: data.marketHealth ?? null, matchedNames };
+      } catch {
+        return null;
+      }
+    }
+
     const stats = engine.getStatsForSelection(filteredData, boundary, matchedIds);
     const health = engine.getMarketHealth(filteredData, boundary, matchedIds, isRental ? 'rental' : 'sale');
 
@@ -1356,6 +1509,7 @@ function MapPageInner() {
     boundaryLookup,
     deferredAppliedFilters,
     workerChatStats,
+    user,
   ]);
 
   // Real-time stats for chat-driven property filters. The bot merges the
@@ -1367,7 +1521,49 @@ function MapPageInner() {
   // before the dataset has loaded.
   const getStatsForChatFilters = useCallback(
     async (newFilters: Partial<PropertyFilters>) => {
-      if (useSql || reportPhase !== 'ready') return null;
+      if (reportPhase !== 'ready' && !useSql) return null;
+
+      // SQL mode: the merged filters are evaluated server-side (Postgres) and
+      // the response's per-area counts give the top-5 areas — one small POST.
+      if (useSql) {
+        const token = await user?.getIdToken();
+        if (!token) return null;
+        const merged = { ...deferredAppliedFilters, ...newFilters } as PropertyFilters;
+        const resolved = resolveRatingFilters(engine, merged);
+        const { startTs, endTs } = periodToWindow(merged.period, engine.getReferenceDate());
+        try {
+          const res = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              filters: merged,
+              resolved,
+              boundary,
+              metric,
+              selectedIds: [],
+              startTs,
+              endTs,
+            }),
+          });
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (data.unsupported || !data.reportStats) return null;
+          const nameSource: Record<string, string> = {};
+          for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+            nameSource[id] = info.name;
+          }
+          for (const [id, name] of Object.entries(data.mapValues?.names || {}) as [string, string][]) {
+            if (!nameSource[id]) nameSource[id] = name;
+          }
+          const topAreas = Object.entries(data.mapValues?.counts || {})
+            .sort((a, b) => (b[1] as number) - (a[1] as number))
+            .slice(0, 5)
+            .map(([id, count]) => ({ name: nameSource[id] || id, count: count as number }));
+          return { stats: data.reportStats, topAreas };
+        } catch {
+          return null;
+        }
+      }
 
       // Worker mode: the worker filters + aggregates, and returns top-5 area
       // ids (the page maps them to display names — the worker has no lookup).
@@ -1422,6 +1618,8 @@ function MapPageInner() {
       boundaryLookup,
       effectiveNameMap,
       workerChatStats,
+      metric,
+      user,
     ]
   );
 
@@ -1430,6 +1628,22 @@ function MapPageInner() {
     if (selectedIds.length === 0) {
       setReportError('Select one or more areas on the map to generate a report.');
       setTimeout(() => setReportError(null), 4000);
+      return;
+    }
+    // SQL mode: the selection-scoped rows were already fetched server-side
+    // (the /api/query effect re-runs on every selection change) — the report
+    // renders instantly from sqlAgg, no chunk download, no loading pass.
+    if (useSql) {
+      setDataLoadKind('report');
+      setReportError(null);
+      setReportProgress(null);
+      setReportPhase('ready');
+      setReportGeneration((g) => g + 1);
+      setReportGenerated(true);
+      setShowReportModal(true);
+      if (activeWindows.length === 0) {
+        setActiveWindows(['quick-stats', 'market-health']);
+      }
       return;
     }
     setDataLoadKind('report');
@@ -1457,7 +1671,7 @@ function MapPageInner() {
     if (activeWindows.length === 0) {
       setActiveWindows(['quick-stats', 'market-health']);
     }
-  }, [activeWindows.length, boundary, selectedIds, setActiveWindows]);
+  }, [activeWindows.length, boundary, selectedIds, setActiveWindows, useSql]);
 
   // When the chat sets pendingReport=true alongside a selection, fire
   // generateReport() once the selection state has been committed to React.

@@ -32,6 +32,13 @@ export interface WorkerAggregates {
     schoolScores: TeaScoreMap,
     propertyOverrides: PropertyOverrideLite[]
   ) => Promise<boolean>;
+  /** Same as loadDataset but forces the worker to re-fetch even if a dataset
+   *  was already loaded (used by the version watchdog after a CMS rebuild). */
+  reloadDataset: (
+    plan: DataSourcePlan,
+    schoolScores: TeaScoreMap,
+    propertyOverrides: PropertyOverrideLite[]
+  ) => Promise<boolean>;
   requestAggregate: (
     boundary: BoundaryKey,
     metric: MetricKey,
@@ -75,8 +82,9 @@ export function useWorkerAggregates(): WorkerAggregates {
     return unsubscribe;
   }, []);
 
-  const loadDataset = useCallback(
+  const doLoad = useCallback(
     async (
+      force: boolean,
       plan: DataSourcePlan,
       schoolScores: TeaScoreMap,
       propertyOverrides: PropertyOverrideLite[]
@@ -87,7 +95,9 @@ export function useWorkerAggregates(): WorkerAggregates {
             new CustomEvent('kwizi:worker-load-progress', { detail: { loaded, total } })
           );
         });
-        const res = await engineWorkerClient.loadDataset(plan, schoolScores, propertyOverrides);
+        const res = force
+          ? await engineWorkerClient.reloadDataset(plan, schoolScores, propertyOverrides)
+          : await engineWorkerClient.loadDataset(plan, schoolScores, propertyOverrides);
         offProgress();
         setDatasetCount(res.count);
         setUniqueValues(res.uniqueValues);
@@ -99,6 +109,18 @@ export function useWorkerAggregates(): WorkerAggregates {
       }
     },
     []
+  );
+
+  const loadDataset = useCallback(
+    (plan: DataSourcePlan, schoolScores: TeaScoreMap, propertyOverrides: PropertyOverrideLite[]) =>
+      doLoad(false, plan, schoolScores, propertyOverrides),
+    [doLoad]
+  );
+
+  const reloadDataset = useCallback(
+    (plan: DataSourcePlan, schoolScores: TeaScoreMap, propertyOverrides: PropertyOverrideLite[]) =>
+      doLoad(true, plan, schoolScores, propertyOverrides),
+    [doLoad]
   );
 
   const drain = useCallback(() => {
@@ -174,6 +196,7 @@ export function useWorkerAggregates(): WorkerAggregates {
     datasetCount,
     uniqueValues,
     loadDataset,
+    reloadDataset,
     requestAggregate,
     search,
     chatStats,

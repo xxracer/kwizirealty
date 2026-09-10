@@ -617,15 +617,15 @@ export function internStrings(rows: PropertyData[]): void {
   }
 }
 
-export function getReferenceDate(data: PropertyData[]): Date {
-  if (!data.length) return new Date();
-  let maxTs = 0;
-  data.forEach((d) => {
-    if (d.closeDateTs) {
-      if (d.closeDateTs > maxTs) maxTs = d.closeDateTs;
-    }
-  });
-  return maxTs ? new Date(maxTs) : new Date();
+export function getReferenceDate(_data?: PropertyData[]): Date {
+  // The period windows ("Last 12 months", YTD, 30d, …) must be anchored to
+  // the REAL current date — the browser clock, rolling forward day by day —
+  // never to the newest close date inside the dataset. Anchoring to the data
+  // made an upload with old close dates present its oldest rows as if they
+  // were "recent" (e.g. data ending in 2010 showing up under "Last 1 year").
+  // If the selected window contains no rows, the map is simply empty: that is
+  // the honest answer, not something to paper over.
+  return new Date();
 }
 
 export function getBoundaryKeyFor(boundary: BoundaryKey, item: PropertyData): string {
@@ -932,6 +932,10 @@ export function getStatsForSelection(
   let countWithList = 0;
   let totalLot = 0;
   let countWithLot = 0;
+  let totalTaxAmount = 0;
+  let countWithTax = 0;
+  let totalTaxRate = 0;
+  let countWithTaxRate = 0;
 
   selected.forEach((d) => {
     totalSale += d.closePrice;
@@ -951,6 +955,14 @@ export function getStatsForSelection(
       totalLot += d.lotSize;
       countWithLot++;
     }
+    if (d.taxAmount > 0) {
+      totalTaxAmount += d.taxAmount;
+      countWithTax++;
+    }
+    if (d.taxRate > 0) {
+      totalTaxRate += d.taxRate;
+      countWithTaxRate++;
+    }
   });
 
   return {
@@ -961,6 +973,9 @@ export function getStatsForSelection(
     totalVolume: totalSale,
     avgList: countWithList ? totalList / countWithList : 0,
     avgLotSize: countWithLot ? totalLot / countWithLot : 0,
+    avgTaxAmount: countWithTax ? totalTaxAmount / countWithTax : 0,
+    avgTaxRate: countWithTaxRate ? totalTaxRate / countWithTaxRate : 0,
+    taxCoverage: selected.length ? countWithTax / selected.length : 0,
   };
 }
 

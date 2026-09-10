@@ -8,6 +8,9 @@
 # boundary queries fast; a standalone closeDateTs index covers period-only
 # filters. closeDateTs is unix milliseconds stored as Int64 (Int would overflow).
 
+# The decimal fields (pricePerSqft, taxRate, maintFee, taxAmount, lotSize) are
+# Float in Postgres — the first deploy created them as Int (values like $93.75
+# and 2.8% were rejected), fixed by dataconnect:sql:migrate.
 type Property
   @table(name: "properties", key: ["mlsNumber"])
   @index(fields: ["subdivisions", "closeDateTs"], order: [ASC, DESC])
@@ -25,9 +28,10 @@ type Property
   zip: String
   closePrice: Int
   listPrice: Int
-  pricePerSqft: Int
+  # Decimals in the real data (e.g. $93.75/sqft, 2.8%) — Int rejects them.
+  pricePerSqft: Float
   sqft: Int
-  lotSize: Int
+  lotSize: Float
   br: Int
   baths: Int
   yearBuilt: Int
@@ -36,11 +40,11 @@ type Property
   closeDate: String
   closeYear: Int
   closeDateTs: Int64
-  maintFee: Int
+  maintFee: Float
   maintFeeSchedule: String
-  taxRate: Int
+  taxRate: Float
   taxYear: Int
-  taxAmount: Int
+  taxAmount: Float
   subdivisions: String
   zipcodes: String
   highschools: String
