@@ -106,7 +106,7 @@ const SECTIONS: { id: AdminSection; label: string; icon: React.ReactNode; desc: 
   { id: 'current', label: 'Current Listings', icon: <Building className="w-4 h-4" />, desc: 'Active for sale / for rent' },
   { id: 'tax', label: 'Tax Records', icon: <FileText className="w-4 h-4" />, desc: 'Assessed values & taxes' },
   { id: 'schools', label: 'School Ratings', icon: <School className="w-4 h-4" />, desc: 'TEA scores' },
-  { id: 'areas', label: 'Area Metrics', icon: <Layers className="w-4 h-4" />, desc: 'Manual overrides' },
+  { id: 'areas', label: 'Area Metrics', icon: <Layers className="w-4 h-4" />, desc: 'Boundary GeoJSON uploads' },
   { id: 'ads', label: 'Ads Campaigns', icon: <Megaphone className="w-4 h-4" />, desc: 'Manage advertisements' },
   { id: 'users', label: 'System Users', icon: <Users className="w-4 h-4" />, desc: 'Manage access' },
 ];
@@ -194,15 +194,17 @@ const SECTION_CONFIG: Record<Exclude<AdminSection, 'dashboard' | 'ads' | 'users'
     fileHint: 'Zip.geojson, Houston_ISD.geojson, etc.',
   },
   areas: {
-    title: 'Custom Areas',
-    subtitle: 'Manage custom area GeoJSON boundary files.',
+    title: 'Area Metrics',
+    subtitle: 'Upload the map’s boundary GeoJSON files here (GeoJSON only).',
     whatItModifies: [
-      'Custom polygons drawn on the map',
-      'Area metrics for custom areas',
+      'Subdivisions / neighborhoods polygons (Mapped Subdivisions.geojson)',
+      'Zip code polygons (Zip.geojson)',
+      'School zone polygons (Elementary / Middle / Houston_ISD)',
+      'The map switches to the new polygons as soon as a file with the same name is uploaded',
     ],
     requiredColumns: [],
-    category: 'custom-area',
-    fileHint: 'Custom_Areas.geojson',
+    category: 'boundary',
+    fileHint: 'Mapped Subdivisions.geojson, Zip.geojson, Elementary School ISD.geojson, Houston_ISD.geojson, Middle School ISD.geojson',
   },
 };
 
@@ -791,10 +793,8 @@ function AdminPageInner() {
 
     const inputFiles = Array.from(fileList);
     const acceptedExt =
-      section === 'boundaries'
+      section === 'boundaries' || section === 'areas'
         ? ['.geojson', '.json']
-        : section === 'areas'
-        ? ['.geojson', '.json', '.csv']
         : ['.csv'];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -808,14 +808,10 @@ function AdminPageInner() {
         const isGeoJson = lowerName.endsWith('.geojson') || lowerName.endsWith('.json');
         const isCsv = lowerName.endsWith('.csv');
 
-        // Boundaries section still only accepts GeoJSON. Areas (custom areas)
-        // accepts GeoJSON or CSV so the admin can upload either format.
-        if (section === 'boundaries' && !isGeoJson) {
-          setToast({ type: 'error', message: `${file.name} is not a GeoJSON file.` });
-          continue;
-        }
-        if (!isGeoJson && !isCsv) {
-          setToast({ type: 'error', message: `${file.name} must be a GeoJSON or CSV file.` });
+        // Area Metrics and Boundaries are GeoJSON-only: they feed the map's
+        // polygon layers directly, and a CSV has no polygon geometry.
+        if (!isGeoJson) {
+          setToast({ type: 'error', message: `${file.name} is not a GeoJSON file. This section only accepts GeoJSON.` });
           continue;
         }
 
@@ -849,7 +845,7 @@ function AdminPageInner() {
             featureCount = stagedGeo.features.length;
           }
 
-          // For Area Metrics we compare against all existing custom-area files
+          // For Area Metrics we compare against all existing boundary files
           // already in Firebase so the admin can see what's new vs. duplicate.
           let newCount = featureCount;
           let duplicateCount = 0;
@@ -857,7 +853,7 @@ function AdminPageInner() {
           let newNames: string[] = [];
 
           if (section === 'areas') {
-            const existingFiles = files.filter((f) => f.category === 'custom-area');
+            const existingFiles = files.filter((f) => f.category === 'boundary');
             const existingFeatures: GeoJsonFeatureCollection = { type: 'FeatureCollection', features: [] };
             for (const existing of existingFiles) {
               if (!existing.storageUrl) continue;
@@ -882,7 +878,9 @@ function AdminPageInner() {
             id,
             name: file.name,
             size: file.size,
-            category: section === 'areas' ? 'custom-area' : 'boundary',
+            // Always 'boundary': this is what the map's boundary loader reads,
+            // and saveFile marks the CMS as boundary-authoritative on save.
+            category: 'boundary',
             rows: [],
             headers: [],
             uploadedAt: Date.now(),
@@ -1025,7 +1023,7 @@ function AdminPageInner() {
         let featuresToSave = staged.geoJson.features;
         if (mode === 'new') {
           const existingFeatures: GeoJsonFeatureCollection = { type: 'FeatureCollection', features: [] };
-          for (const f of files.filter((f) => f.category === 'custom-area')) {
+          for (const f of files.filter((f) => f.category === 'boundary')) {
             if (!f.storageUrl) continue;
             try {
               const j = await fetchJsonAutoGz<any>(f.storageUrl);
@@ -1444,7 +1442,9 @@ function AdminPageInner() {
 
   const sectionFiles = useMemo(() => {
     if (section === 'dashboard' || section === 'ads' || section === 'users') return [];
-    if (section === 'areas') return files.filter((f) => f.category === 'custom-area');
+    // 'areas' reads SECTION_CONFIG like every other section — its category is
+    // 'boundary' (the only category the map reads for polygons), so the map's
+    // boundary GeoJSON files appear here.
     const config = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
     if (!config) return [];
     const cats = Array.isArray(config.category) ? config.category : [config.category];
@@ -2310,7 +2310,7 @@ function AdminPageInner() {
                   dataTab === 'upload' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
                 }`}
               >
-                Upload CSV
+                {key === 'boundaries' || key === 'areas' ? 'Upload GeoJSON' : 'Upload CSV'}
               </button>
               <button
                 onClick={() => setDataTab('edit')}
@@ -2339,12 +2339,15 @@ function AdminPageInner() {
             </div>
             <div className="bg-background/60 rounded-xl p-4">
               <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-3 flex items-center gap-2">
-                <FileSpreadsheet className="w-3 h-3" /> Expected CSV files
+                <FileSpreadsheet className="w-3 h-3" />{' '}
+                {key === 'boundaries' || key === 'areas' ? 'Expected GeoJSON files' : 'Expected CSV files'}
               </h3>
               <p className="text-sm text-gray-300 mb-3">{config.fileHint}</p>
-              <div className="text-xs text-gray-500">
-                Required columns: <span className="text-gray-300">{config.requiredColumns.join(', ')}</span>
-              </div>
+              {key !== 'boundaries' && key !== 'areas' && (
+                <div className="text-xs text-gray-500">
+                  Required columns: <span className="text-gray-300">{config.requiredColumns.join(', ')}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -2477,10 +2480,8 @@ function AdminPageInner() {
                       ref={fileInputRef}
                       type="file"
                       accept={
-                        key === 'boundaries'
+                        key === 'boundaries' || key === 'areas'
                           ? '.geojson,.json'
-                          : key === 'areas'
-                          ? '.geojson,.json,.csv'
                           : '.csv'
                       }
                       multiple
@@ -2489,10 +2490,8 @@ function AdminPageInner() {
                       {...{ webkitdirectory: '', directory: '' }}
                     />
                     <div className="text-[10px] text-gray-500">
-                      {key === 'boundaries'
-                        ? 'GeoJSON features will be loaded directly.'
-                        : key === 'areas'
-                        ? 'GeoJSON or CSV with name/area + lat + lng columns. Duplicates vs. existing custom areas are detected.'
+                      {key === 'boundaries' || key === 'areas'
+                        ? 'GeoJSON features will be loaded directly onto the map layers.'
                         : 'Duplicate rows are detected and skipped; only new rows are uploaded.'}
                     </div>
                   </div>
