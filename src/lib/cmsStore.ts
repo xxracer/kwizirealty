@@ -1,6 +1,6 @@
 'use client';
 
-import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch, query as fsQuery, where } from 'firebase/firestore';
 import { ref, uploadString, uploadBytes, getDownloadURL, deleteObject, listAll, getMetadata, type StorageReference } from 'firebase/storage';
 import { db, storage } from './firebase';
 import type { BoundaryKey, MetricKey } from './engine';
@@ -102,7 +102,11 @@ const STORAGE_SKIP_PATTERN = /(master_cache|property-manifest|manifest|chunk|\.g
 function detectStorageCategory(name: string, fallback?: CMSFileCategory): CMSFileCategory {
   const lower = name.toLowerCase();
   if (lower.endsWith('.geojson')) {
-    return lower.includes('boundar') ? 'boundary' : 'custom-area';
+    // GeoJSON always feeds the map's boundary layers — the map only reads
+    // 'boundary' metadata, so a 'custom-area' geojson (the old classification,
+    // e.g. "Mapped Subdivisions.geojson") was invisible to it and left the map
+    // serving the bundled local polygons instead.
+    return 'boundary';
   }
   if (lower.includes('tax')) return 'tax';
   if (lower.includes('school') || lower.includes('tea')) {
@@ -189,8 +193,17 @@ export const cmsStore = {
         : `cms_files/${cleanName}`;
     const storageRef = ref(storage, storagePath);
     
-    const uploadMetadata = { contentType: record.category === 'boundary' ? 'application/geo+json' : 'text/csv' };
-    const blob = new Blob([fileContent], { type: uploadMetadata.contentType });
+    // GeoJSON uploads are gzipped in the browser: a 44MB FeatureCollection
+    // (e.g. Mapped Subdivisions) transfers as ~1MB, and every geojson consumer
+    // reads CMS storage URLs through fetchJsonAutoGz (which sniffs gzip).
+    const isGeoUpload = record.category === 'boundary' || record.category === 'custom-area';
+    let blob: Blob;
+    if (isGeoUpload && typeof CompressionStream !== 'undefined') {
+      const gzipped = new Blob([fileContent]).stream().pipeThrough(new CompressionStream('gzip'));
+      blob = new Blob([await new Response(gzipped).arrayBuffer()], { type: 'application/gzip' });
+    } else {
+      blob = new Blob([fileContent], { type: isGeoUpload ? 'application/geo+json' : 'text/csv' });
+    }
     await uploadBytes(storageRef, blob);
     const downloadUrl = await getDownloadURL(storageRef);
 
@@ -229,8 +242,24 @@ export const cmsStore = {
         removedRowCount = metadata.rowCount || 0;
         removedCategory = metadata.category;
         const pathToDelete = metadata.storagePath || `cms_files/${id}.csv`;
-        const storageRef = ref(storage, pathToDelete);
-        await deleteObject(storageRef);
+        // Two files with the same name share ONE storage object (the path is
+        // the file name). A replace flow saves the new file first and then
+        // removes the old doc — deleting the shared path here would destroy
+        // the NEW upload's bytes. Skip the storage delete whenever another
+        // metadata doc still references the same path.
+        let sharedPath = false;
+        try {
+          const dupSnap = await getDocs(
+            fsQuery(collection(db, FILES_STORE), where('storagePath', '==', pathToDelete))
+          );
+          sharedPath = dupSnap.docs.some((d) => d.id !== id);
+        } catch {
+          sharedPath = true; // fail-safe: never delete when the check fails
+        }
+        if (!sharedPath) {
+          const storageRef = ref(storage, pathToDelete);
+          await deleteObject(storageRef);
+        }
       }
     } catch (e) {
       console.warn("Could not delete from storage, it might not exist.", e);

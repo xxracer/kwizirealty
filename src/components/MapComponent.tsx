@@ -10,6 +10,7 @@ import { formatMetricValue } from '@/lib/legendFormat';
 import { MousePointer2, Square, Trash2, BarChart3, Loader2, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
+import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 
 // navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
 // with ≤4 GB get lean constants everywhere: fewer point markers, and the
@@ -1006,9 +1007,9 @@ export default function MapComponent({
       if (!fileRecord || !fileRecord.storageUrl) {
         throw new Error(`Boundary file ${fileName} not found in Firebase CMS`);
       }
-      const res = await fetch(fileRecord.storageUrl);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as GeoJSON.FeatureCollection;
+      // CMS geojson uploads may be gzipped (cmsStore.saveFile) — fetchJsonAutoGz
+      // sniffs the payload, so raw (legacy) and gzipped objects both work.
+      const data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(fileRecord.storageUrl);
       boundaryCacheRef.current[key] = data;
       setGeoJsonData(data);
     } catch (err) {

@@ -12,6 +12,7 @@ import {
   type CMSFileCategory,
 } from '@/lib/cmsStore';
 import { engine, type BoundaryKey, type MetricKey, type PropertyData } from '@/lib/engine';
+import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import {
   csvToFeatureCollection,
   diffAgainstExisting,
@@ -861,9 +862,7 @@ function AdminPageInner() {
             for (const existing of existingFiles) {
               if (!existing.storageUrl) continue;
               try {
-                const r = await fetch(existing.storageUrl);
-                if (!r.ok) continue;
-                const json = await r.json();
+                const json = await fetchJsonAutoGz<any>(existing.storageUrl);
                 if (json && Array.isArray(json.features)) {
                   for (const feat of json.features) existingFeatures.features.push(feat);
                 }
@@ -1029,9 +1028,7 @@ function AdminPageInner() {
           for (const f of files.filter((f) => f.category === 'custom-area')) {
             if (!f.storageUrl) continue;
             try {
-              const r = await fetch(f.storageUrl);
-              if (!r.ok) continue;
-              const j = await r.json();
+              const j = await fetchJsonAutoGz<any>(f.storageUrl);
               if (j && Array.isArray(j.features)) {
                 for (const feat of j.features) existingFeatures.features.push(feat);
               }
@@ -1061,30 +1058,24 @@ function AdminPageInner() {
         let combined = merged;
         if (existingFile?.storageUrl && mode === 'replace') {
           try {
-            const r = await fetch(existingFile.storageUrl);
-            if (r.ok) {
-              const j = await r.json();
-              if (j && Array.isArray(j.features)) {
-                combined = mergeFeaturesReplacing(
-                  { type: 'FeatureCollection', features: j.features },
-                  featuresToSave
-                );
-              }
+            const j = await fetchJsonAutoGz<any>(existingFile.storageUrl);
+            if (j && Array.isArray(j.features)) {
+              combined = mergeFeaturesReplacing(
+                { type: 'FeatureCollection', features: j.features },
+                featuresToSave
+              );
             }
           } catch {
             // ignore
           }
         } else if (existingFile?.storageUrl && mode === 'new') {
           try {
-            const r = await fetch(existingFile.storageUrl);
-            if (r.ok) {
-              const j = await r.json();
-              if (j && Array.isArray(j.features)) {
-                combined = mergeFeaturesReplacing(
-                  { type: 'FeatureCollection', features: j.features },
-                  featuresToSave
-                );
-              }
+            const j = await fetchJsonAutoGz<any>(existingFile.storageUrl);
+            if (j && Array.isArray(j.features)) {
+              combined = mergeFeaturesReplacing(
+                { type: 'FeatureCollection', features: j.features },
+                featuresToSave
+              );
             }
           } catch {
             // ignore
@@ -1101,6 +1092,15 @@ function AdminPageInner() {
           rowCount: 0,
         };
 
+        // "Replace" must actually replace: remove every existing file with the
+        // same name BEFORE saving the new one. Saving first and removing after
+        // left the old metadata doc in place (two files with the same name —
+        // both pointing at the SAME storage path, since the path is the file
+        // name), and the later cleanup deleted the shared object out from
+        // under the new file.
+        for (const dup of files.filter((f) => f.name === staged.record.name)) {
+          await cmsStore.removeFile(dup.id);
+        }
         await cmsStore.saveFile(recordToSave);
         setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
         await loadData();
@@ -1155,8 +1155,13 @@ function AdminPageInner() {
     };
 
     try {
+      // Remove every existing file with the same name BEFORE saving the new
+      // one — they all share ONE storage object (the path is the file name),
+      // so deleting after the save would destroy the new upload's bytes.
+      for (const dup of files.filter((f) => f.name === staged.record.name)) {
+        await cmsStore.removeFile(dup.id);
+      }
       await cmsStore.saveFile(recordToSave);
-      if (existingFile) await cmsStore.removeFile(existingFile.id);
       setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
       await loadData();
       // Dataset rebuild is asynchronous; wait for it to publish before
@@ -1229,14 +1234,14 @@ function AdminPageInner() {
    */
   const handlePreview = async (file: Omit<CMSFileRecord, 'rows'>) => {
     try {
-      const response = await fetch(file.storageUrl || '');
-      const text = await response.text();
       const isGeoJson =
         file.category === 'boundary' ||
         file.category === 'custom-area' ||
         /\.(geojson|json)(\.gz)?$/i.test(file.name);
       if (isGeoJson) {
-        const parsed = JSON.parse(text);
+        // GeoJSON storage objects may be gzipped (cmsStore.saveFile) — use the
+        // sniffing helper instead of a raw text fetch.
+        const parsed = await fetchJsonAutoGz<any>(file.storageUrl || '');
         const features: any[] = Array.isArray(parsed?.features) ? parsed.features : [];
         const typeCounts: Record<string, number> = {};
         for (const f of features) {
@@ -1262,6 +1267,8 @@ function AdminPageInner() {
             .join(' · '),
         });
       } else {
+        const response = await fetch(file.storageUrl || '');
+        const text = await response.text();
         const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
         setPreviewFile({ ...file, rows: parsed.data as Record<string, string>[] });
       }
@@ -1504,8 +1511,7 @@ function AdminPageInner() {
           keyLabel = 'Area name';
           for (const f of fileList) {
             if (!f.storageUrl) continue;
-            const res = await fetch(f.storageUrl);
-            const json = await res.json();
+            const json = await fetchJsonAutoGz<any>(f.storageUrl);
             const feats: any[] = Array.isArray(json?.features) ? json.features : [];
             totalRows += feats.length;
             for (const feat of feats) {
