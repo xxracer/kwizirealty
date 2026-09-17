@@ -187,6 +187,11 @@ function formatMoney(num: number): string {
   return '$' + num.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
+/** Escapes a GeoJSON feature name before it goes into a popup HTML string. */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 interface MapComponentProps {
   boundary: BoundaryKey;
   metricValues: Record<string, number>;
@@ -211,6 +216,10 @@ interface MapComponentProps {
   /** True while the full dataset is streaming in for the map itself (not a
    *  report) — shows a "Loading Data…" overlay instead of "Generating Report…". */
   isDataLoading?: boolean;
+  /** True while a background data update (dataset version watchdog) is in
+   *  flight — the map shows a BLOCKING "Data is updating…" overlay: clicking,
+   *  selecting and filtering on the map are paused until it lands. */
+  isDataUpdating?: boolean;
   /** Incremented by the parent (e.g. after a search) to fly the map to the current selection. */
   focusSelectionTick?: number;
   /** Numeric [lat, lng, lat, lng, …] point list from the aggregation worker.
@@ -223,6 +232,11 @@ interface MapComponentProps {
   /** The active metric key — makes legend/popup formatting metric-aware
    *  (sqft as plain numbers, DOM with "d", ratios with "%", money otherwise). */
   metric?: MetricKey;
+  /** Extra boundary GeoJSONs uploaded through the CMS (Area Metrics) whose file
+   *  names don't match a fixed BOUNDARY_SOURCES layer. Rendered as overlay
+   *  polygons on top of the metric layer — the parent passes only the ENABLED
+   *  ones, so toggling off fully unmounts the Leaflet layer. */
+  customLayers?: { name: string; url: string }[];
 }
 
 export default function MapComponent({
@@ -246,10 +260,12 @@ export default function MapComponent({
   reportGenerated,
   isReportLoading,
   isDataLoading,
+  isDataUpdating,
   focusSelectionTick,
   points,
   pointsBounds,
   metric,
+  customLayers,
 }: MapComponentProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -257,6 +273,13 @@ export default function MapComponent({
   const salesLayerRef = useRef<L.GeoJSON | null>(null);
   const rentalsLayerRef = useRef<L.GeoJSON | null>(null);
   const floodLayerRef = useRef<L.TileLayer.WMS | null>(null);
+  // CMS custom boundary overlay layers (Area Metrics uploads) — one Leaflet
+  // layer per file name. The parsed FeatureCollection cache follows the same
+  // memory discipline as boundaryCacheRef: data for DISABLED layers is dropped
+  // (refetched from the HTTP cache on re-enable) so an uploaded layer that is
+  // toggled off never stays in RAM.
+  const customLayerRefsRef = useRef<Map<string, L.GeoJSON>>(new Map());
+  const customDataCacheRef = useRef<Map<string, GeoJSON.FeatureCollection>>(new Map());
   const popupRef = useRef<L.Popup | null>(null);
   const areaFeaturesRef = useRef<GeoJSON.Feature[]>([]);
   const boundsSetRef = useRef(false);
@@ -1485,6 +1508,75 @@ export default function MapComponent({
     return cleanup;
   }, [showFlood]);
 
+  // Custom boundary overlay layers (Area Metrics uploads): keep the enabled
+  // ones on the map, drop everything else. The fetch/parse happens per layer
+  // and the parsed data is dropped as soon as a layer is disabled, so a large
+  // custom upload never lingers in RAM unused.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    let disposed = false;
+
+    const wanted = new Set((customLayers || []).map((l) => l.name));
+    for (const [name, layer] of Array.from(customLayerRefsRef.current)) {
+      if (!wanted.has(name)) {
+        layer.remove();
+        customLayerRefsRef.current.delete(name);
+      }
+    }
+    for (const name of Array.from(customDataCacheRef.current.keys())) {
+      if (!wanted.has(name)) customDataCacheRef.current.delete(name);
+    }
+
+    (async () => {
+      for (const entry of customLayers || []) {
+        if (disposed || customLayerRefsRef.current.has(entry.name)) continue;
+        try {
+          let data = customDataCacheRef.current.get(entry.name);
+          if (!data) {
+            data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(entry.url);
+            if (disposed) return;
+            customDataCacheRef.current.set(entry.name, data);
+          }
+          const gj = L.geoJSON(data as unknown as GeoJSON.GeoJsonObject, {
+            style: () => ({
+              // Fixed overlay style — distinct from the white-stroked metric
+              // areas so custom polygons read as reference boundaries.
+              color: '#22d3ee',
+              weight: 1.5,
+              opacity: 0.9,
+              fillColor: '#22d3ee',
+              fillOpacity: 0.08,
+            }),
+            onEachFeature: (feature, layer) => {
+              const props = (feature.properties || {}) as Record<string, unknown>;
+              const label = String(
+                props.name ?? props.NAME ?? props.subdivision ?? props.SUBDIVISION ?? props.zip ?? props.zipcode ?? ''
+              ).trim();
+              if (label) layer.bindPopup(`<div class="text-xs font-semibold">${escapeHtml(label)}</div>`);
+            },
+          });
+          // Added after the area layer → renders on top of it (Leaflet stacks
+          // same-pane vectors in add order).
+          gj.addTo(map);
+          if (disposed) {
+            gj.remove();
+            return;
+          }
+          customLayerRefsRef.current.set(entry.name, gj);
+        } catch (err) {
+          console.warn('[Kwizi Map] failed to load custom boundary layer', entry.name, err);
+        }
+      }
+    })();
+
+    return () => {
+      disposed = true;
+    };
+    // `customLayers` is memoized by the parent — a new array identity means the
+    // enabled set actually changed.
+  }, [customLayers]);
+
   // Never keep the boundary loading overlay stuck for more than 12 seconds;
   // if the CSV or boundary genuinely has no data we still want the map usable.
   useEffect(() => {
@@ -1518,7 +1610,7 @@ export default function MapComponent({
       </AnimatePresence>
 
       <AnimatePresence>
-        {(isReportLoading || isDataLoading) && (
+        {(isReportLoading || isDataLoading || isDataUpdating) && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1526,8 +1618,13 @@ export default function MapComponent({
             className="absolute inset-0 z-[1001] bg-black/40 flex items-center justify-center backdrop-blur-sm"
           >
             <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-4 shadow-2xl max-w-[260px] text-center">
-              <Loader2 className={`w-10 h-10 animate-spin [animation-duration:0.6s] ${isDataLoading ? 'text-blue-500' : 'text-emerald-500'}`} />
-              {isDataLoading ? (
+              <Loader2 className={`w-10 h-10 animate-spin [animation-duration:0.6s] ${isDataLoading || isDataUpdating ? 'text-blue-500' : 'text-emerald-500'}`} />
+              {isDataUpdating ? (
+                <>
+                  <p className="text-sm text-gray-200 font-medium tracking-wide">Data is updating on the map…</p>
+                  <p className="text-xs text-gray-400">The latest data was published. The map refreshes automatically — this will only take a moment.</p>
+                </>
+              ) : isDataLoading ? (
                 <>
                   <p className="text-sm text-gray-200 font-medium tracking-wide">Loading Data...</p>
                   <p className="text-xs text-gray-400">Fetching the market dataset for the map.</p>

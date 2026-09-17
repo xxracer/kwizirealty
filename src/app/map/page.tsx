@@ -69,6 +69,7 @@ import {
   Star,
   Loader2,
   Filter,
+  Layers,
 } from 'lucide-react';
 
 const MapComponent = dynamic(() => import('@/components/MapComponent'), {
@@ -102,6 +103,18 @@ const PERIODS: { key: PropertyFilters['period']; label: string }[] = [
 ];
 
 const FIXED_PALETTE = ['#93c5fd', '#60a5fa', '#3b82f6', '#4f46e5', '#7c3aed'];
+
+// File names that already map to a fixed metric boundary layer (mirrors
+// BOUNDARY_SOURCES in MapComponent — duplicated here because that module is
+// dynamically imported and must not load eagerly). Any OTHER boundary-category
+// CMS upload (Area Metrics) renders as a custom overlay layer automatically.
+const KNOWN_BOUNDARY_FILE_NAMES = new Set([
+  'Mapped Subdivisions.geojson',
+  'Zip.geojson',
+  'Houston_ISD.geojson',
+  'Elementary School ISD.geojson',
+  'Middle School ISD.geojson',
+]);
 
 const RATING_OPTIONS = ['A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', 'D', 'D-', 'F'];
 
@@ -320,6 +333,13 @@ function MapPageInner() {
   // map ("Loading Data…") or building a report for selected areas
   // ("Generating Report…"). The map overlay must not lie about which one.
   const [dataLoadKind, setDataLoadKind] = useState<'data' | 'report'>('data');
+  // True while a background data update (dataset version watchdog) is in
+  // flight: the map shows a blocking "data is updating" overlay and pauses
+  // interaction until the fresh data is being served.
+  const [dataUpdatePending, setDataUpdatePending] = useState(false);
+  // Serializes background updates — a new publish during an in-flight update
+  // is picked up by a later tick instead of stacking two updates.
+  const updateInFlightRef = useRef(false);
   const [reportProgress, setReportProgress] = useState<{ loaded: number; total: number } | null>(null);
   // When the chat asks us to generate a report right after selecting areas,
   // we set this flag. A useEffect below watches selectedIds and fires the
@@ -361,6 +381,48 @@ function MapPageInner() {
   const [layerSales, setLayerSales] = useState(false);
   const [layerRentals, setLayerRentals] = useState(false);
   const [layerFlood, setLayerFlood] = useState(false);
+
+  // Custom boundary overlay layers: boundary-category CMS files (Area Metrics
+  // uploads) whose names don't belong to a fixed boundary layer. Auto-visible —
+  // the client uploads and the polygons appear; the toggle only hides them.
+  const [customBoundaryFiles, setCustomBoundaryFiles] = useState<{ name: string; url: string }[]>([]);
+  const [hiddenCustomLayers, setHiddenCustomLayers] = useState<string[]>([]);
+  useEffect(() => {
+    let stopped = false;
+    let checking = false;
+    const load = async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        const files = await cmsStore.listFilesMetadataByCategory('boundary');
+        if (stopped) return;
+        setCustomBoundaryFiles(
+          files
+            .filter((f) => f.storageUrl && !KNOWN_BOUNDARY_FILE_NAMES.has(f.name))
+            .map((f) => ({ name: f.name, url: f.storageUrl as string }))
+        );
+      } catch {
+        /* best-effort — custom layers are optional overlays */
+      }
+      checking = false;
+    };
+    load();
+    // Metadata-only poll (a few KB): an upload made in the admin shows up on
+    // this map without a reload. Same pattern as the dataset version watchdog.
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, 60000);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, []);
+  // Only enabled layers cross into MapComponent — the component unmounts any
+  // Leaflet layer not in the list (and frees its parsed geometry).
+  const customLayers = useMemo(
+    () => customBoundaryFiles.filter((f) => !hiddenCustomLayers.includes(f.name)),
+    [customBoundaryFiles, hiddenCustomLayers]
+  );
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [multiSelect, setMultiSelect] = useState(false);
@@ -643,6 +705,8 @@ function MapPageInner() {
           setReportPhase('ready');
           setReportGeneration((g) => g + 1);
           setReportError(null);
+          updateInFlightRef.current = false;
+          setDataUpdatePending(false);
           return undefined;
         }
         // Fallback: main-thread engine load (same behavior as before workers).
@@ -661,6 +725,8 @@ function MapPageInner() {
               setReportProgress(null);
               setReportError(`Dataset load failed: ${result.error || 'unknown error'}. Filters are inactive until the data loads.`);
             }
+            updateInFlightRef.current = false;
+            setDataUpdatePending(false);
           });
       })
       .catch((err) => {
@@ -668,6 +734,8 @@ function MapPageInner() {
         setReportProgress(null);
         const msg = err instanceof Error ? err.message : String(err);
         setReportError(`Dataset load failed: ${msg}. Filters are inactive until the data loads.`);
+        updateInFlightRef.current = false;
+        setDataUpdatePending(false);
       });
   }, [workerAgg.workerUnavailable, workerLoadDataset]);
 
@@ -714,10 +782,44 @@ function MapPageInner() {
         if (stopped || !plan) return;
         const version = plan.version ?? 0;
         if (version === loadedDatasetVersionRef.current) return;
-        // New CMS publish detected — reload the dataset through the same path
-        // as a manual reset, so every aggregate re-runs against the new rows.
+        if (updateInFlightRef.current) return; // an earlier publish is still landing
+        // New CMS publish detected — the map blocks interaction behind a
+        // "data is updating" overlay until the fresh data is being served.
         loadedDatasetVersionRef.current = version;
-        console.log('[Kwizi Map] New dataset version detected — reloading automatically');
+        console.log('[Kwizi Map] New dataset version detected — updating automatically');
+        updateInFlightRef.current = true;
+        setDataUpdatePending(true);
+        if (isSQLEnabled() && !sqlFailedRef.current) {
+          // SQL-first mode: never re-download the ~763k-row dataset just
+          // because the manifest moved — drive the SQL mirror from here and
+          // wait for it to catch up, then ONE cheap /api/query refresh serves
+          // the new data. Bounded: if the mirror doesn't land in 3 minutes the
+          // update falls back to the worker dataset so the map still updates.
+          runSqlSync().catch(() => {});
+          const startedAt = Date.now();
+          const pollMirror = async () => {
+            while (!stopped && Date.now() - startedAt < 180000) {
+              await new Promise((r) => setTimeout(r, 10000));
+              if (stopped) return;
+              const st = await readSqlSyncState().catch(() => null);
+              if (stopped) return;
+              if (st?.done && st.version === version) {
+                setSqlSyncReady(true);
+                setSqlFailed(false);
+                updateInFlightRef.current = false;
+                setDataUpdatePending(false);
+                loadFullData({ force: true }); // SQL fast path + dropdown refresh
+                return;
+              }
+            }
+            if (stopped) return;
+            updateInFlightRef.current = false;
+            setDataUpdatePending(false);
+            loadFullData({ force: true }); // mirror stalled — worker download still wins
+          };
+          pollMirror();
+          return;
+        }
         loadFullData({ force: true });
       } catch {
         // A failed poll (network hiccup, offline) is silently retried by the
@@ -2398,6 +2500,34 @@ function MapPageInner() {
                   Flood Hazard Areas via FEMA NFHL. Zoom in to city level for the zones to render.
                 </p>
               )}
+              {customBoundaryFiles.length > 0 && (
+                <>
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500 px-1 pt-1">
+                    Uploaded boundaries
+                  </p>
+                  {customBoundaryFiles.map((f) => {
+                    const enabled = !hiddenCustomLayers.includes(f.name);
+                    return (
+                      <button
+                        key={f.name}
+                        onClick={() =>
+                          setHiddenCustomLayers((prev) =>
+                            enabled ? [...prev, f.name] : prev.filter((n) => n !== f.name)
+                          )
+                        }
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-all ${
+                          enabled
+                            ? 'bg-white/15 border-white/20 text-white'
+                            : 'bg-black/40 border-white/[0.06] text-gray-400 hover:bg-white/10'
+                        }`}
+                      >
+                        <Layers className="w-4 h-4 text-cyan-400 shrink-0" />
+                        <span className="text-sm font-semibold truncate">{f.name.replace(/\.geojson$/i, '')}</span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
             </div>
           </FilterSection>
 
@@ -2513,6 +2643,7 @@ function MapPageInner() {
                     showSales={layerSales}
                     showRentals={layerRentals}
                     showFlood={layerFlood}
+                    customLayers={customLayers}
                     metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
                     metric={metric}
                     fillOpacity={fillOpacity}
@@ -2522,6 +2653,7 @@ function MapPageInner() {
                     reportGenerated={reportGenerated}
                     isReportLoading={reportPhase === 'loading' && dataLoadKind === 'report'}
                     isDataLoading={reportPhase === 'loading' && dataLoadKind === 'data'}
+                    isDataUpdating={dataUpdatePending}
                     focusSelectionTick={searchFocusTick}
                   />
                 </div>
