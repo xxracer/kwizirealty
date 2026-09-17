@@ -387,6 +387,10 @@ function MapPageInner() {
   // the client uploads and the polygons appear; the toggle only hides them.
   const [customBoundaryFiles, setCustomBoundaryFiles] = useState<{ name: string; url: string }[]>([]);
   const [hiddenCustomLayers, setHiddenCustomLayers] = useState<string[]>([]);
+  // Max uploadedAt across ALL boundary files (fixed names + custom uploads):
+  // any new upload or deletion bumps it, and MapComponent re-probes its fixed
+  // boundary layer when the prop changes.
+  const [boundaryVersion, setBoundaryVersion] = useState<number | undefined>(undefined);
   useEffect(() => {
     let stopped = false;
     let checking = false;
@@ -401,6 +405,10 @@ function MapPageInner() {
             .filter((f) => f.storageUrl && !KNOWN_BOUNDARY_FILE_NAMES.has(f.name))
             .map((f) => ({ name: f.name, url: f.storageUrl as string }))
         );
+        const times = files
+          .map((f) => (typeof f.uploadedAt === 'number' ? f.uploadedAt : Date.parse(f.uploadedAt as unknown as string)))
+          .filter((t) => isFinite(t));
+        setBoundaryVersion(times.length ? Math.max(...times) : 0);
       } catch {
         /* best-effort — custom layers are optional overlays */
       }
@@ -2644,6 +2652,7 @@ function MapPageInner() {
                     showRentals={layerRentals}
                     showFlood={layerFlood}
                     customLayers={customLayers}
+                    boundaryVersion={boundaryVersion}
                     metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
                     metric={metric}
                     fillOpacity={fillOpacity}

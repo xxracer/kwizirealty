@@ -18,6 +18,7 @@ import {
   diffAgainstExisting,
   getFeatureName,
   mergeFeaturesReplacing,
+  type GeoJsonFeature,
   type GeoJsonFeatureCollection,
 } from '@/lib/geojsonUpload';
 import { AdminAds } from '@/components/admin/AdminAds';
@@ -308,6 +309,29 @@ function formatBytes(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Oversized boundary uploads are auto-simplified in the browser before they
+// are staged: a 60MB+ FeatureCollection exhausts the tab during the later
+// stringify/merge/gzip passes and the upload never reaches Firebase. The
+// tolerance matches scripts/simplify-boundaries.js (~110 m at Houston's
+// latitude) — invisible at map zoom levels, and every feature is kept.
+const AUTO_SIMPLIFY_MIN_CHARS = 25_000_000;
+const AUTO_SIMPLIFY_TOLERANCE = 0.001;
+
+function countBoundaryVertices(geometry: { type: string; coordinates: any } | null | undefined): number {
+  if (!geometry || !Array.isArray(geometry.coordinates)) return 0;
+  const coords = geometry.coordinates;
+  if (geometry.type === 'Polygon') {
+    return (coords as number[][][]).reduce((sum, ring) => sum + (ring?.length ?? 0), 0);
+  }
+  if (geometry.type === 'MultiPolygon') {
+    return (coords as number[][][][]).reduce(
+      (sum, poly) => sum + (poly ?? []).reduce((s, ring) => s + (ring?.length ?? 0), 0),
+      0
+    );
+  }
+  return 0;
 }
 
 function timeAgo(ts: number | null | undefined): string {
@@ -819,6 +843,10 @@ function AdminPageInner() {
           let stagedGeo: GeoJsonFeatureCollection | null = null;
           let csvSkipped: { row: number; reason: string }[] = [];
           let featureCount = 0;
+          // Set when the file was auto-simplified: the already-stringified
+          // (much smaller) JSON, so the record does not re-stringify the
+          // full-resolution geometry.
+          let rawJsonOverride: string | null = null;
 
           if (isCsv) {
             const text = await file.text();
@@ -843,6 +871,44 @@ function AdminPageInner() {
             }
             stagedGeo = parsed as GeoJsonFeatureCollection;
             featureCount = stagedGeo.features.length;
+
+            // Very large boundary files (60MB+) blow through the tab's memory
+            // during staging (raw text + parsed object + stringified copy) and
+            // the upload never lands. Auto-simplify them in place with the same
+            // tolerance as scripts/simplify-boundaries.js so the polygons look
+            // identical at map zoom levels. The pre-stringified content is kept
+            // so the record below does not stringify the huge object twice.
+            if (text.length > AUTO_SIMPLIFY_MIN_CHARS) {
+              try {
+                const { simplify } = await import('@turf/turf');
+                let verticesBefore = 0;
+                let verticesAfter = 0;
+                const simplifiedFeatures: GeoJsonFeature[] = [];
+                for (const feat of stagedGeo.features) {
+                  verticesBefore += countBoundaryVertices(feat?.geometry);
+                  try {
+                    const simplified = simplify(feat as any, {
+                      tolerance: AUTO_SIMPLIFY_TOLERANCE,
+                      highQuality: true,
+                      mutate: false,
+                    }) as GeoJsonFeature;
+                    verticesAfter += countBoundaryVertices(simplified?.geometry);
+                    simplifiedFeatures.push(simplified);
+                  } catch {
+                    // Degenerate geometry: keep the original feature untouched.
+                    simplifiedFeatures.push(feat);
+                  }
+                }
+                stagedGeo = { type: 'FeatureCollection', features: simplifiedFeatures };
+                rawJsonOverride = JSON.stringify(stagedGeo);
+                setToast({
+                  type: 'success',
+                  message: `${file.name} is large (${formatBytes(text.length)}) and was auto-simplified before upload — ${verticesBefore.toLocaleString()} → ${verticesAfter.toLocaleString()} vertices. Shapes are unchanged at map zoom levels.`,
+                });
+              } catch (simplifyErr) {
+                console.error('Auto-simplify failed; uploading the original geometry', simplifyErr);
+              }
+            }
           }
 
           // For Area Metrics we compare against all existing boundary files
@@ -877,7 +943,6 @@ function AdminPageInner() {
           const record: CMSFileRecord = {
             id,
             name: file.name,
-            size: file.size,
             // Always 'boundary': this is what the map's boundary loader reads,
             // and saveFile marks the CMS as boundary-authoritative on save.
             category: 'boundary',
@@ -885,7 +950,11 @@ function AdminPageInner() {
             headers: [],
             uploadedAt: Date.now(),
             source: 'upload',
-            rawContent: JSON.stringify(stagedGeo),
+            // When the file was auto-simplified, report the simplified
+            // content's size so the admin list reflects what is actually
+            // stored, not the original oversized file.
+            size: rawJsonOverride ? rawJsonOverride.length : file.size,
+            rawContent: rawJsonOverride ?? JSON.stringify(stagedGeo),
           };
 
           newStaged.push({

@@ -237,6 +237,11 @@ interface MapComponentProps {
    *  polygons on top of the metric layer — the parent passes only the ENABLED
    *  ones, so toggling off fully unmounts the Leaflet layer. */
   customLayers?: { name: string; url: string }[];
+  /** Latest boundary upload timestamp in the CMS (max `uploadedAt` over all
+   *  boundary-category files, from the parent's 60s poll). When it changes
+   *  while the map is open, the fixed boundary layer re-probes and hot-swaps
+   *  onto the newly uploaded polygons without a page reload. */
+  boundaryVersion?: number;
 }
 
 export default function MapComponent({
@@ -266,6 +271,7 @@ export default function MapComponent({
   pointsBounds,
   metric,
   customLayers,
+  boundaryVersion,
 }: MapComponentProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -964,6 +970,22 @@ export default function MapComponent({
     return { newer: cmsAt > localAt, deleted: false };
   };
 
+  // Fetch a boundary FeatureCollection from the CMS storage URL and swap it
+  // in. Shared by the CMS-first path and the hot-swap after a local render.
+  const fetchAndApplyCmsBoundary = async (key: BoundaryKey) => {
+    const fileName = BOUNDARY_SOURCES[key];
+    const allBoundaryFiles = await cmsStore.listFilesMetadataByCategory('boundary');
+    const fileRecord = allBoundaryFiles.find((f) => f.name === fileName);
+    if (!fileRecord || !fileRecord.storageUrl) {
+      throw new Error(`Boundary file ${fileName} not found in Firebase CMS`);
+    }
+    // CMS geojson uploads may be gzipped (cmsStore.saveFile) — fetchJsonAutoGz
+    // sniffs the payload, so raw (legacy) and gzipped objects both work.
+    const data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(fileRecord.storageUrl);
+    boundaryCacheRef.current[key] = data;
+    setGeoJsonData(data);
+  };
+
   const loadBoundary = async (key: BoundaryKey) => {
     setBoundaryLoading(true);
     setBoundarySwitching(true);
@@ -979,19 +1001,27 @@ export default function MapComponent({
     // Start the local fetch IMMEDIATELY and probe CMS freshness in parallel —
     // the freshness probe must never serialize in front of the local load
     // (a slow or hanging Firestore read would block the GeoJSON on every
-    // boundary switch). The probe is capped at 4s: if it doesn't answer,
-    // the local copy wins.
+    // boundary switch). The race is capped at 4s so the local copy still
+    // paints fast, but the probe promise is KEPT: when it lands later it
+    // hot-swaps the map onto the CMS copy, so a Firestore cold start (which
+    // routinely exceeds 4s on a fresh page load) can never strand the whole
+    // session on a stale bundled copy.
     const localDataP = engine
       .fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${key}.geojson.gz`)
       .catch(() => null);
 
+    const probeP = probeCmsBoundary(key).catch(() => ({ newer: false, deleted: false }));
     let probe: { newer: boolean; deleted: boolean } = { newer: false, deleted: false };
+    let probeTimedOut = false;
     try {
       probe = await Promise.race([
-        probeCmsBoundary(key),
-        new Promise<{ newer: boolean; deleted: boolean }>((resolve) =>
-          setTimeout(() => resolve(probe), 4000)
-        ),
+        probeP,
+        new Promise<{ newer: boolean; deleted: boolean }>((resolve) => {
+          setTimeout(() => {
+            probeTimedOut = true;
+            resolve(probe);
+          }, 4000);
+        }),
       ]);
     } catch {
       // Freshness check is best-effort — keep the local fast path on any error.
@@ -1017,24 +1047,39 @@ export default function MapComponent({
         boundaryCacheRef.current[key] = data;
         setGeoJsonData(data);
         setBoundaryLoading(false);
+        // The race may have timed out while the probe was still in flight —
+        // honor its final verdict so a just-published upload is never hidden
+        // behind a timeout: the CMS copy (or its deletion) replaces what the
+        // local bundle just painted.
+        if (probeTimedOut) {
+          const verdict = await probeP;
+          if (verdict.deleted) {
+            for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
+              delete boundaryCacheRef.current[k];
+            }
+            setGeoJsonData(null);
+            return;
+          }
+          if (verdict.newer) {
+            setBoundaryLoading(true);
+            try {
+              await fetchAndApplyCmsBoundary(key);
+            } catch (err) {
+              console.error('[Kwizi Map] CMS hot-swap failed for', key, err);
+            } finally {
+              setBoundaryLoading(false);
+            }
+          }
+        }
         return;
       }
       console.warn(`[Kwizi Map] local GeoJSON missing for ${key}, falling back to CMS`);
     }
 
-    // Fallback to Firebase CMS storage URL.
+    // CMS-first path: the probe answered and the CMS copy is newer (or no
+    // local copy exists at all).
     try {
-      const fileName = BOUNDARY_SOURCES[key];
-      const allBoundaryFiles = await cmsStore.listFilesMetadataByCategory('boundary');
-      const fileRecord = allBoundaryFiles.find((f) => f.name === fileName);
-      if (!fileRecord || !fileRecord.storageUrl) {
-        throw new Error(`Boundary file ${fileName} not found in Firebase CMS`);
-      }
-      // CMS geojson uploads may be gzipped (cmsStore.saveFile) — fetchJsonAutoGz
-      // sniffs the payload, so raw (legacy) and gzipped objects both work.
-      const data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(fileRecord.storageUrl);
-      boundaryCacheRef.current[key] = data;
-      setGeoJsonData(data);
+      await fetchAndApplyCmsBoundary(key);
     } catch (err) {
       console.error('[Kwizi Map] failed to load GeoJSON for', key, err);
       setGeoJsonData(null);
@@ -1047,6 +1092,24 @@ export default function MapComponent({
     loadBoundary(boundary);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boundary]);
+
+  // Live boundary refresh: when the parent's poll sees a NEW boundary upload
+  // (or deletion) in the CMS while the map is open, drop the per-session
+  // freshness state and the polygon cache so the fixed layer re-probes and
+  // renders the uploaded (or removed) geometry without a page reload.
+  const lastBoundaryVersionRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (boundaryVersion === undefined) return;
+    const previous = lastBoundaryVersionRef.current;
+    lastBoundaryVersionRef.current = boundaryVersion;
+    if (previous === null || previous === boundaryVersion) return;
+    boundaryFreshnessRef.current = null;
+    for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
+      delete boundaryCacheRef.current[k];
+    }
+    loadBoundary(boundary);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boundaryVersion]);
 
   const areaLayerJustBuiltRef = useRef(false);
 
