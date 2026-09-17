@@ -215,7 +215,28 @@ export const cmsStore = {
       rowCount: record.category === 'boundary' ? 0 : rows.length,
     };
 
-    await setDoc(doc(db, FILES_STORE, record.id), metadata);
+    // The metadata write is the step that makes an upload "exist". The object
+    // is already in Storage at this point, so a transient Firestore failure
+    // here would leave the NEW bytes online under the OLD metadata doc —
+    // exactly the "uploaded but shows old size/date" failure. Retry a few
+    // times and always rethrow so the admin surfaces the error instead of
+    // silently keeping the stale doc.
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await setDoc(doc(db, FILES_STORE, record.id), metadata);
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
+    }
+    if (lastErr) {
+      throw new Error(
+        `The file was uploaded, but its metadata could not be saved after 3 attempts. Re-upload the file. (${String(lastErr)})`
+      );
+    }
     // From the first boundary upload on, the CMS decides which polygons exist.
     if (record.category === 'boundary') await this.markBoundaryAuthority();
     emit();
@@ -689,6 +710,38 @@ export const cmsStore = {
 
     const blob = new Blob([JSON.stringify(merged)], { type: 'application/geo+json' });
     await uploadBytes(storageRef, blob, { contentType: 'application/geo+json' });
+    const downloadUrl = await getDownloadURL(storageRef);
+
+    // CRITICAL: this overwrites the Storage object, so the metadata doc MUST
+    // move with it — a merge that leaves the old `uploadedAt`/`size` in
+    // Firestore makes every consumer (map freshness probe, admin list) treat
+    // the upload as the previous version, i.e. "new file, old metadata".
+    // Find the existing doc for this file name (either category — legacy
+    // custom-area docs were recategorized) and refresh it, creating one if
+    // the file has no metadata yet.
+    const existingSnap = await getDocs(
+      fsQuery(collection(db, FILES_STORE), where('name', '==', fileName))
+    );
+    const existingDoc = existingSnap.docs[0];
+    const baseMetadata = (existingDoc?.data() || {}) as Partial<CMSFileRecord>;
+    const metadataDoc = {
+      ...baseMetadata,
+      id: existingDoc?.id ?? storagePath.replace(/\//g, '__'),
+      name: fileName,
+      size: blob.size,
+      category: 'boundary' as CMSFileCategory,
+      rows: [],
+      headers: [],
+      uploadedAt: Date.now(),
+      source: 'upload' as const,
+      storageUrl: downloadUrl,
+      storagePath,
+      rowCount: 0,
+    };
+    await setDoc(doc(db, FILES_STORE, metadataDoc.id), metadataDoc);
+    // The object just changed shape; the CMS decides which polygons exist.
+    await this.markBoundaryAuthority();
+    emit();
 
     return merged;
   }

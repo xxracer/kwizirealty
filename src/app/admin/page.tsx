@@ -1156,6 +1156,10 @@ function AdminPageInner() {
           headers: [],
           rawContent: json,
           size: new Blob([json]).size,
+          // Stamp at CONFIRM time, not staging: this timestamp is what the
+          // map's freshness probe compares against the build, so it must
+          // reflect the moment the new bytes actually landed.
+          uploadedAt: Date.now(),
           rowCount: 0,
         };
 
@@ -1218,6 +1222,9 @@ function AdminPageInner() {
       rows: rowsToSave,
       rawContent,
       size: new Blob([rawContent]).size,
+      // Stamp at CONFIRM time, not staging: the map's freshness probe compares
+      // this timestamp against the build's versions.json.
+      uploadedAt: Date.now(),
       rowCount: staged.record.category === 'boundary' || staged.record.category === 'custom-area' ? 0 : rowsToSave.length,
     };
 
