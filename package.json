@@ -5,6 +5,9 @@
   "engines": {
     "node": "22.x"
   },
+  "overrides": {
+    "jose": "4.15.9"
+  },
   "scripts": {
     "dev": "node scripts/build-worker.js && next dev",
     "build": "next build",
