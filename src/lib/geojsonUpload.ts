@@ -43,6 +43,57 @@ export function normalizeFeatureName(name: string): string {
 }
 
 /**
+ * Normalize a GeoJSON FeatureCollection to WGS84 lon/lat (EPSG:4326) — the only
+ * CRS Leaflet can draw. Some GIS exports (e.g. ArcGIS "WGS 1984 Web Mercator")
+ * ship polygon coordinates in meters; any coordinate outside the lon/lat range
+ * is the giveaway. Projected data is converted in place with the inverse
+ * spherical Mercator transform; already-WGS84 data is returned untouched.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function normalizeGeoJsonCrs<T extends { features: any[] }>(collection: T): T {
+  const features = collection?.features;
+  if (!features?.length) return collection;
+
+  const visitCoords = (coords: unknown, fn: (pt: number[]) => void): void => {
+    if (!Array.isArray(coords) || coords.length === 0) return;
+    if (typeof coords[0] === 'number') {
+      fn(coords as number[]);
+      return;
+    }
+    for (const c of coords as unknown[]) visitCoords(c, fn);
+  };
+
+  // Detect: a single out-of-range coordinate marks the whole file as projected
+  // (a CRS applies to every feature equally — never mixed within one file).
+  let projected = false;
+  for (const feature of features) {
+    const coords = feature?.geometry?.coordinates;
+    if (!coords) continue;
+    visitCoords(coords, (pt) => {
+      if (Math.abs(pt[0]) > 180 || Math.abs(pt[1]) > 90) projected = true;
+    });
+    if (projected) break;
+  }
+  if (!projected) return collection;
+
+  // Inverse spherical Web Mercator (EPSG:3857 → EPSG:4326), the standard
+  // projected export from ArcGIS/QGIS. Lossless for this projection.
+  const R = 6378137;
+  const toDeg = 180 / Math.PI;
+  for (const feature of features) {
+    const coords = feature?.geometry?.coordinates;
+    if (!coords) continue;
+    visitCoords(coords, (pt) => {
+      const x = pt[0];
+      const y = pt[1];
+      pt[0] = (x / R) * toDeg;
+      pt[1] = (Math.atan(Math.exp(y / R)) * 2 - Math.PI / 2) * toDeg;
+    });
+  }
+  return collection;
+}
+
+/**
  * Parse a CSV string into a GeoJSON FeatureCollection of Point features.
  *
  * Expected columns (case-insensitive): `name` (or `area`), `lat`, `lng`.

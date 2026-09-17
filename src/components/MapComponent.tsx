@@ -11,6 +11,7 @@ import { MousePointer2, Square, Trash2, BarChart3, Loader2, RotateCcw } from 'lu
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
+import { normalizeGeoJsonCrs } from '@/lib/geojsonUpload';
 
 // navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
 // with ≤4 GB get lean constants everywhere: fewer point markers, and the
@@ -981,7 +982,9 @@ export default function MapComponent({
     }
     // CMS geojson uploads may be gzipped (cmsStore.saveFile) — fetchJsonAutoGz
     // sniffs the payload, so raw (legacy) and gzipped objects both work.
-    const data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(fileRecord.storageUrl);
+    // normalizeGeoJsonCrs converts projected exports (e.g. Web Mercator meters)
+    // to WGS84 lon/lat — the only CRS Leaflet can draw.
+    const data = normalizeGeoJsonCrs(await fetchJsonAutoGz<GeoJSON.FeatureCollection>(fileRecord.storageUrl));
     boundaryCacheRef.current[key] = data;
     setGeoJsonData(data);
   };
@@ -1041,6 +1044,7 @@ export default function MapComponent({
     if (!probe.newer) {
       const data = await localDataP;
       if (data) {
+        normalizeGeoJsonCrs(data);
         for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
           if (k !== key) delete boundaryCacheRef.current[k];
         }
@@ -1599,6 +1603,7 @@ export default function MapComponent({
           if (!data) {
             data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(entry.url);
             if (disposed) return;
+            normalizeGeoJsonCrs(data);
             customDataCacheRef.current.set(entry.name, data);
           }
           const gj = L.geoJSON(data as unknown as GeoJSON.GeoJsonObject, {

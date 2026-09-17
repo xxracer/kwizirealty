@@ -18,6 +18,7 @@ import {
   diffAgainstExisting,
   getFeatureName,
   mergeFeaturesReplacing,
+  normalizeGeoJsonCrs,
   type GeoJsonFeature,
   type GeoJsonFeatureCollection,
 } from '@/lib/geojsonUpload';
@@ -871,6 +872,11 @@ function AdminPageInner() {
             }
             stagedGeo = parsed as GeoJsonFeatureCollection;
             featureCount = stagedGeo.features.length;
+
+            // Projected exports (e.g. ArcGIS Web Mercator, coordinates in
+            // meters) are converted to WGS84 lon/lat here, so the file stored
+            // in Firebase is always directly renderable by Leaflet.
+            normalizeGeoJsonCrs(stagedGeo);
 
             // Very large boundary files (60MB+) blow through the tab's memory
             // during staging (raw text + parsed object + stringified copy) and
