@@ -843,6 +843,48 @@ function MapPageInner() {
     };
   }, [loadFullData]);
 
+  // Deployment watchdog — the browser must never keep serving an old deploy
+  // after the user publishes a new one (they will NOT clear their cache).
+  // Vercel routes every /api request to the CURRENT production deployment, so
+  // an old page can detect a newer one and reload itself ONCE. NEXT_PUBLIC_*
+  // is inlined at build time, so OWN_DEPLOYMENT_ID is the deployment this
+  // exact JS bundle belongs to. Dev builds never reload.
+  const OWN_DEPLOYMENT_ID = process.env.NEXT_PUBLIC_VERCEL_DEPLOYMENT_ID ?? 'local';
+  useEffect(() => {
+    if (OWN_DEPLOYMENT_ID === 'local') return; // local dev — nothing to watch
+    let stopped = false;
+    const check = async () => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetch('/api/build-id', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = (await res.json()) as { buildId?: string };
+        const latest = data?.buildId;
+        if (typeof latest !== 'string' || latest === 'local' || latest === OWN_DEPLOYMENT_ID) return;
+        // Reload once per new deployment — sessionStorage guards against a
+        // reload loop if the endpoint ever disagrees with the running bundle.
+        const key = 'kwizi:reloaded-deployment';
+        if (sessionStorage.getItem(key) === latest) return;
+        sessionStorage.setItem(key, latest);
+        window.location.reload();
+      } catch {
+        /* network hiccup — the next tick retries */
+      }
+    };
+    check();
+    const id = setInterval(check, 60000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') check();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // The full filter pipeline (filterProperties + all aggregations + map
   // rebuilds) processes ~763k rows synchronously. It reads APPLIED filters —
   // draft edits wait for the Apply Filters button. useDeferredValue still
@@ -874,7 +916,18 @@ function MapPageInner() {
         const resolved = resolveRatingFilters(engine, deferredAppliedFilters);
         const { startTs, endTs } = periodToWindow(deferredAppliedFilters.period, engine.getReferenceDate());
         const token = await user?.getIdToken();
-        if (!token) return; // not signed in — fall back to the client engine
+        if (!token) {
+          // Not signed in — /api/query requires auth. Flip sqlFailed so the
+          // next loadFullData takes the worker/engine path: returning silently
+          // here left sqlAgg null forever, and the map stayed on the stale
+          // baked static snapshot (resurrecting deleted data) for signed-out
+          // visitors.
+          if (!cancelled) {
+            setSqlFailed(true);
+            setSqlAgg(null);
+          }
+          return;
+        }
         const agg = await fetchSqlAggregates(
           deferredAppliedFilters,
           resolved,
@@ -992,11 +1045,18 @@ function MapPageInner() {
     return engine.getMapValues(filteredData, boundary, metric);
   }, [useSql, useWorker, workerAgg.result, sqlAgg, cmsOverrides, filteredData, boundary, metric, reportGeneration]);
 
+  // A CONCLUDED load must override the baked static snapshot — even when it
+  // concluded EMPTY (every dataset CSV was deleted in the CMS). Gating on
+  // "result !== null" / "filteredData.length > 0" kept the stale snapshot on
+  // screen forever with an empty dataset, resurrecting deleted sales data.
+  // Worker mode keeps the result gate ONLY for non-empty datasets (the first
+  // aggregate lands moments after the load); an empty dataset (datasetCount 0)
+  // is concluded the instant the load resolves.
   const dataReady = useSql
     ? !!sqlAgg
     : useWorker
-    ? reportPhase === 'ready' && workerAgg.result !== null
-    : reportPhase === 'ready' && filteredData.length > 0;
+    ? reportPhase === 'ready' && (workerAgg.result !== null || workerAgg.datasetCount === 0)
+    : reportPhase === 'ready';
 
   // Use the lightweight pre-computed snapshot for instant map coloring while
   // the full CSV dataset is still loading in the background.
