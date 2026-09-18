@@ -2,16 +2,17 @@
  * aggregateWorker — the map page's data engine.
  *
  * This worker OWNS the ~763k property rows. It materializes them (chunk gzip →
- * JSON.parse → IndexedDB cache), and answers aggregate requests in one or a
+ * JSON.parse, with a version-keyed IndexedDB cache that self-invalidates on
+ * every CMS publish), and answers aggregate requests in one or a
  * few passes over the rows — all off the main thread, which keeps the UI
  * responsive while filters/report panels recompute.
  *
  * NOTHING here may import engine.ts / cmsStore.ts / firebase — those modules
  * pull the Firebase SDK into the worker bundle. Only engineCore (pure math +
- * types) and csvCache (IndexedDB + crypto.subtle, both worker-safe) are allowed.
+ * types) and csvCache (the in-memory version digest, worker-safe) are allowed.
  */
 import * as core from '../engineCore';
-import { readCache, writeCache } from '../csvCache';
+import { readDatasetCache, writeDatasetCache } from '../csvCache';
 import type {
   AggregateResult,
   DataSourcePlan,
@@ -62,7 +63,7 @@ function chunkUrlCandidates(plan: DataSourcePlan, path: string): string[] {
 async function fetchChunkBytes(candidates: string[]): Promise<ArrayBuffer | null> {
   for (const url of candidates) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { cache: 'no-store' });
       if (res.ok) return await res.arrayBuffer();
     } catch {
       // try the next candidate
@@ -126,27 +127,26 @@ async function loadDataset(
 ) {
   teaScores = schoolScores;
 
-  // 1. IndexedDB cache first (same key scheme as the engine).
-  if (cacheVersion) {
-    try {
-      const cacheResult = await readCache<core.PropertyData[]>(cacheVersion);
-      const cached = cacheResult.data;
-      if (cached && cached.length > 0) {
-        rows = cached;
-        core.internStrings(rows);
-        loadedCacheVersion = cacheVersion;
-        datasetReady = true;
-        log(`[Kwizi Worker] Restored ${cached.length.toLocaleString()} rows from IndexedDB cache`);
-        const result: { type: 'datasetReady'; count: number; uniqueValues: DatasetUniqueValues } = {
-          type: 'datasetReady',
-          count: rows.length,
-          uniqueValues: uniqueValuesFrom(rows),
-        };
-        post(result);
-        return;
-      }
-    } catch {
-      // fall through to the network path
+  // 1. Version-keyed cache. The manifest (always fetched no-store) states the
+  // dataset version; an entry is only used when its version matches exactly,
+  // so a newer CMS publish is ALWAYS a miss → fresh download. The row count
+  // is validated against the manifest as a second guard.
+  const datasetVersion = plan.version;
+  if (datasetVersion) {
+    const cached = await readDatasetCache<core.PropertyData[]>(datasetVersion);
+    if (cached && cached.length > 0 && (plan.totalRows === 0 || cached.length === plan.totalRows)) {
+      rows = cached;
+      core.internStrings(rows);
+      loadedCacheVersion = cacheVersion;
+      datasetReady = true;
+      log(`[Kwizi Worker] Restored ${cached.length.toLocaleString()} rows from version cache (v${datasetVersion})`);
+      const result: { type: 'datasetReady'; count: number; uniqueValues: DatasetUniqueValues } = {
+        type: 'datasetReady',
+        count: rows.length,
+        uniqueValues: uniqueValuesFrom(rows),
+      };
+      post(result);
+      return;
     }
   }
 
@@ -218,12 +218,11 @@ async function loadDataset(
   loadedCacheVersion = cacheVersion;
   log(`[Kwizi Worker] Loaded ${rows.length.toLocaleString()} rows from ${chunkPaths.length} chunks`);
 
-  if (cacheVersion) {
-    try {
-      await writeCache(cacheVersion, rows);
-    } catch {
-      // cache write is best-effort
-    }
+  // Cache only a COMPLETE dataset (row count matching the manifest): a device
+  // that memory-capped the load must never store a partial copy under the
+  // dataset version, or the read-side validation would keep failing.
+  if (datasetVersion && (plan.totalRows === 0 || rows.length === plan.totalRows)) {
+    await writeDatasetCache(datasetVersion, rows);
   }
 
   const ready: { type: 'datasetReady'; count: number; uniqueValues: DatasetUniqueValues } = {

@@ -13,9 +13,14 @@ import type { RealEstateEngine } from '@/lib/engine';
 import type { DatasetUniqueValues } from '@/lib/engineWorker/protocol';
 import { DEFAULT_FILTERS } from '@/lib/engine';
 
-/** Gate: set NEXT_PUBLIC_SQL_ENABLED=true once dataconnect is deployed. */
+/**
+ * SQL is the ONLY data path for the map (all CSV data lives in Data Connect /
+ * Postgres; the browser only downloads GeoJSON). The env flag survives purely
+ * as an emergency kill-switch for local dev: set NEXT_PUBLIC_SQL_ENABLED=false
+ * to fall back to the legacy worker path.
+ */
 export function isSQLEnabled(): boolean {
-  return process.env.NEXT_PUBLIC_SQL_ENABLED === 'true';
+  return process.env.NEXT_PUBLIC_SQL_ENABLED !== 'false';
 }
 
 // DEFAULT_FILTERS is a live object; snapshot it once for the comparison below.
@@ -127,12 +132,15 @@ export function periodToWindow(
  * the caller then keeps whatever it had (or the engine fallback).
  */
 export async function fetchSqlDistinct(
-  idToken: string
+  idToken?: string
 ): Promise<{ uniqueValues: DatasetUniqueValues; totalRows: number } | null> {
   try {
+    // The token is optional — the map serves signed-out visitors too.
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (idToken) headers.Authorization = `Bearer ${idToken}`;
     const res = await fetch('/api/sql/distinct', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+      headers,
       body: JSON.stringify({}),
     });
     if (!res.ok) return null;
@@ -154,16 +162,26 @@ export async function fetchSqlAggregates(
   selectedIds: string[],
   startTs: number | null,
   endTs: number | null,
-  idToken: string
+  idToken?: string,
+  propertyOverrides?: { id: string; mlsNumber: string; address: string; zip: string; fields: Record<string, string>; mode?: 'edit' | 'create' }[]
 ): Promise<SqlAggregates | null> {
   try {
+    // The token is optional — the map serves signed-out visitors too.
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (idToken) headers.Authorization = `Bearer ${idToken}`;
     const res = await fetch('/api/query', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({ filters, resolved, boundary, metric, selectedIds, startTs, endTs }),
+      headers,
+      body: JSON.stringify({
+        filters,
+        resolved,
+        boundary,
+        metric,
+        selectedIds,
+        startTs,
+        endTs,
+        propertyOverrides,
+      }),
     });
     if (!res.ok) return null;
     const data = await res.json();

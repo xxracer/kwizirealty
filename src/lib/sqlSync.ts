@@ -20,11 +20,15 @@ export interface SqlSyncState {
 }
 
 async function callSync(): Promise<{ done: boolean; version: number } | null> {
+  // The token is optional: signed-out visitors on the public map must also be
+  // able to drive the mirror while they wait for it (the route is protected
+  // by same-origin + rate limiting and only ingests from Storage).
   const token = await auth.currentUser?.getIdToken();
-  if (!token) return null;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch('/api/sql/sync', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers,
     body: JSON.stringify({}),
   });
   if (!res.ok) return null;

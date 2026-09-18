@@ -8,10 +8,10 @@ const CONSENT_KEY = 'kwizi-cookie-consent';
 
 /**
  * First-visit consent/notice banner. The app stores no tracking or marketing
- * cookies — it only uses browser-local storage (localStorage / IndexedDB) to
- * cache the market dataset so repeat visits load faster, which qualifies as
- * strictly necessary technical storage. We still surface this notice so
- * visitors know data is saved on their device, per GDPR/ePrivacy best practice.
+ * cookies and no market data on the device — market data is always fetched
+ * fresh from Firebase on every visit. Only tiny UI preferences live in
+ * localStorage (banner dismissal, tour progress). We still surface this
+ * notice per GDPR/ePrivacy best practice.
  */
 export default function CookieConsent() {
   const [visible, setVisible] = useState(false);
@@ -32,9 +32,10 @@ export default function CookieConsent() {
         <Cookie className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
         <div className="flex-1">
           <p className="text-xs text-gray-300 leading-relaxed">
-            We store a copy of the market data on your device (browser storage) so
-            the map loads faster the next time you visit. No tracking or
-            advertising cookies are used. See our{' '}
+            Market data is never stored on your device — the map always loads the
+            latest data directly from our servers. Only small interface
+            preferences are kept locally, and no tracking or advertising cookies
+            are used. See our{' '}
             <Link href="/privacy" className="underline hover:text-white">
               Privacy Policy
             </Link>

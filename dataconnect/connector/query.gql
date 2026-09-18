@@ -185,6 +185,23 @@ mutation clearProperties @auth(level: NO_ACCESS) {
   _execute(sql: "DELETE FROM properties")
 }
 
+# Row-level search for the map's search box (address / zip / MLS / city).
+# $q arrives pre-escaped with % wildcards; escape % and _ in the route.
+query searchProperties($q: String!, $limit: Int!) @auth(level: USER) {
+  results: _select(
+    sql: """
+    SELECT * FROM properties
+    WHERE mls_number ILIKE $1
+       OR address ILIKE $1
+       OR zip ILIKE $1
+       OR city ILIKE $1
+    ORDER BY address
+    LIMIT $2
+    """,
+    params: [$q, $limit]
+  )
+}
+
 # Dropdown option lists (Property Type, City, School District, schools) in one
 # round trip. Empty strings are excluded, matching the engine's unique values.
 query distinctValues @auth(level: USER) {

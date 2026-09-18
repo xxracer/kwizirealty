@@ -22,6 +22,10 @@ import {
   type MetricKey,
   type PropertyFilters,
 } from '@/lib/engine';
+import { guardPublicRead } from '@/lib/server/requestGuard';
+import { getTeaScoreMaps } from '@/lib/server/teaScores';
+import { applyPropertyOverrides } from '@/lib/engineCore';
+import type { PropertyOverrideLite } from '@/lib/engineCore';
 
 export const runtime = 'nodejs';
 
@@ -43,6 +47,8 @@ interface QueryBody {
   /** Period window in unix ms (client computes from its engine reference date). */
   startTs: number | null;
   endTs: number | null;
+  /** CMS single-property edits applied before aggregating. */
+  propertyOverrides?: PropertyOverrideLite[];
 }
 
 function rowToProperty(row: any): PropertyData {
@@ -148,16 +154,19 @@ function buildYearBuiltData(engine: RealEstateEngine, data: PropertyData[], boun
 }
 
 export async function POST(req: Request) {
-  // 1. Auth — the map is behind RequireAuth; the token proves the caller.
+  // 1. Public read access: the map is open to signed-out visitors (the login
+  //    gate is optional), so the Firebase token is OPTIONAL now. Same-origin +
+  //    rate limiting protect the endpoint; a token, when present, is verified.
+  const blocked = guardPublicRead(req);
+  if (blocked) return blocked;
   const authHeader = req.headers.get('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  if (!token) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  try {
-    await getAdminAuth().verifyIdToken(token);
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (token) {
+    try {
+      await getAdminAuth().verifyIdToken(token);
+    } catch {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
   }
 
   let body: QueryBody;
@@ -172,11 +181,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Bad request' }, { status: 400 });
   }
 
-  // ETA metrics need the TEA score maps (browser-only) — client falls back.
-  if (ETA_METRICS.has(metric)) {
-    return NextResponse.json({ unsupported: true });
-  }
-
   const dc = getAdminDataConnect();
   const variables = buildVariables(filters, body.resolved, body.startTs, body.endTs);
 
@@ -185,9 +189,17 @@ export async function POST(req: Request) {
     const mapRes = await dc.executeQuery('filteredProperties', variables);
     const rows: any[] = (mapRes.data as any)?.properties || [];
     const props = rows.map(rowToProperty);
+    // CMS single-property edits apply before any aggregation.
+    if (body.propertyOverrides?.length) {
+      applyPropertyOverrides(props, body.propertyOverrides);
+    }
 
     const engine = new RealEstateEngine();
     engine.data = props;
+    // ETA metrics need the TEA score maps — loaded server-side (cached 10 min).
+    if (ETA_METRICS.has(metric)) {
+      engine.setTeaScores(await getTeaScoreMaps());
+    }
 
     const mapValues = engine.getMapValues(props, boundary, metric);
     const points = props.slice(0, POINT_CAP).map((d) => ({ lat: d.lat, lng: d.lng }));

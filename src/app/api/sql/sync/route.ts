@@ -24,6 +24,7 @@
 import zlib from 'zlib';
 import { NextResponse } from 'next/server';
 import { getAdminAuth, getAdminDataConnect } from '@/lib/firebaseAdmin';
+import { guardPublicRead } from '@/lib/server/requestGuard';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 
 export const runtime = 'nodejs';
@@ -125,15 +126,32 @@ function toSqlRow(row: ChunkRecord): Record<string, unknown> | null {
   };
 }
 
+export async function GET(req: Request) {
+  // Vercel Cron invokes crons with GET; the browser loop uses POST.
+  return POST(req);
+}
+
 export async function POST(req: Request) {
-  // Auth — same contract as /api/query: a valid signed-in token.
+  // Auth — a signed-in Firebase token, the CRON_SECRET (Vercel Cron keeps the
+  // mirror fresh when no one has the map open), or a same-origin public call:
+  // the map itself drives the sync while a signed-out visitor waits for it.
+  // The route only ever ingests rows from the Storage manifest (the source of
+  // truth), so public triggering cannot inject data — same-origin + rate
+  // limiting keep abuse down.
   const authHeader = req.headers.get('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  try {
-    await getAdminAuth().verifyIdToken(token);
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const cronSecret = process.env.CRON_SECRET || '';
+  if (!token || (cronSecret && token !== cronSecret)) {
+    if (token) {
+      try {
+        await getAdminAuth().verifyIdToken(token);
+      } catch {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    } else {
+      const blocked = guardPublicRead(req);
+      if (blocked) return blocked;
+    }
   }
 
   const db = getFirestore();

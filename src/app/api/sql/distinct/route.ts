@@ -8,18 +8,24 @@
  */
 import { NextResponse } from 'next/server';
 import { getAdminAuth, getAdminDataConnect } from '@/lib/firebaseAdmin';
+import { guardPublicRead } from '@/lib/server/requestGuard';
 import type { DatasetUniqueValues } from '@/lib/engineWorker/protocol';
 
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
+  // The map is open to signed-out visitors, so the token is optional —
+  // same-origin + rate limiting protect this endpoint instead.
+  const blocked = guardPublicRead(req);
+  if (blocked) return blocked;
   const authHeader = req.headers.get('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  try {
-    await getAdminAuth().verifyIdToken(token);
-  } catch {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (token) {
+    try {
+      await getAdminAuth().verifyIdToken(token);
+    } catch {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
   }
 
   try {

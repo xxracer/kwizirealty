@@ -12,30 +12,21 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: '/map',
-        headers: [
-          {
-            key: 'Link',
-            value:
-              '</cache/initial_metrics_subdivisions.json.gz>; rel=preload; as=fetch; crossorigin=anonymous, </geojson/subdivisions.geojson.gz>; rel=preload; as=fetch; crossorigin=anonymous',
-          },
-        ],
-      },
-      {
-        // Cacheable static data assets. Filenames are stable, so we can't mark
-        // them immutable — use 1 day fresh + a week of stale-while-revalidate so
-        // repeat visits hit the browser cache first (the dataset itself is also
-        // cached in IndexedDB, which makes repeat loads near-instant).
+        // Data assets are NEVER cached by the browser: these files keep stable
+        // names across builds/uploads, so any cached copy risks serving data
+        // the CMS has already deleted or replaced (the old 1-day cache +
+        // stale-while-revalidate kept deleted sales data on screen and made
+        // refreshes useless). Every visit fetches the current bytes — the
+        // versioned IDB cache provides the speed on repeat visits. NOTE: there
+        // is deliberately no <link rel=preload> for these files — preload
+        // never matches a cache:'no-store' fetch and just downloaded the file
+        // twice.
         source: '/cache/:path*',
-        headers: [
-          { key: 'Cache-Control', value: 'public, max-age=86400, stale-while-revalidate=604800' },
-        ],
+        headers: [{ key: 'Cache-Control', value: 'no-store, max-age=0' }],
       },
       {
         source: '/geojson/:path*',
-        headers: [
-          { key: 'Cache-Control', value: 'public, max-age=86400, stale-while-revalidate=604800' },
-        ],
+        headers: [{ key: 'Cache-Control', value: 'no-store, max-age=0' }],
       },
     ];
   },

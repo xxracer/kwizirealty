@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 import { cmsStore, type CMSMetricOverride, type CMSPropertyOverride } from './cmsStore';
-import { cacheVersionFor, readCache, writeCache } from './csvCache';
+import { cacheVersionFor, readDatasetCache, writeDatasetCache } from './csvCache';
 import { ref, getDownloadURL } from 'firebase/storage';
 import { storage } from './firebase';
 import * as core from './engineCore';
@@ -221,7 +221,7 @@ export class RealEstateEngine {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { signal: controller.signal });
+      const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
       clearTimeout(id);
       return res;
     } catch (err) {
@@ -667,8 +667,7 @@ export class RealEstateEngine {
       this.isLoaded = true;
 
       // Run post-load steps (overrides, school ratings) in the background.
-      // We intentionally do NOT cache selection data so it never overwrites the
-      // full-dataset IndexedDB cache with a partial subset.
+      // Selection data is never persisted anywhere.
       this.applyPostLoadSteps(
         {
           totalRowsRead: filtered.length,
@@ -678,8 +677,7 @@ export class RealEstateEngine {
           missingPrice: 0,
           uniqueZips: new Set(filtered.map((d) => d.zip)).size,
         },
-        new Set(filtered.map((d) => d.zip)),
-        ''
+        new Set(filtered.map((d) => d.zip))
       ).catch((err) => console.error('[Kwizi] Post-load steps failed for selection:', err));
 
       console.log(`[Kwizi Engine] Loaded ${filtered.length} properties for selection`);
@@ -726,12 +724,15 @@ export class RealEstateEngine {
         : (manifestPaths || []);
       const version = await cacheVersionFor(cacheVersionUrls);
 
-      // 2. Try IndexedDB cache first (avoids any network hit after first load).
-      if (!forceRefresh) {
+      // Version-keyed row cache. The manifest is always fetched no-store, so
+      // its version is trustworthy: a newer CMS publish is always a cache
+      // miss → fresh download. The row count is validated against the
+      // manifest's totalRows as a second guard.
+      const datasetVersion = chunkedCache?.version ?? 0;
+      if (!forceRefresh && datasetVersion) {
         try {
-          const cacheResult = await readCache<core.PropertyData[]>(version);
-          const cached = cacheResult.data;
-          if (cached && cached.length > 0) {
+          const cached = await readDatasetCache<core.PropertyData[]>(datasetVersion);
+          if (cached && cached.length > 0 && (chunkedCache!.totalRows === 0 || cached.length === chunkedCache!.totalRows)) {
             // An old cache may hold the full 763k rows — trimming BEFORE the
             // interning pass keeps both the peak and the steady state low.
             const trimmed = core.subsampleRows(cached, this.memoryRowCap());
@@ -739,7 +740,7 @@ export class RealEstateEngine {
             this.data = trimmed;
             this.isLoaded = true;
             this.fullDatasetLoaded = true;
-            console.log('[Kwizi Engine] Restored', cached.length, 'properties from IndexedDB cache');
+            console.log('[Kwizi Engine] Restored', cached.length, 'properties from version cache (v' + datasetVersion + ')');
             // CMS overrides (area metrics + single-property edits) must also
             // reach the map on the cached path — without this, a cache restore
             // silently dropped every CMS edit.
@@ -748,7 +749,7 @@ export class RealEstateEngine {
             return { ok: true, count: cached.length };
           }
         } catch (err) {
-          console.warn('[Kwizi] Failed to read CSV cache:', err);
+          console.warn('[Kwizi] Failed to read version cache:', err);
         }
       }
 
@@ -888,9 +889,15 @@ export class RealEstateEngine {
       // An empty published dataset counts as a completed full load, so the UI
       // shows "no data" instead of retrying the network on every mount.
       if (allItems.length > 0 || emptyPublished) this.fullDatasetLoaded = true;
+      // Version-keyed cache write — only a COMPLETE dataset (count matching
+      // the manifest) may be stored under the dataset version, so a
+      // memory-capped load can never poison the cache.
+      if (datasetVersion && allItems.length > 0 && (chunkedCache!.totalRows === 0 || allItems.length === chunkedCache!.totalRows)) {
+        writeDatasetCache(datasetVersion, allItems).catch(() => {});
+      }
       // Start post-load work in the background; the UI can render as soon as
       // the data is in memory. applyPostLoadSteps sets this.isLoaded = true.
-      this.applyPostLoadSteps(quality, zipSet, version).catch((err) =>
+      this.applyPostLoadSteps(quality, zipSet).catch((err) =>
         console.error('[Kwizi] Post-load steps failed:', err)
       );
       return { ok: this.data.length > 0 || emptyPublished, error: loadError, count: this.data.length };
@@ -902,21 +909,6 @@ export class RealEstateEngine {
       // Clear the in-flight promise so a later retry (e.g. the first load
       // failed) can start fresh instead of returning the stale result.
       this.loadingPromise = null;
-    }
-  }
-
-  private async saveCache(cacheVersion: string) {
-    try {
-      const summary = await cmsStore.summary();
-      const currentSignature = `${summary.lastUploadAt}-${summary.overrides}-${summary.propertyOverrides}`;
-      await writeCache(cacheVersion, this.data, currentSignature);
-    } catch (e) {
-      console.warn('Failed to save cache', e);
-      try {
-        await writeCache(cacheVersion, this.data);
-      } catch (e2) {
-        console.warn('Failed to save cache without signature', e2);
-      }
     }
   }
 
@@ -949,23 +941,16 @@ export class RealEstateEngine {
     }
   }
 
-  private async applyPostLoadSteps(
-    quality: core.DataQualitySummary,
-    zipSet: Set<string>,
-    cacheVersion: string
-  ) {
+  private async applyPostLoadSteps(quality: core.DataQualitySummary, zipSet: Set<string>) {
     await this.applyCmsOverrides();
 
     quality.uniqueZips = zipSet.size || new Set(this.data.map((d) => d.zip).filter(Boolean)).size;
     this.dataQuality = quality;
     console.log(`[Kwizi Engine] Loaded ${this.data.length} properties`);
 
-    // Mark ready immediately so the UI can render. Cache write and school ratings run in the background.
+    // Mark ready immediately so the UI can render. School ratings run in the background.
     this.isLoaded = true;
     this.ensureSchoolRatings().catch(() => {});
-    if (cacheVersion) {
-      this.saveCache(cacheVersion).catch(() => {});
-    }
   }
 
   private async loadSchoolRatings() {
@@ -1085,6 +1070,16 @@ export class RealEstateEngine {
       elementary: { ...this.teaScores.elementary },
       middle: { ...this.teaScores.middle },
       high: { ...this.teaScores.high },
+    };
+  }
+
+  /** Replace the TEA score maps wholesale (used by /api/query, which loads
+   *  them server-side so ETA metrics work without client rows). */
+  public setTeaScores(maps: core.TeaScoreMap): void {
+    this.teaScores = {
+      elementary: { ...maps.elementary },
+      middle: { ...maps.middle },
+      high: { ...maps.high },
     };
   }
 

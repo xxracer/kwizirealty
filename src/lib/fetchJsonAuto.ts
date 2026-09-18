@@ -8,7 +8,9 @@
  * modern browsers).
  */
 export async function fetchJsonAutoGz<T = unknown>(url: string): Promise<T> {
-  const res = await fetch(url);
+  // no-store: CMS data files have fixed names, so a cached copy could serve
+  // deleted/stale content after an upload. Firebase is read fresh every time.
+  const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
   const buf = await res.arrayBuffer();
   let text: string;

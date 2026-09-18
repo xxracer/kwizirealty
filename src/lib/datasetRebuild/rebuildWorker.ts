@@ -306,11 +306,11 @@ async function fetchCurrentManifest(): Promise<ChunkManifest | null> {
     }
     if (!url) {
       // Fall back to the locally deployed manifest for the baseline count.
-      const res = await fetch('/cache/master_cache_chunks.json');
+      const res = await fetch('/cache/master_cache_chunks.json', { cache: 'no-store' });
       if (!res.ok) return null;
       return await res.json();
     }
-    const res = await fetch(url);
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return null;
     return await res.json();
   } catch {

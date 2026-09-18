@@ -11,6 +11,7 @@ import DraggableMapWindows, { WindowSelector, useDraggableWindows } from '@/comp
 import HommieChat from '@/components/HommieChat';
 import { RequireAuth } from '@/components/RequireAuth';
 import { useAuth } from '@/lib/authContext';
+import { purgeDatasetCache, readGeoCache, writeGeoCache } from '@/lib/csvCache';
 import {
   PropertyData,
   BoundaryKey,
@@ -385,7 +386,7 @@ function MapPageInner() {
   // Custom boundary overlay layers: boundary-category CMS files (Area Metrics
   // uploads) whose names don't belong to a fixed boundary layer. Auto-visible —
   // the client uploads and the polygons appear; the toggle only hides them.
-  const [customBoundaryFiles, setCustomBoundaryFiles] = useState<{ name: string; url: string }[]>([]);
+  const [customBoundaryFiles, setCustomBoundaryFiles] = useState<{ name: string; url: string; uploadedAt: number }[]>([]);
   const [hiddenCustomLayers, setHiddenCustomLayers] = useState<string[]>([]);
   // Max uploadedAt across ALL boundary files (fixed names + custom uploads):
   // any new upload or deletion bumps it, and MapComponent re-probes its fixed
@@ -403,7 +404,12 @@ function MapPageInner() {
         setCustomBoundaryFiles(
           files
             .filter((f) => f.storageUrl && !KNOWN_BOUNDARY_FILE_NAMES.has(f.name))
-            .map((f) => ({ name: f.name, url: f.storageUrl as string }))
+            .map((f) => ({
+              name: f.name,
+              url: f.storageUrl as string,
+              uploadedAt:
+                typeof f.uploadedAt === 'number' ? f.uploadedAt : Date.parse(f.uploadedAt as unknown as string) || 0,
+            }))
         );
         const times = files
           .map((f) => (typeof f.uploadedAt === 'number' ? f.uploadedAt : Date.parse(f.uploadedAt as unknown as string)))
@@ -555,15 +561,29 @@ function MapPageInner() {
 
   // Load the active boundary's GeoJSON and build an id → {name, zip} lookup so
   // the chat can resolve city/area names even before the CSV report is ready.
+  // The (multi-MB) file is only downloaded on a version-cache miss: the entry
+  // is keyed by the build's versions.json timestamp, exactly like
+  // MapComponent's local-copy cache, so repeat visits read it from IndexedDB.
   useEffect(() => {
     if (!boundary || boundary === 'areas') return;
     if (boundaryLookup[boundary]) return;
     let cancelled = false;
     (async () => {
       try {
-        const fc = await engine.fetchGzJson<GeoJSON.FeatureCollection>(
-          `/geojson/${boundary}.geojson.gz`
-        );
+        let fc: GeoJSON.FeatureCollection | null = null;
+        const localAt = await fetch('/geojson/versions.json', { cache: 'no-store' })
+          .then((r) => (r.ok ? (r.json() as unknown as Record<string, string>) : null))
+          .then((v) => (v ? Date.parse(v[boundary]) || 0 : 0))
+          .catch(() => 0);
+        if (localAt) {
+          fc = await readGeoCache<GeoJSON.FeatureCollection>(`${boundary}:local`, localAt);
+        }
+        if (!fc) {
+          fc = await engine.fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${boundary}.geojson.gz`);
+          if (!cancelled && localAt && fc?.features) {
+            writeGeoCache(`${boundary}:local`, localAt, fc);
+          }
+        }
         if (cancelled || !fc?.features) return;
         const lookup: Record<string, { name: string; zip?: string }> = {};
         for (const feat of fc.features) {
@@ -654,13 +674,17 @@ function MapPageInner() {
   // Dropdown option lists for SQL mode (the browser holds no rows there, so
   // the worker's datasetReady payload is unavailable — they come from SQL).
   const [sqlDistinct, setSqlDistinct] = useState<Awaited<ReturnType<typeof fetchSqlDistinct>>>(null);
-  // Declared before loadFullData: a failed SQL fetch flips this and the next
-  // loadFullData skips the SQL gate and loads the worker dataset instead.
+  // A failed /api/query flips this: the error banner shows and a 30s timer
+  // retries. There is NO dataset fallback — SQL is the only data source.
   const [sqlFailed, setSqlFailed] = useState(false);
-  const sqlFailedRef = useRef(false);
+
+  // One-time purge of the legacy IndexedDB dataset cache. Row persistence was
+  // removed (a stale manifest fetch made it resurrect deleted sales data), so
+  // every browser that still carries the old database gets it wiped on the
+  // next visit. Deleting a non-existent DB is a no-op, so this stays cheap.
   useEffect(() => {
-    sqlFailedRef.current = sqlFailed;
-  }, [sqlFailed]);
+    purgeDatasetCache();
+  }, []);
 
   // Load (or re-load) the full dataset into the engine. Until it lands, every
   // filter that acts on real rows — Market Metric, Property Filters, Scale
@@ -673,16 +697,12 @@ function MapPageInner() {
     setDataLoadKind('data');
     setReportError(null);
     setReportPhase('loading');
-    // Preferred path: the worker materializes the dataset itself (chunk gzip →
-    // IndexedDB) and keeps the ~763k rows out of the main-thread heap.
-    const runWorker = async (): Promise<boolean> => {
-      if (workerAgg.workerUnavailable) return false;
-      // SQL-first gate: when the SQL mirror is complete for the CURRENT
-      // manifest version, skip the dataset download entirely — the map is
-      // served by /api/query and "loading data" only refreshes the dropdown
-      // lists (a few KB). A failed SQL fetch (sqlFailed) falls through to the
-      // worker so the map keeps working while SQL recovers.
-      if (isSQLEnabled() && !sqlFailedRef.current) {
+    // Preferred path: SQL-primary. The dataset is NEVER downloaded to the
+    // browser — when the SQL mirror is complete for the CURRENT manifest
+    // version the map is served entirely by /api/query (KB-sized); otherwise
+    // this drives the resumable CSV→SQL mirror and waits for it to complete.
+    const runWorker = async (): Promise<boolean | 'sql-timeout'> => {
+      if (isSQLEnabled()) {
         const sqlPlan = await engine.resolveDataSource();
         const syncState = sqlPlan ? await readSqlSyncState() : null;
         if (sqlPlan && syncState?.done && syncState.version === (sqlPlan.version ?? 0)) {
@@ -690,12 +710,30 @@ function MapPageInner() {
           loadedDatasetVersionRef.current = sqlPlan.version ?? 0;
           return true;
         }
+        // Mirror missing or stale (e.g. a fresh CMS publish not mirrored yet).
+        // No worker fallback: SQL is the single source of property data, so
+        // keep the loading state, drive the mirror and poll until it lands.
         setSqlSyncReady(false);
-        // Mirror missing or stale (e.g. a fresh CMS publish not mirrored yet):
-        // drive the resumable sync from here too — no admin visit required.
-        // The worker path serves the map meanwhile (never a partial sync).
+        loadedDatasetVersionRef.current = sqlPlan?.version ?? 0;
+        console.log('[Kwizi Map] SQL mirror not ready — syncing CSV → SQL');
         runSqlSync().catch(() => {});
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 600000) {
+          await new Promise((r) => setTimeout(r, 10000));
+          const st = await readSqlSyncState().catch(() => null);
+          if (st?.done && st.version === (sqlPlan?.version ?? 0)) {
+            setSqlSyncReady(true);
+            setReportPhase('ready');
+            setReportGeneration((g) => g + 1);
+            setReportError(null);
+            updateInFlightRef.current = false;
+            setDataUpdatePending(false);
+            return true;
+          }
+        }
+        return 'sql-timeout';
       }
+      if (workerAgg.workerUnavailable) return false;
       await engine.ensureSchoolRatings();
       const plan = await engine.resolveDataSource();
       if (!plan) return false;
@@ -709,6 +747,17 @@ function MapPageInner() {
     };
     runWorker()
       .then((workerOk) => {
+        if (workerOk === 'sql-timeout') {
+          // The SQL mirror didn't complete within the wait window. NO dataset
+          // fallback (SQL is the only data source) — say it and keep the
+          // periodic retries going (the version watchdog + this call site).
+          setReportPhase('idle');
+          setReportProgress(null);
+          setReportError('Data is still syncing on our servers — the map will retry automatically.');
+          updateInFlightRef.current = false;
+          setDataUpdatePending(false);
+          return undefined;
+        }
         if (workerOk) {
           setReportPhase('ready');
           setReportGeneration((g) => g + 1);
@@ -717,7 +766,8 @@ function MapPageInner() {
           setDataUpdatePending(false);
           return undefined;
         }
-        // Fallback: main-thread engine load (same behavior as before workers).
+        // Kill-switch fallback (NEXT_PUBLIC_SQL_ENABLED=false): main-thread
+        // engine load (same behavior as before workers).
         return engine
           .loadAllCSV(force, (loaded, total) => setReportProgress({ loaded, total }))
           .then((result) => {
@@ -797,12 +847,13 @@ function MapPageInner() {
         console.log('[Kwizi Map] New dataset version detected — updating automatically');
         updateInFlightRef.current = true;
         setDataUpdatePending(true);
-        if (isSQLEnabled() && !sqlFailedRef.current) {
-          // SQL-first mode: never re-download the ~763k-row dataset just
+        if (isSQLEnabled()) {
+          // SQL-primary mode: never re-download the ~763k-row dataset just
           // because the manifest moved — drive the SQL mirror from here and
           // wait for it to catch up, then ONE cheap /api/query refresh serves
           // the new data. Bounded: if the mirror doesn't land in 3 minutes the
-          // update falls back to the worker dataset so the map still updates.
+          // overlay clears and loadFullData re-enters its own mirror-wait loop
+          // (the map never falls back to a dataset download).
           runSqlSync().catch(() => {});
           const startedAt = Date.now();
           const pollMirror = async () => {
@@ -823,7 +874,7 @@ function MapPageInner() {
             if (stopped) return;
             updateInFlightRef.current = false;
             setDataUpdatePending(false);
-            loadFullData({ force: true }); // mirror stalled — worker download still wins
+            loadFullData({ force: true }); // mirror stalled — re-enter the wait loop
           };
           pollMirror();
           return;
@@ -892,18 +943,26 @@ function MapPageInner() {
   const deferredAppliedFilters = useDeferredValue(appliedFilters);
 
   // SQL Connect path. When the SQL mirror is ready (sqlSyncReady — complete
-  // for the current manifest version), SQL is the PRIMARY source: the map
+  // for the current manifest version), SQL is the ONLY source: the map
   // never downloaded the dataset, so /api/query serves EVERY aggregate,
-  // default filters included. sqlFailed (a failed fetch) flips back to the
-  // worker/engine paths until the next filter or metric change retries SQL.
+  // default filters included. sqlFailed (a failed fetch) shows the error
+  // banner and auto-retries every 30s — there is no dataset fallback.
   const useSql = isSQLEnabled() && sqlSyncReady && !sqlFailed;
 
   // Worker mode: the aggregation worker owns the rows and computes EVERY
   // aggregate off the main thread (one job covers all the memos below).
-  // Disabled while SQL is active (server-side aggregates win) or when the
-  // worker could not be created — the page then falls back to the synchronous
-  // engine memos, identical numbers, just back on the main thread.
+  // Only reachable through the NEXT_PUBLIC_SQL_ENABLED=false kill-switch —
+  // otherwise the worker never holds rows and stays dormant.
   const useWorker = !workerAgg.workerUnavailable && workerAgg.datasetCount !== null && !useSql;
+
+  // Bumped every 30s while sqlFailed is set, so the SQL query effect below
+  // re-runs without any user interaction.
+  const [sqlRetryTick, setSqlRetryTick] = useState(0);
+  useEffect(() => {
+    if (!sqlFailed) return;
+    const id = setInterval(() => setSqlRetryTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
+  }, [sqlFailed]);
 
   useEffect(() => {
     if (!useSql) {
@@ -915,19 +974,10 @@ function MapPageInner() {
       try {
         const resolved = resolveRatingFilters(engine, deferredAppliedFilters);
         const { startTs, endTs } = periodToWindow(deferredAppliedFilters.period, engine.getReferenceDate());
+        // The token is optional now: the map serves signed-out visitors too.
         const token = await user?.getIdToken();
-        if (!token) {
-          // Not signed in — /api/query requires auth. Flip sqlFailed so the
-          // next loadFullData takes the worker/engine path: returning silently
-          // here left sqlAgg null forever, and the map stayed on the stale
-          // baked static snapshot (resurrecting deleted data) for signed-out
-          // visitors.
-          if (!cancelled) {
-            setSqlFailed(true);
-            setSqlAgg(null);
-          }
-          return;
-        }
+        // CMS single-property edits must apply server-side as well.
+        const overrides = await engine.getPropertyOverrideLites();
         const agg = await fetchSqlAggregates(
           deferredAppliedFilters,
           resolved,
@@ -936,20 +986,24 @@ function MapPageInner() {
           selectedIds,
           startTs,
           endTs,
-          token
+          token,
+          overrides
         );
         if (cancelled) return;
         if (agg) {
           setSqlFailed(false);
           setSqlAgg(agg);
+          setReportError(null);
         } else {
           setSqlFailed(true);
           setSqlAgg(null);
+          setReportError('Data is temporarily unavailable — retrying automatically…');
         }
       } catch {
         if (!cancelled) {
           setSqlFailed(true);
           setSqlAgg(null);
+          setReportError('Data is temporarily unavailable — retrying automatically…');
         }
       }
     };
@@ -958,8 +1012,9 @@ function MapPageInner() {
       cancelled = true;
     };
     // reportGeneration re-fires the query after a dataset reload (the version
-    // watchdog's forced reload bumps it on the SQL path too).
-  }, [useSql, deferredAppliedFilters, boundary, metric, selectedIds, user, reportGeneration]);
+    // watchdog's forced reload bumps it on the SQL path too). sqlRetryTick is
+    // the 30s auto-retry while SQL is failing.
+  }, [useSql, deferredAppliedFilters, boundary, metric, selectedIds, user, reportGeneration, sqlRetryTick]);
 
   // SQL mode dropdown lists: fetched whenever SQL becomes the primary source
   // (and refreshed after each reload). A few KB — never a dataset download.
@@ -968,7 +1023,7 @@ function MapPageInner() {
     let cancelled = false;
     (async () => {
       const token = await user?.getIdToken();
-      if (!token || cancelled) return;
+      if (cancelled) return;
       const d = await fetchSqlDistinct(token);
       if (!cancelled && d) setSqlDistinct(d);
     })();
@@ -977,14 +1032,9 @@ function MapPageInner() {
     };
   }, [sqlSyncReady, user, reportGeneration]);
 
-  // SQL fetch failed → fall back to the worker dataset so the map keeps
-  // working. Retry happens on the next filter or metric change (below).
-  useEffect(() => {
-    if (!sqlFailed) return;
-    if (workerAgg.datasetCount !== null) return; // worker data already loaded
-    loadFullData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sqlFailed]);
+  // A new filter attempt retries SQL (a transient failure shouldn't disable it
+  // for the whole session). A metric change retries too (ETA metrics are not
+  // supported server-side and flip sqlFailed — switching back must recover).
 
   // A new filter attempt retries SQL (a transient failure shouldn't disable it
   // for the whole session). A metric change retries too (ETA metrics are not
@@ -1370,6 +1420,44 @@ function MapPageInner() {
     };
   }, [searchQuery, useWorker, boundary, workerSearch]);
 
+  // SQL mode: the rows live server-side, so the search box's row-level pass
+  // (address / zip / MLS number / city) runs via /api/search. A non-empty
+  // result wins, mirroring applySearch's precedence (row matches beat name
+  // matches); applySearch's boundary-name matching still runs first for area
+  // names and stays authoritative when the row search finds nothing.
+  useEffect(() => {
+    if (!useSql || !searchQuery.trim()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: searchQuery.trim() }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || !data?.results?.length) return;
+        const ids: string[] = [];
+        for (const r of data.results) {
+          const key = engine.getBoundaryKey(boundary, r as unknown as PropertyData);
+          if (key && !ids.includes(key)) ids.push(key);
+        }
+        if (ids.length > 0) {
+          setSelectedIds(ids);
+          setSearchFocusTick((t) => t + 1);
+        }
+      } catch {
+        // Search is best-effort: the name-based matching already ran.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // reportGeneration refreshes after each data reload (same as applySearch's
+    // callers rely on).
+  }, [searchQuery, useSql, boundary, reportGeneration]);
+
   // Live search: debounce the input so we filter as the user types.
   useEffect(() => {
     const id = setTimeout(() => {
@@ -1559,10 +1647,6 @@ function MapPageInner() {
 
   const getStatsForChatQueries = useCallback(async (queries: string[]) => {
     if (!queries || queries.length === 0 || !dataReady) return null;
-    // SQL mode: the raw rows live server-side, so an arbitrary-area preview
-    // can't be computed client-side. The chat still works — it just skips the
-    // stats preview rather than reporting zeros.
-    if (useSql) return null;
 
     const nameSource: Record<string, string> = {};
     for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
@@ -1637,14 +1721,12 @@ function MapPageInner() {
     // SQL mode: the rows live server-side — /api/query filters + aggregates
     // there and returns the same stats/health shapes (KB-sized response).
     if (useSql) {
-      const token = await user?.getIdToken();
-      if (!token) return null;
       const resolved = resolveRatingFilters(engine, deferredAppliedFilters);
       const { startTs, endTs } = periodToWindow(deferredAppliedFilters.period, engine.getReferenceDate());
       try {
         const res = await fetch('/api/query', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             filters: deferredAppliedFilters,
             resolved,
@@ -1696,15 +1778,13 @@ function MapPageInner() {
       // SQL mode: the merged filters are evaluated server-side (Postgres) and
       // the response's per-area counts give the top-5 areas — one small POST.
       if (useSql) {
-        const token = await user?.getIdToken();
-        if (!token) return null;
         const merged = { ...deferredAppliedFilters, ...newFilters } as PropertyFilters;
         const resolved = resolveRatingFilters(engine, merged);
         const { startTs, endTs } = periodToWindow(merged.period, engine.getReferenceDate());
         try {
           const res = await fetch('/api/query', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               filters: merged,
               resolved,

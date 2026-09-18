@@ -16,6 +16,8 @@ import fs from 'fs';
 import { initializeApp, getApps, cert, type App } from 'firebase-admin/app';
 import { getAuth, type Auth } from 'firebase-admin/auth';
 import { getDataConnect, type DataConnect } from 'firebase-admin/data-connect';
+import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import { getStorage } from 'firebase-admin/storage';
 
 let adminApp: App | null = null;
 
@@ -56,4 +58,16 @@ export function getAdminDataConnect(): DataConnect {
 
 export function getAdminAuth(): Auth {
   return getAuth(getAdminApp());
+}
+
+export function getAdminFirestore(): Firestore {
+  return getFirestore(getAdminApp());
+}
+
+/** Admin Storage bucket handle (bucket id from NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET). */
+export function getAdminStorageBucket() {
+  const bucketId =
+    process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ||
+    `${process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'myreatstat'}.appspot.com`;
+  return getStorage(getAdminApp()).bucket(bucketId);
 }

@@ -12,6 +12,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import { normalizeGeoJsonCrs } from '@/lib/geojsonUpload';
+import { readGeoCache, writeGeoCache, dropGeoCache } from '@/lib/csvCache';
 
 // navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
 // with ≤4 GB get lean constants everywhere: fewer point markers, and the
@@ -39,6 +40,11 @@ const BOUNDARY_SOURCES: Record<BoundaryKey, string> = {
   neighborhoods: 'Mapped Subdivisions.geojson',
   areas: '',
 };
+
+/** Firestore timestamps arrive as numbers or ISO strings — normalize to ms. */
+function uploadedAtMs(v: unknown): number {
+  return typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) || 0 : 0;
+}
 
 const BOUNDARY_KEYS: BoundaryKey[] = [
   'subdivisions',
@@ -237,7 +243,7 @@ interface MapComponentProps {
    *  names don't match a fixed BOUNDARY_SOURCES layer. Rendered as overlay
    *  polygons on top of the metric layer — the parent passes only the ENABLED
    *  ones, so toggling off fully unmounts the Leaflet layer. */
-  customLayers?: { name: string; url: string }[];
+  customLayers?: { name: string; url: string; uploadedAt?: number }[];
   /** Latest boundary upload timestamp in the CMS (max `uploadedAt` over all
    *  boundary-category files, from the parent's 60s poll). When it changes
    *  while the map is open, the fixed boundary layer re-probes and hot-swaps
@@ -980,11 +986,22 @@ export default function MapComponent({
     if (!fileRecord || !fileRecord.storageUrl) {
       throw new Error(`Boundary file ${fileName} not found in Firebase CMS`);
     }
+    // Version-keyed cache: the entry stores the file's uploadedAt, and a hit
+    // requires an EXACT match — a re-upload stamps a new uploadedAt, so the
+    // stale polygons can never be served (the lookup is simply a miss).
+    const version = uploadedAtMs(fileRecord.uploadedAt);
+    const cachedData = await readGeoCache<GeoJSON.FeatureCollection>(fileName, version);
+    if (cachedData) {
+      boundaryCacheRef.current[key] = cachedData;
+      setGeoJsonData(cachedData);
+      return;
+    }
     // CMS geojson uploads may be gzipped (cmsStore.saveFile) — fetchJsonAutoGz
     // sniffs the payload, so raw (legacy) and gzipped objects both work.
     // normalizeGeoJsonCrs converts projected exports (e.g. Web Mercator meters)
     // to WGS84 lon/lat — the only CRS Leaflet can draw.
     const data = normalizeGeoJsonCrs(await fetchJsonAutoGz<GeoJSON.FeatureCollection>(fileRecord.storageUrl));
+    writeGeoCache(fileName, version, data); // replaces the previous version's entry
     boundaryCacheRef.current[key] = data;
     setGeoJsonData(data);
   };
@@ -1001,17 +1018,22 @@ export default function MapComponent({
       return;
     }
 
-    // Start the local fetch IMMEDIATELY and probe CMS freshness in parallel —
-    // the freshness probe must never serialize in front of the local load
-    // (a slow or hanging Firestore read would block the GeoJSON on every
-    // boundary switch). The race is capped at 4s so the local copy still
+    // Probe CMS freshness. The probe is capped at 4s so the local copy still
     // paints fast, but the probe promise is KEPT: when it lands later it
     // hot-swaps the map onto the CMS copy, so a Firestore cold start (which
     // routinely exceeds 4s on a fresh page load) can never strand the whole
-    // session on a stale bundled copy.
-    const localDataP = engine
-      .fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${key}.geojson.gz`)
-      .catch(() => null);
+    // session on a stale bundled copy. The local file fetch starts LAZILY —
+    // the version-keyed IDB cache (~ms to read) is consulted first, so a
+    // repeat visit never downloads the multi-MB file at all.
+    let localDataP: Promise<GeoJSON.FeatureCollection | null> | null = null;
+    const ensureLocalFetch = () => {
+      if (!localDataP) {
+        localDataP = engine
+          .fetchGzJson<GeoJSON.FeatureCollection>(`/geojson/${key}.geojson.gz`)
+          .catch(() => null);
+      }
+      return localDataP;
+    };
 
     const probeP = probeCmsBoundary(key).catch(() => ({ newer: false, deleted: false }));
     let probe: { newer: boolean; deleted: boolean } = { newer: false, deleted: false };
@@ -1031,10 +1053,14 @@ export default function MapComponent({
     }
 
     if (probe.deleted) {
-      // Deleted in the CMS = gone everywhere. Drop any cached polygons so the
-      // map renders this boundary as empty instead of serving the stale copy.
+      // Deleted in the CMS = gone everywhere. Drop any cached polygons (RAM
+      // and the versioned IDB cache) so the map renders this boundary as
+      // empty instead of serving the stale copy.
       for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
         delete boundaryCacheRef.current[k];
+      }
+      for (const fileKey of Object.values(BOUNDARY_SOURCES)) {
+        if (fileKey) dropGeoCache(fileKey);
       }
       setGeoJsonData(null);
       setBoundaryLoading(false);
@@ -1042,12 +1068,59 @@ export default function MapComponent({
     }
 
     if (!probe.newer) {
-      const data = await localDataP;
+      // The bundled copy is current — try the version-keyed IDB cache first
+      // (keyed by the build's versions.json timestamp) so repeat visits skip
+      // re-downloading the ~21 MB local file. versions.json is same-origin and
+      // tiny, so it is read directly instead of waiting on the (possibly cold)
+      // Firestore probe.
+      let localAt = uploadedAtMs(boundaryFreshnessRef.current?.local?.[key]);
+      if (!localAt) {
+        const localVersions = await fetch('/geojson/versions.json', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        localAt = uploadedAtMs((localVersions as Record<string, unknown> | null)?.[key]);
+      }
+      if (localAt) {
+        const cachedLocal = await readGeoCache<GeoJSON.FeatureCollection>(`${key}:local`, localAt);
+        if (cachedLocal) {
+          for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
+            if (k !== key) delete boundaryCacheRef.current[k];
+          }
+          boundaryCacheRef.current[key] = cachedLocal;
+          setGeoJsonData(cachedLocal);
+          setBoundaryLoading(false);
+          // Same contract as the non-cached path: a timed-out probe must still
+          // be honored — a just-published upload is never hidden behind it.
+          if (probeTimedOut) {
+            const verdict = await probeP;
+            if (verdict.deleted) {
+              for (const fileKey of Object.values(BOUNDARY_SOURCES)) {
+                if (fileKey) dropGeoCache(fileKey);
+              }
+              setGeoJsonData(null);
+              return;
+            }
+            if (verdict.newer) {
+              setBoundaryLoading(true);
+              try {
+                await fetchAndApplyCmsBoundary(key);
+              } catch (err) {
+                console.error('[Kwizi Map] CMS hot-swap failed for', key, err);
+              } finally {
+                setBoundaryLoading(false);
+              }
+            }
+          }
+          return;
+        }
+      }
+      const data = await ensureLocalFetch();
       if (data) {
         normalizeGeoJsonCrs(data);
         for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
           if (k !== key) delete boundaryCacheRef.current[k];
         }
+        if (localAt) writeGeoCache(`${key}:local`, localAt, data);
         boundaryCacheRef.current[key] = data;
         setGeoJsonData(data);
         setBoundaryLoading(false);
@@ -1599,11 +1672,20 @@ export default function MapComponent({
       for (const entry of customLayers || []) {
         if (disposed || customLayerRefsRef.current.has(entry.name)) continue;
         try {
-          let data = customDataCacheRef.current.get(entry.name);
+          let data: GeoJSON.FeatureCollection | null | undefined = customDataCacheRef.current.get(entry.name);
           if (!data) {
-            data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(entry.url);
+            // Version-keyed IDB cache (entry.uploadedAt): a re-upload stamps a
+            // new version → guaranteed miss → fresh fetch, so a stale overlay
+            // can never outlive its replacement.
+            const version = uploadedAtMs(entry.uploadedAt);
+            data = await readGeoCache<GeoJSON.FeatureCollection>(entry.name, version);
+            if (!data) {
+              data = await fetchJsonAutoGz<GeoJSON.FeatureCollection>(entry.url);
+              if (disposed) return;
+              normalizeGeoJsonCrs(data);
+              writeGeoCache(entry.name, version, data); // replaces the old version
+            }
             if (disposed) return;
-            normalizeGeoJsonCrs(data);
             customDataCacheRef.current.set(entry.name, data);
           }
           const gj = L.geoJSON(data as unknown as GeoJSON.GeoJsonObject, {
