@@ -36,6 +36,61 @@ body {
   overflow-x: hidden;
 }
 
+/* Range sliders (map Property Filters). `appearance-none` HIDES the native
+   widget — including the thumb — so the track and thumb must be drawn here.
+   Without these rules the slider renders as a bare bar with no knob. */
+.kwizi-range {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+  cursor: pointer;
+  margin: 8px 0;
+}
+.kwizi-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #3b82f6;
+  border: 2px solid #0a0c10;
+  box-shadow: 0 0 0 1.5px rgba(59, 130, 246, 0.65);
+  cursor: grab;
+  transition: transform 0.1s ease;
+}
+.kwizi-range::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  transform: scale(1.15);
+}
+.kwizi-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: transparent;
+}
+.kwizi-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #3b82f6;
+  border: 2px solid #0a0c10;
+  box-shadow: 0 0 0 1.5px rgba(59, 130, 246, 0.65);
+  cursor: grab;
+}
+.kwizi-range::-moz-range-thumb:active {
+  cursor: grabbing;
+}
+.kwizi-range::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: transparent;
+}
+
 /* Respect the iOS home indicator: fixed bottom elements (chat FAB, cookie
    banner, ads) would otherwise sit flush against it. */
 @supports (padding: env(safe-area-inset-bottom)) {

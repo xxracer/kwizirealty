@@ -933,9 +933,27 @@ function MapPageInner() {
     return () => clearInterval(id);
   }, [sqlFailed]);
 
+  // "Applying filters…" popup lifecycle in SQL mode: it starts at commit
+  // (applyFilters / handleReset) and is cleared by the SQL effect when the
+  // fresh aggregate lands — never before, because a silent map reads as
+  // broken while the query runs. The popup is guaranteed to show for at
+  // least MIN_APPLY_POPUP_MS so fast responses never produce a flash.
+  const MIN_APPLY_POPUP_MS = 900;
+  const applyPopupStartRef = useRef(0);
+  const clearApplyPopup = useCallback(() => {
+    const elapsed = Date.now() - applyPopupStartRef.current;
+    const wait = Math.max(0, MIN_APPLY_POPUP_MS - elapsed);
+    if (wait === 0) {
+      setFiltersApplying(false);
+      return;
+    }
+    setTimeout(() => setFiltersApplying(false), wait);
+  }, []);
+
   useEffect(() => {
     if (!useSql) {
       setSqlAgg(null);
+      clearApplyPopup();
       return;
     }
     let cancelled = false;
@@ -963,16 +981,19 @@ function MapPageInner() {
           setSqlFailed(false);
           setSqlAgg(agg);
           setReportError(null);
+          if (!cancelled) clearApplyPopup();
         } else {
           setSqlFailed(true);
           setSqlAgg(null);
           setReportError('Data is temporarily unavailable — retrying automatically…');
+          if (!cancelled) clearApplyPopup();
         }
       } catch {
         if (!cancelled) {
           setSqlFailed(true);
           setSqlAgg(null);
           setReportError('Data is temporarily unavailable — retrying automatically…');
+          clearApplyPopup();
         }
       }
     };
@@ -983,7 +1004,7 @@ function MapPageInner() {
     // reportGeneration re-fires the query after a dataset reload (the version
     // watchdog's forced reload bumps it on the SQL path too). sqlRetryTick is
     // the 30s auto-retry while SQL is failing.
-  }, [useSql, deferredAppliedFilters, boundary, metric, selectedIds, user, reportGeneration, sqlRetryTick]);
+  }, [useSql, deferredAppliedFilters, boundary, metric, selectedIds, user, reportGeneration, sqlRetryTick, clearApplyPopup]);
 
   // SQL mode dropdown lists: fetched whenever SQL becomes the primary source
   // (and refreshed after each reload). A few KB — never a dataset download.
@@ -1235,15 +1256,23 @@ function MapPageInner() {
   // guaranteed 250ms to paint it BEFORE the ~763k-row recompute blocks the
   // main thread (rAF-based waiting was racy — the popup sometimes never
   // became visible). It stays at least MIN_APPLY_POPUP_MS after the swap.
-  const MIN_APPLY_POPUP_MS = 900;
   const applyFilters = useCallback(() => {
     if (!filtersDirty) return;
-    // Worker AND SQL mode: the aggregate runs OFF the main thread, so there is
+    // Worker mode: the aggregate runs OFF the main thread, so there is
     // nothing to paint a guaranteed popup for — commit immediately. The
     // "Updating…" pill on the map is driven by the updating flag instead.
-    if (useWorker || useSql) {
+    if (useWorker) {
       setAppliedFilters(filters);
       if (reportPhase !== 'ready') loadFullData();
+      return;
+    }
+    if (useSql) {
+      setAppliedFilters(filters);
+      if (reportPhase !== 'ready') loadFullData();
+      // The "Applying filters…" popup stays up until the SQL aggregate for
+      // these filters actually lands (the SQL effect clears it).
+      applyPopupStartRef.current = Date.now();
+      setFiltersApplying(true);
       return;
     }
     setFiltersApplying(true);
@@ -1487,7 +1516,6 @@ function MapPageInner() {
     setSelectedIds([]);
     setFilters(DEFAULT_FILTERS);
     setAppliedFilters(DEFAULT_FILTERS);
-    setFiltersApplying(false);
     setSearchQuery('');
     setSearchInput('');
     // Reset every control the sidebar exposes, not just the property filters —
@@ -1506,7 +1534,15 @@ function MapPageInner() {
     // Re-prime the live data path (instant — the engine already has the full
     // dataset) so filters stay active after a reset.
     loadFullData();
-  }, [setActiveWindows, loadFullData]);
+    // SQL mode: show the "Applying filters…" popup until the default-filter
+    // aggregate lands (the SQL effect clears it). Only when the applied state
+    // actually differs — an already-default map won't re-query, so the popup
+    // would hang forever.
+    if (useSql && JSON.stringify(appliedFilters) !== JSON.stringify(DEFAULT_FILTERS)) {
+      applyPopupStartRef.current = Date.now();
+      setFiltersApplying(true);
+    }
+  }, [setActiveWindows, loadFullData, useSql, appliedFilters]);
 
   const handleAreaSelectFromChat = useCallback((queries: string[], generateReportAfter?: boolean) => {
     if (!queries || queries.length === 0) return;
@@ -2020,7 +2056,7 @@ function MapPageInner() {
               // Keep low <= high: pushing min past max drags max along.
               if (v > high) handleFilterChange(highKey, v);
             }}
-            className="flex-1 accent-blue-500 h-1.5 bg-white/10 rounded-full appearance-none"
+            className="kwizi-range flex-1 min-w-0"
           />
           <input
             type="range"
@@ -2034,7 +2070,7 @@ function MapPageInner() {
               // Keep high >= low: pulling max below min drags min along.
               if (v < low) handleFilterChange(lowKey, v);
             }}
-            className="flex-1 accent-blue-500 h-1.5 bg-white/10 rounded-full appearance-none"
+            className="kwizi-range flex-1 min-w-0"
           />
         </div>
       </div>
