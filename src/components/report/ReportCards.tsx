@@ -724,7 +724,26 @@ export function TimeSeriesCard({
   );
 }
 
-// ---------- 5-Year Forecast ----------
+// ---------- Forecast ----------
+
+/** Card/window title mirrors the Close Period filter: the chart plots the
+ *  selected period's history, so the title names it ('all' → All-Data
+ *  Forecast, '1y' → 1-Year Forecast…). Missing/unknown falls back to the
+ *  classic 5-year label. */
+const FORECAST_TITLES: Record<string, string> = {
+  all: 'All-Data Forecast',
+  '30d': '30-Day Forecast',
+  '90d': '90-Day Forecast',
+  '6m': '6-Month Forecast',
+  ytd: 'YTD Forecast',
+  '1y': '1-Year Forecast',
+  '3y': '3-Year Forecast',
+  '5y': '5-Year Forecast',
+};
+
+export function forecastTitle(period?: string): string {
+  return (period && FORECAST_TITLES[period]) || '5-Year Forecast';
+}
 
 export function ForecastCard({
   metric,
@@ -736,6 +755,7 @@ export function ForecastCard({
   pinned,
   onTogglePin,
   headerExtra,
+  period,
 }: {
   metric: MetricKey;
   metricLabel: string;
@@ -747,6 +767,8 @@ export function ForecastCard({
   onTogglePin?: () => void;
   headerExtra?: React.ReactNode;
   dragHandle?: React.ReactNode;
+  /** Close Period filter the chart history is scoped to (drives the title). */
+  period?: string;
 }) {
   const forecastChartData = useMemo(() => {
     if (!forecast) return [];
@@ -769,7 +791,7 @@ export function ForecastCard({
 
   return (
     <CardShell
-      title="5-Year Forecast"
+      title={forecastTitle(period)}
       icon={<TrendingUp className={compact ? 'w-3.5 h-3.5' : 'w-4 h-4'} />}
       iconColor="text-emerald-400"
       compact={compact}

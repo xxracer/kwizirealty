@@ -45,6 +45,8 @@ interface ReportPanelProps {
   isLoading?: boolean;
   pinnedWindows?: WindowType[];
   onToggleWindow?: (key: WindowType) => void;
+  /** Close Period filter — the forecast card mirrors it in title + chart. */
+  period?: string;
 }
 
 export default function ReportPanel({
@@ -63,6 +65,7 @@ export default function ReportPanel({
   isLoading,
   pinnedWindows = [],
   onToggleWindow,
+  period,
 }: ReportPanelProps) {
   const selectionSummary = selectedNames.length
     ? `${selectedNames.length} area${selectedNames.length > 1 ? 's' : ''} selected`
@@ -330,6 +333,7 @@ export default function ReportPanel({
           isLoading={isLoading}
           pinned={isPinned('forecast')}
           onTogglePin={() => onToggleWindow?.('forecast')}
+          period={period}
         />
       </div>
 

@@ -297,19 +297,10 @@ interface ChunkManifest {
 }
 
 async function fetchCurrentManifest(): Promise<ChunkManifest | null> {
+  // Storage-only (single source of truth) — no local /cache fallback: the
+  // baseline must never come from stale files baked into a deploy.
   try {
-    let url: string | null = null;
-    try {
-      url = await getDownloadURL(ref(storage, MANIFEST_PATH));
-    } catch {
-      url = null;
-    }
-    if (!url) {
-      // Fall back to the locally deployed manifest for the baseline count.
-      const res = await fetch('/cache/master_cache_chunks.json', { cache: 'no-store' });
-      if (!res.ok) return null;
-      return await res.json();
-    }
+    const url = await getDownloadURL(ref(storage, MANIFEST_PATH));
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return null;
     return await res.json();
@@ -476,6 +467,10 @@ async function runRebuild(addedRows: number, removedRows: number) {
   // delta is roughly `addedRows`.
   let expectedLower: number;
   let expectedUpper: number;
+  // A rebuild carrying no row deltas at all (reconciliation, repair, retry)
+  // recomputes everything from the live CMS listing — see the zero-delta
+  // safety net below the delta-based gate.
+  const isZeroDeltaRebuild = addedRows === 0 && removedRows === 0;
 
   // Full wipe: the admin deleted every dataset CSV on purpose, so publishing
   // an empty dataset is the intended outcome — the map shows "no data" until
@@ -507,11 +502,32 @@ async function runRebuild(addedRows: number, removedRows: number) {
 
   if (
     !isFullWipe &&
+    !isZeroDeltaRebuild &&
     (allRows.length < expectedLower || allRows.length > expectedUpper)
   ) {
     throw new Error(
       `Safety check: ${allRows.length.toLocaleString()} rows were computed, expected between ${expectedLower.toLocaleString()} and ${expectedUpper.toLocaleString()}. The dataset was not modified.`
     );
+  }
+  // Zero-delta rebuilds (reconciliation on admin mount, retry after a timeout,
+  // repair passes) recompute the dataset from the CMS's ACTUAL file listing —
+  // the row-count window above does not apply because a legitimately changed
+  // CMS (new year folders added, page reloaded between uploads) is exactly
+  // what these rebuilds exist to publish. Their safety net is file-level
+  // instead: every listed CSV must have been read successfully, and a total
+  // collapse (property CSVs present but zero rows recognized — e.g. renamed
+  // columns) still blocks.
+  if (!isFullWipe && isZeroDeltaRebuild) {
+    if (undeterminedFiles > 0) {
+      throw new Error(
+        `Safety check: ${undeterminedFiles.toLocaleString()} source file(s) could not be read, so the dataset would be incomplete. The dataset was not modified. Retry the update.`
+      );
+    }
+    if (allRows.length === 0 && propertyFileCount > 0) {
+      throw new Error(
+        `Safety check: ${propertyFileCount.toLocaleString()} property file(s) were read but no rows were recognized. The dataset was not modified.`
+      );
+    }
   }
   if (isFullWipe) {
     console.log('[datasetRebuild] Full wipe detected (all dataset CSVs deleted) — publishing an empty dataset.');

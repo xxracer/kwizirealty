@@ -15,8 +15,6 @@ import type { BoundaryKey, MetricKey, PropertyFilters, TeaScoreMap, MetricOverri
 export interface DataSourcePlan {
   /** Firebase Storage bucket, used to build direct alt=media URLs. */
   bucket: string;
-  /** Same-origin base ('/cache/') when the local manifest won the compare. */
-  localBase?: string;
   /** Per-boundary chunk file paths (boundary-chunks manifest format). */
   boundaries?: Partial<Record<BoundaryKey, { chunks: string[] }>>;
   /** Flat chunk list (legacy manifest format). */

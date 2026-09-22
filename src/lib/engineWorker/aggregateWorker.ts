@@ -50,14 +50,10 @@ function memoryRowCap(): number {
   }
 }
 
-/** Build the candidate URL list for a chunk path (local cache first). */
+/** Build the Storage URL for a chunk path (chunks are never served locally). */
 function chunkUrlCandidates(plan: DataSourcePlan, path: string): string[] {
-  const fileName = path.split('/').pop() || path;
-  const candidates: string[] = [];
-  if (plan.localBase) candidates.push(`${plan.localBase}${fileName}`);
   const encoded = encodeURIComponent(path);
-  candidates.push(`https://firebasestorage.googleapis.com/v0/b/${plan.bucket}/o/${encoded}?alt=media`);
-  return candidates;
+  return [`https://firebasestorage.googleapis.com/v0/b/${plan.bucket}/o/${encoded}?alt=media`];
 }
 
 async function fetchChunkBytes(candidates: string[]): Promise<ArrayBuffer | null> {

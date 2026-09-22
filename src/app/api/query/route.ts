@@ -1,17 +1,21 @@
 /**
  * /api/query — hybrid SQL Connect resolver.
  *
- * When the user has active filters, the browser no longer re-scans the 763k
- * rows in RAM. Instead this route:
- *   1. verifies the Firebase ID token (admin Data Connect bypasses @auth),
- *   2. runs the native-SQL `filteredProperties` op (filtering in Postgres),
- *   3. aggregates the returned rows with the SAME engine methods the client
- *      uses (getMapValues / getStatsForSelection / getMarketHealth /
- *      getTimeSeries), so results are identical to the client-side path,
- *   4. returns only small aggregates + a capped point set.
+ * FAST PATH (default map load, no selection): the per-area aggregates are
+ * computed IN Postgres (areaMapValues / overallAggregates / monthlyTimeSeries
+ * / mapPoints ops) and only ~20k compact area rows cross the wire — a full-row
+ * fetch through the Data Connect layer costs ~0.37 ms/row (69k rows ≈ 25 s on
+ * every map load). Falls back to the legacy full-row path automatically when
+ * the aggregate ops are not deployed yet or anything fails.
  *
- * The client applies CMS overrides and computes the forecast client-side.
- * Any error here → the client falls back to its own engine (no regression).
+ * LEGACY PATH (selection, CMS overrides, ETA/Appreciation/Investor metrics,
+ * or fallback): fetches the filtered rows and aggregates them with the SAME
+ * engine methods the client uses, so results are identical.
+ *
+ *   1. verifies the Firebase ID token when present (optional — public map),
+ *   2. runs the native-SQL ops (filtering in Postgres),
+ *   3. aggregates with the SAME engine methods as the client path,
+ *   4. returns small aggregates + a capped point set.
  */
 import { NextResponse } from 'next/server';
 import { getAdminAuth, getAdminDataConnect } from '@/lib/firebaseAdmin';
@@ -22,6 +26,10 @@ import {
   type MetricKey,
   type PropertyFilters,
 } from '@/lib/engine';
+import {
+  getRealSchoolScore,
+  type TeaScoreMap,
+} from '@/lib/engineCore';
 import { guardPublicRead } from '@/lib/server/requestGuard';
 import { getTeaScoreMaps } from '@/lib/server/teaScores';
 import { applyPropertyOverrides } from '@/lib/engineCore';
@@ -94,41 +102,62 @@ function rowToProperty(row: any): PropertyData {
 
 function buildVariables(filters: PropertyFilters, resolved: QueryBody['resolved'], startTs: number | null, endTs: number | null) {
   return {
-    saleMin: filters.saleMin,
-    saleMax: filters.saleMax,
-    sqftMin: filters.sqftMin,
-    sqftMax: filters.sqftMax,
-    yearMin: filters.yearMin,
-    yearMax: filters.yearMax,
-    bedsMin: filters.bedsMin,
-    bedsMax: filters.bedsMax,
-    bathsMin: filters.bathsMin,
-    bathsMax: filters.bathsMax,
-    l2sMin: filters.l2sMin,
-    l2sMax: filters.l2sMax,
-    domMin: filters.domMin,
-    domMax: filters.domMax,
-    lotSizeMin: filters.lotSizeMin,
-    lotSizeMax: filters.lotSizeMax,
-    ppsfMin: filters.pricePerSqftMin,
-    ppsfMax: filters.pricePerSqftMax,
-    rentMin: filters.rentMin,
-    rentMax: filters.rentMax,
+    saleMin: filters.saleMin ?? 0,
+    saleMax: filters.saleMax ?? 20000000,
+    sqftMin: filters.sqftMin ?? 0,
+    sqftMax: filters.sqftMax ?? 20000,
+    yearMin: filters.yearMin ?? 1920,
+    yearMax: filters.yearMax ?? new Date().getFullYear(),
+    bedsMin: filters.bedsMin ?? 0,
+    bedsMax: filters.bedsMax ?? 20,
+    bathsMin: filters.bathsMin ?? 0,
+    bathsMax: filters.bathsMax ?? 20,
+    l2sMin: filters.l2sMin ?? 50,
+    l2sMax: filters.l2sMax ?? 150,
+    domMin: filters.domMin ?? 0,
+    domMax: filters.domMax ?? 2000,
+    lotSizeMin: filters.lotSizeMin ?? 0,
+    lotSizeMax: filters.lotSizeMax ?? 1000000,
+    ppsfMin: filters.pricePerSqftMin ?? 0,
+    ppsfMax: filters.pricePerSqftMax ?? 5000,
+    rentMin: filters.rentMin ?? 0,
+    rentMax: filters.rentMax ?? 50000,
     startTs: startTs != null ? String(startTs) : null,
     endTs: endTs != null ? String(endTs) : null,
-    propertyTypes: filters.propertyTypes,
-    pool: filters.pool,
-    schoolDistricts: filters.schoolDistricts,
-    cities: filters.cities,
-    elementaryExplicit: filters.elementary,
-    elementaryRating: resolved?.elementary || [],
-    middleExplicit: filters.middle,
-    middleRating: resolved?.middle || [],
-    highschoolsExplicit: filters.highschools,
-    highSchoolRating: resolved?.high || [],
+    propertyTypes: filters.propertyTypes ?? [],
+    pool: filters.pool ?? 'any',
+    schoolDistricts: filters.schoolDistricts ?? [],
+    cities: filters.cities ?? [],
+    elementaryExplicit: filters.elementary ?? [],
+    elementaryRating: resolved?.elementary ?? [],
+    middleExplicit: filters.middle ?? [],
+    middleRating: resolved?.middle ?? [],
+    highschoolsExplicit: filters.highschools ?? [],
+    highSchoolRating: resolved?.high ?? [],
     limit: SQL_ROW_CAP,
   };
 }
+
+/**
+ * Simple per-area metrics computable by the areaMapValues percentile op
+ * (median over the same per-row values the engine's getMetricValue produces).
+ * Appreciation Rate / Investor Index / High ETA Score need per-row logic and
+ * stay on the legacy path.
+ */
+const SQL_AGG_METRIC_COLUMN: Partial<Record<MetricKey, string>> = {
+  'Close Price': 'med_close_price',
+  'Price per Sqft': 'med_ppsf',
+  'Price per Sqft List': 'med_ppsf_list',
+  'List-to-Sale Ratio': 'med_l2s',
+  'Days on Market': 'med_dom',
+  'Est. Rental Price': 'med_rent',
+  'Rent-to-Sale Ratio': 'med_rts',
+  'Rental Price per Sqft': 'med_rent_psf',
+  'Rental Days On Market': 'med_rent_dom',
+  'Lot Size': 'med_lot',
+  'Annual HOA Fee': 'med_hoa',
+  'Last Year Tax Rate': 'med_tax_rate',
+};
 
 function buildYearBuiltData(engine: RealEstateEngine, data: PropertyData[], boundary: BoundaryKey, selectedIds: string[]) {
   const buckets: Record<string, number> = {
@@ -151,6 +180,56 @@ function buildYearBuiltData(engine: RealEstateEngine, data: PropertyData[], boun
   return Object.entries(buckets)
     .map(([name, value]) => ({ name, value }))
     .filter((d) => d.value > 0);
+}
+
+/** Market-health scoring, computed from the SQL medians (no rows needed).
+ *  Mirrors getMarketHealth's math in engineCore. */
+function marketHealthFromAggregates(
+  n: number,
+  medDom: number | null,
+  medL2s: number | null,
+  marketType: 'sale' | 'rental'
+) {
+  const clamp = (v: number, lo: number, hi: number) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
+  const scores: Record<string, number> = {};
+  const weights: Record<string, number> = {};
+  if (medDom !== null) {
+    scores['Days on Market'] = marketType === 'rental' ? clamp(60 - medDom, 0, 50) : clamp(90 - medDom, 0, 70);
+    weights['Days on Market'] = 0.45;
+  }
+  if (medL2s !== null) {
+    scores[marketType === 'rental' ? 'List-to-Lease Ratio' : 'List-to-Sale Ratio'] =
+      marketType === 'rental' ? clamp(medL2s - 95, 0, 6) : clamp(medL2s - 94, 0, 8);
+    weights[marketType === 'rental' ? 'List-to-Lease Ratio' : 'List-to-Sale Ratio'] = 0.35;
+  }
+  const monthsInPeriod = 6;
+  const moi = n / Math.max(monthsInPeriod, 1);
+  scores['Months of Inventory'] = clamp(marketType === 'rental' ? 3 - moi : 7 - moi, 0, marketType === 'rental' ? 2.5 : 5);
+  weights['Months of Inventory'] = 0.2;
+  const totalW = Object.values(weights).reduce((a, b) => a + b, 0);
+  if (!totalW || n === 0) return null;
+  const finalScore = Object.entries(scores).reduce((sum, [k, v]) => sum + (v * weights[k]) / totalW, 0);
+  let label: string;
+  let color: string;
+  if (marketType === 'rental') {
+    if (finalScore >= 65) { label = "Landlord's Market"; color = '#ef4444'; }
+    else if (finalScore >= 35) { label = 'Neutral Market'; color = '#f59e0b'; }
+    else { label = "Renter's Market"; color = '#3b82f6'; }
+  } else {
+    if (finalScore >= 65) { label = "Seller's Market"; color = '#ef4444'; }
+    else if (finalScore >= 35) { label = 'Neutral Market'; color = '#f59e0b'; }
+    else { label = "Buyer's Market"; color = '#3b82f6'; }
+  }
+  return {
+    score: Math.round(finalScore * 10) / 10,
+    label,
+    color,
+    marketType,
+    metrics: Object.fromEntries(Object.entries(scores).map(([k, v]) => [k, Math.round(v * 10) / 10])),
+    dom: medDom,
+    l2s: medL2s,
+    moi,
+  };
 }
 
 export async function POST(req: Request) {
@@ -184,8 +263,118 @@ export async function POST(req: Request) {
   const dc = getAdminDataConnect();
   const variables = buildVariables(filters, body.resolved, body.startTs, body.endTs);
 
+  // FAST PATH — no selection, no CMS overrides, metric supported by the SQL
+  // percentiles (or an Elem/Middle ETA metric, which is count + TEA lookup).
+  const fastMetric =
+    SQL_AGG_METRIC_COLUMN[metric] || metric === 'Elem ETA Score' || metric === 'Middle ETA Score';
+  const useFastAgg =
+    fastMetric && !(selectedIds && selectedIds.length) && !body.propertyOverrides?.length;
+
+  if (useFastAgg) {
+    try {
+      const { limit: _limit, ...filterVars } = variables;
+      const [areaRes, overallRes, tsRes, pointsRes] = await Promise.all([
+        dc.executeQuery('areaMapValues', { ...filterVars, boundary }),
+        dc.executeQuery('overallAggregates', filterVars),
+        dc.executeQuery('monthlyTimeSeries', filterVars),
+        dc.executeQuery('mapPoints', { ...filterVars, limit: POINT_CAP }),
+      ]);
+
+      const areas: any[] = (areaRes.data as any)?.areas || [];
+      const totals: any = (overallRes.data as any)?.totals || {};
+      const series: any[] = (tsRes.data as any)?.series || [];
+      const pointRows: any[] = (pointsRes.data as any)?.points || [];
+
+      // The weekly fallback (getTimeSeries switches to weekly buckets under 3
+      // monthly points) and any unexpected empty aggregate fall back to the
+      // exact legacy path.
+      if (!areas.length || !totals || series.length < 3) {
+        throw new Error('aggregate ops returned thin data');
+      }
+
+      // mapValues — the requested metric's SQL median per area, or the TEA
+      // score for Elem/Middle ETA metrics (per-area score, count from SQL).
+      const teaMaps: TeaScoreMap | null = ETA_METRICS.has(metric) ? await getTeaScoreMaps() : null;
+      const values: Record<string, number> = {};
+      const counts: Record<string, number> = {};
+      const names: Record<string, string> = {};
+      const col = SQL_AGG_METRIC_COLUMN[metric];
+      for (const row of areas) {
+        const key: string = row.key ?? '';
+        if (!key) continue;
+        counts[key] = row.n ?? 0;
+        names[key] = key;
+        if (col) {
+          const v = row[col];
+          if (v != null) values[key] = Number(v);
+        } else if (metric === 'Elem ETA Score') {
+          values[key] = getRealSchoolScore(teaMaps!, 'elementary', key) || 0;
+        } else if (metric === 'Middle ETA Score') {
+          values[key] = getRealSchoolScore(teaMaps!, 'middle', key) || 0;
+        }
+      }
+
+      const n = totals.n ?? 0;
+      const reportStats = {
+        count: n,
+        avgSale: n ? Number(totals.total_volume ?? 0) / n : 0,
+        avgSqft: Number(totals.sqft_sum ?? 0) > 0 ? Number(totals.sqft_sale_sum ?? 0) / Number(totals.sqft_sum) : 0,
+        avgDom: Number(totals.avg_dom ?? 0),
+        totalVolume: Number(totals.total_volume ?? 0),
+        avgList: Number(totals.list_count ?? 0) > 0 ? Number(totals.list_sum ?? 0) / Number(totals.list_count) : 0,
+        avgLotSize: Number(totals.avg_lot ?? 0),
+        avgTaxAmount: Number(totals.avg_tax_amount ?? 0),
+        avgTaxRate: Number(totals.avg_tax_rate ?? 0),
+        taxCoverage: n ? Number(totals.tax_count ?? 0) / n : 0,
+      };
+
+      // Rental metrics score market health as a rental market (page.tsx parity).
+      const isRental =
+        metric === 'Est. Rental Price' ||
+        metric === 'Rental Price per Sqft' ||
+        metric === 'Rental Days On Market' ||
+        metric === 'Rent-to-Sale Ratio';
+      const marketHealth = marketHealthFromAggregates(
+        n,
+        totals.med_dom != null ? Number(totals.med_dom) : null,
+        totals.med_l2s != null ? Number(totals.med_l2s) : null,
+        isRental ? 'rental' : 'sale'
+      );
+
+      const timeSeries = series.map((row: any) => ({
+        period: row.period,
+        value: Number(row[SQL_AGG_METRIC_COLUMN[metric]!] ?? 0) || 0,
+        n: row.n ?? 0,
+      }));
+
+      const yearBuiltData = [
+        { name: 'Before 1970', value: totals.era1 ?? 0 },
+        { name: '1970–1989', value: totals.era2 ?? 0 },
+        { name: '1990–2009', value: totals.era3 ?? 0 },
+        { name: '2010+', value: totals.era4 ?? 0 },
+      ].filter((d) => d.value > 0);
+
+      const points = pointRows.map((row: any) => ({ lat: Number(row.lat ?? 0), lng: Number(row.lng ?? 0) }));
+
+      return NextResponse.json({
+        mapValues: { values, counts, names },
+        reportStats,
+        marketHealth,
+        timeSeries,
+        forecastComparison: [],
+        yearBuiltData,
+        points,
+      });
+    } catch (err) {
+      // Ops not deployed yet (or a thin result) — fall through to the legacy
+      // full-row path so the response stays identical while the connector
+      // deployment catches up.
+      console.warn('[api/query] fast aggregate path failed, using legacy row path:', (err as Error)?.message);
+    }
+  }
+
   try {
-    // 2. Map values + points from the (capped, uniform) filtered sample.
+    // LEGACY PATH — map values + points from the (capped, uniform) sample.
     const mapRes = await dc.executeQuery('filteredProperties', variables);
     const rows: any[] = (mapRes.data as any)?.properties || [];
     const props = rows.map(rowToProperty);

@@ -1,0 +1,301 @@
+KWIZI - HOUSTON REAL ESTATE MAP
+Complete guide: what this is, how it works, and how to run it.
+(Last updated: September 21, 2026)
+
+
+=====================================================================
+1. WHAT THIS APPLICATION IS
+=====================================================================
+
+Kwizi is an interactive real estate map of the Houston area. It lets
+you:
+
+  - View polygons for subdivisions, ZIP codes, schools (elementary,
+    middle, high), neighborhoods, and market areas on a Leaflet map,
+    colored by median price or other metrics.
+  - Select one or more polygons and generate a report (sales stats,
+    time series, 5-year forecast, market health, etc.).
+  - Search properties by address, MLS number, ZIP, or city.
+  - Use an AI chat that answers questions about the map areas.
+  - Manage the data from an admin CMS (CSV uploads, GeoJSON
+    uploads, ads, and property edits).
+
+
+=====================================================================
+2. WHERE EACH PIECE OF DATA LIVES (STORAGE ARCHITECTURE)
+=====================================================================
+
+  CSV data (sales, prices, schools, etc.)
+      -> SQL: Firebase Data Connect / PostgreSQL
+         (service "kwizi-sql", region us-central1)
+         This is the SINGLE SOURCE OF TRUTH for all rows.
+
+  Polygons (GeoJSON)
+      -> Firebase Storage (/geojson/...) with version info in
+         Firestore. The browser downloads them and caches them
+         locally (IndexedDB).
+
+  Ads
+      -> Firebase.
+
+  Raw CSVs uploaded through the CMS
+      -> Firebase Storage (cms_files/csv/...). These are ONLY the
+         ingestion station: the automatic CSV -> SQL bridge. The
+         browser NEVER downloads them.
+
+  Dataset manifest
+      -> Firebase Storage (cms_files/csv/master_cache_chunks.json)
+         The single source of truth for what data is published
+         (version + chunk list).
+
+  Property edits (overrides)
+      -> Firestore. Applied on top of the SQL data.
+
+GOLDEN RULE: every filter, metric, counter, report, time series,
+forecast, and chat answer is computed ON THE SERVER from SQL
+(/api/query). Firebase Storage/Firestore only holds GeoJSON, ads,
+and the CSVs in transit.
+
+
+=====================================================================
+3. HOW THE DATA FLOWS (FROM UPLOAD TO MAP)
+=====================================================================
+
+3.1 UPLOAD (CMS)
+    1. The admin uploads one or more CSVs from the admin page.
+    2. A browser Web Worker processes the CSVs, computes the deltas
+       (rows added/removed), and applies safety gates (expected row
+       count, unreadable or empty file detection).
+    3. On publish, the new dataset chunks are uploaded to Firebase
+       Storage and the manifest is updated with a new version. This
+       automatically triggers the sync to SQL.
+
+3.2 AUTOMATIC CSV -> SQL SYNC
+    - After every publish (and when the admin page opens), the
+      client calls POST /api/sql/sync in a loop.
+    - That route ingests ONE CHUNK PER CALL (resumable, no
+      timeouts): downloads the chunk from Storage, parses it,
+      upserts into the Postgres "properties" table (250-row
+      batches, idempotent by mls_number), and marks the chunk as
+      synced in Firestore (cms_meta/sql_sync).
+    - When the manifest version changed, the route CLEARS the table
+      and starts over, so CMS deletions also reach SQL.
+    - A daily cron (Vercel, vercel.json, 9:00 UTC) and public map
+      visitors can also drive the same sync (routes protected by
+      same-origin check + 60 requests/minute per IP).
+
+3.3 MAP RENDERING
+    1. The browser downloads the GeoJSON polygons from Storage and
+       paints them (cached in IndexedDB kwizi-cache-v2 by version -
+       it invalidates itself when uploadedAt changes).
+    2. In parallel it asks the server for metrics: POST /api/query
+       (mapValues, timeSeries, reportStats, marketHealth, yearBuilt,
+       points, dropdowns, chat stats) and GET /api/sql/distinct
+       (filter lists).
+    3. The first paint uses a static snapshot
+       (/cache/initial_metrics_*.json.gz) to color the map
+       instantly while the real SQL data arrives.
+    4. A watchdog runs every 30 seconds and compares the published
+       version with the one the map is using; if a newer one
+       exists, it reloads automatically. A second watchdog (60 s)
+       detects new deployments.
+
+3.4 DOES THE MAP UPDATE BY ITSELF WHEN NEW DATA IS UPLOADED? -- YES.
+    The flow is fully automatic and does NOT depend on the browser
+    cache:
+
+      CMS upload -> automatic rebuild (worker) -> automatic sync to
+      SQL -> watchdog (30 s) detects the new version -> the map
+      updates itself.
+
+    - The browser does NOT store dataset rows in localStorage or
+      IndexedDB (with SQL as the source there is nothing to
+      download). The only thing cached locally is the GeoJSON
+      polygons, and that cache invalidates itself when the file
+      changes in the CMS.
+    - If SQL has not finished syncing, the map shows
+      "Syncing data..." and waits (polling every 10 s for up to
+      10 minutes) -- it NEVER shows partial data.
+    - If SQL fails, it shows "Data temporarily unavailable --
+      retrying automatically..." with a 30-second retry. There is
+      NO silent fallback.
+
+
+=====================================================================
+4. HOW TO RUN IT (DEVELOPMENT)
+=====================================================================
+
+  1. Install dependencies (once):
+         npm install
+
+  2. Environment variables: create .env.local from
+     .env.local.example (Firebase keys for the "myreatstat"
+     project + Data Connect credentials).
+
+  3. Start development:
+         npm run dev
+         -> http://localhost:3000  (map at /map, CMS at the admin
+            route)
+
+  4. Type-check:
+         npx tsc --noEmit
+
+  5. Production build:
+         npm run build
+         npm run start
+
+NPM SCRIPTS THAT EXIST AND WHAT THEY DO:
+
+  npm run dev
+      Builds the worker bundle (scripts/build-worker.js) and starts
+      Next.js in dev mode.
+
+  npm run build
+      "prebuild" downloads the boundary GeoJSON
+      (scripts/download-boundaries.js), builds the first-paint
+      snapshots (scripts/build-initial-metrics.js -- skips itself
+      when no local manifest exists), and rebuilds the worker. Then
+      runs the Next.js build.
+
+  npm run simplify:boundaries
+      Simplifies (shrinks) the boundary GeoJSON files.
+
+  npm run import:sql
+      Manual bulk import of a CSV into SQL
+      (scripts/import-properties-to-sql.js). NOT needed day to day
+      -- the automatic sync does this work.
+
+
+=====================================================================
+5. PROJECT STRUCTURE (IMPORTANT FOLDERS)
+=====================================================================
+
+  src/app/map/         The map page (the main app)
+  src/app/api/query/   ALL data queries (reads SQL)
+  src/app/api/search/  Search by address/MLS/ZIP/city (SQL)
+  src/app/api/sql/sync/   Automatic Storage -> SQL sync
+  src/app/api/sql/distinct/  Unique values for the filters
+  src/lib/engine.ts    Map engine (polygons, metrics, cache)
+  src/lib/sqlData.ts   SQL query client
+  src/lib/sqlSync.ts   Sync loop driver
+  src/lib/firebaseAdmin.ts   Admin SDK (service-account token)
+  src/lib/datasetRebuild/    Dataset rebuild in the CMS (worker)
+  src/workers/         Browser workers
+  dataconnect/         Data Connect GraphQL schema + connector (SQL)
+  public/geojson/      Boundaries downloaded at build time (43 MB,
+                       this is normal)
+  public/cache/        First-paint snapshots only
+                       (initial_metrics_*.json.gz)
+  public/workers/      Precompiled worker bundle
+  scripts/             6 build/ingest scripts (see section 4)
+  vercel.json          Daily sync cron
+  SETUP-SQL.md         SQL setup notes
+
+
+=====================================================================
+6. REQUIRED SETUP (ONE TIME) -- PENDING / IMPORTANT
+=====================================================================
+
+For the server routes (/api/query, /api/sql/sync, ...) to work in
+production (Vercel):
+
+  1. FIREBASE_SERVICE_ACCOUNT on Vercel -- the service-account key
+     (full JSON) as an environment variable. Without it the server
+     cannot read Storage/Firestore or talk to Data Connect.
+
+     SECURITY: the previous key was exposed. It MUST be rotated:
+     Firebase Console -> Project settings -> Service accounts,
+     delete the old key, create a new one, and update the variable
+     in Vercel.
+
+  2. Deploy the SQL connector after changing
+     dataconnect/connector/*.gql (for example, when adding the
+     search operation):
+
+         firebase deploy --only dataconnect
+
+  3. CRON_SECRET on Vercel (optional) -- so the daily cron
+     authenticates.
+
+The Firebase FREE tier is enough for this whole architecture.
+
+
+=====================================================================
+7. HOW TO DEPLOY
+=====================================================================
+
+The owner does deployments manually (push to GitHub -> Vercel
+deploys). Nothing in this project pushes or deploys on its own.
+
+  git add ... && git commit ... && git push
+
+After a deployment you do NOT need to clear the browser cache: the
+map learns about a new deployment by itself (60-second watchdog)
+and about new data by itself (30-second watchdog + automatic sync).
+
+
+=====================================================================
+8. UPLOADING POLYGONS (GEOJSON) -- IMPORTANT RULES
+=====================================================================
+
+  - The map reads ONLY the "boundary" category, by EXACT file name.
+  - Files are uploaded compressed (.geojson.gz).
+  - When you upload a new version of a polygon, the map detects it
+    because uploadedAt changed and REPLACES its local cache
+    automatically (nothing to clear).
+
+
+=====================================================================
+9. QUICK VERIFICATION CHECKLIST
+=====================================================================
+
+  Map loads without login
+      Open /map in an incognito window: polygons paint.
+
+  Data comes from SQL
+      In DevTools -> Network there must be NO dataset chunk
+      downloads; you should see POST /api/query returning 200.
+
+  Sync finished
+      In Firestore: cms_meta/sql_sync -> done: true with the
+      current version.
+
+  Search works
+      Search an address/ZIP on the map (requires
+      "firebase deploy --only dataconnect").
+
+  Report by selection
+      Select polygons -> Generate Report: the numbers come from SQL
+      (exact fetch, no cap).
+
+  Automatic update
+      Upload a CSV through the CMS -> without reloading anything,
+      the map updates itself (30 s watchdog).
+
+
+=====================================================================
+10. FREQUENTLY ASKED QUESTIONS
+=====================================================================
+
+Q: What is the "cache" folder (public/cache)?
+A: Today it contains ONLY the first-paint snapshots
+   (initial_metrics_*.json.gz): static images of median prices used
+   to color the map in the first second while the SQL data arrives.
+   Everything else that used to live there (349 boundary_*.json.gz
+   chunk files, ~245 MB) was leftover from the old architecture
+   where the browser downloaded the dataset -- it is no longer used
+   and was deleted.
+
+Q: Why do I only see about 5 years of data?
+A: Because the CSVs uploaded so far only cover Sale 2021 and
+   Sale 2026 (~69 thousand rows). The code does not truncate
+   anything: as soon as the CSVs for the other years are uploaded,
+   they will appear in "All data" and in the forecast.
+
+Q: Do I need to clear the browser cache after uploading data?
+A: No. Never.
+
+Q: What happens if a visitor opens the map while SQL is syncing?
+A: They see the map with gray polygons and a "Syncing data..."
+   state; when it finishes, the data appears by itself. They never
+   see half-loaded data.

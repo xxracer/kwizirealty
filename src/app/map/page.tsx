@@ -119,8 +119,6 @@ const KNOWN_BOUNDARY_FILE_NAMES = new Set([
 
 const RATING_OPTIONS = ['A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', 'D', 'D-', 'F'];
 
-type InitialMetricsSnapshot = { values: Record<string, number>; counts: Record<string, number> };
-
 function formatMoney(num: number): string {
   if (!num || !isFinite(num)) return '$0';
   if (num >= 1e6) return '$' + (num / 1e6).toFixed(1) + 'M';
@@ -357,9 +355,8 @@ function MapPageInner() {
   const [reportGeneration, setReportGeneration] = useState(0);
   const [showReportModal, setShowReportModal] = useState(false);
 
-  const [initialMetrics, setInitialMetrics] = useState<
-    Partial<Record<BoundaryKey, { values: Record<string, number>; counts: Record<string, number> }>> | null
-  >(null);
+  // (The baked first-paint metric snapshots were removed: the map now colors
+  // ONLY from the live sales data served by SQL — no cached/partial info.)
 
   // Names + ZIPs per boundary feature, loaded directly from the GeoJSON so the
   // chatbot can resolve queries like "Tomball" → TOMBALL TERRACE / TOMBALL
@@ -542,22 +539,6 @@ function MapPageInner() {
   }, []);
 
   const isMobile = useMediaQuery('(max-width: 1024px)');
-  const loadMetricsForBoundary = useCallback(
-    async (key: BoundaryKey) => {
-      if (initialMetrics?.[key] || key === 'areas') return;
-      try {
-        const data = await engine.fetchGzJson<InitialMetricsSnapshot>(`/cache/initial_metrics_${key}.json.gz`);
-        setInitialMetrics((prev) => ({ ...(prev || {}), [key]: data }));
-      } catch (err) {
-        console.error(`[Kwizi Map] failed to load initial metrics for ${key}`, err);
-      }
-    },
-    [initialMetrics]
-  );
-
-  useEffect(() => {
-    loadMetricsForBoundary(boundary);
-  }, [boundary, loadMetricsForBoundary]);
 
   // Load the active boundary's GeoJSON and build an id → {name, zip} lookup so
   // the chat can resolve city/area names even before the CSV report is ready.
@@ -615,18 +596,6 @@ function MapPageInner() {
       cancelled = true;
     };
   }, [boundary, boundaryLookup]);
-
-  useEffect(() => {
-    // Preload the remaining boundary snapshots in the background once the active
-    // one is available. They are tiny compared to the CSV and make switching
-    // boundaries feel instant.
-    if (!initialMetrics?.[boundary]) return;
-    for (const b of BOUNDARIES) {
-      if (b.key !== boundary && !initialMetrics?.[b.key]) {
-        loadMetricsForBoundary(b.key);
-      }
-    }
-  }, [boundary, initialMetrics, loadMetricsForBoundary]);
 
   useEffect(() => {
     const seen = typeof window !== 'undefined' ? window.localStorage.getItem('kwizi-tour-seen') : 'true';
@@ -1108,15 +1077,11 @@ function MapPageInner() {
     ? reportPhase === 'ready' && (workerAgg.result !== null || workerAgg.datasetCount === 0)
     : reportPhase === 'ready';
 
-  // Use the lightweight pre-computed snapshot for instant map coloring while
-  // the full CSV dataset is still loading in the background.
-  const effectiveMetricValues = dataReady
-    ? metricValues
-    : initialMetrics?.[boundary]?.values ?? {};
-  const effectiveSampleCounts = dataReady
-    ? sampleCounts
-    : initialMetrics?.[boundary]?.counts ?? {};
-  const effectiveNameMap = dataReady ? nameMap : {};
+  // No cached snapshot: the map colors strictly from the live sales data
+  // (SQL aggregates once the concluded load lands; empty until then).
+  const effectiveMetricValues = metricValues;
+  const effectiveSampleCounts = sampleCounts;
+  const effectiveNameMap = nameMap;
 
   // Seed the manual range inputs from the current data. While Auto scale is
   // on, the inputs track the dataset; the moment the user turns it off we
@@ -2750,7 +2715,7 @@ function MapPageInner() {
                       />
                       Multi-select
                     </label>
-                    <WindowSelector active={activeWindows} onChange={setActiveWindows} />
+                    <WindowSelector active={activeWindows} onChange={setActiveWindows} period={appliedFilters.period} />
                   </div>
                 </div>
 
@@ -2801,7 +2766,14 @@ function MapPageInner() {
                     onReset={handleReset}
                     reportGenerated={reportGenerated}
                     isReportLoading={reportPhase === 'loading' && dataLoadKind === 'report'}
-                    isDataLoading={reportPhase === 'loading' && dataLoadKind === 'data'}
+                    // In SQL mode the "Loading Data…" overlay must stay up until
+                    // the aggregate actually lands (the SQL gate passes in ms and
+                    // used to clear the popup while the polygons were still gray).
+                    // Once sqlFailed flips, the retry banner takes over instead.
+                    isDataLoading={
+                      (reportPhase === 'loading' && dataLoadKind === 'data') ||
+                      (useSql && !sqlAgg && !sqlFailed)
+                    }
                     isDataUpdating={dataUpdatePending}
                     focusSelectionTick={searchFocusTick}
                   />
@@ -2889,6 +2861,7 @@ function MapPageInner() {
                   boundary={boundary}
                   onHide={clearReport}
                   isLoading={!dataReady}
+                  period={appliedFilters.period}
                   pinnedWindows={activeWindows}
                   onToggleWindow={(key) => {
                     if (activeWindows.includes(key)) {

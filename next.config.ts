@@ -21,10 +21,6 @@ const nextConfig: NextConfig = {
         // is deliberately no <link rel=preload> for these files — preload
         // never matches a cache:'no-store' fetch and just downloaded the file
         // twice.
-        source: '/cache/:path*',
-        headers: [{ key: 'Cache-Control', value: 'no-store, max-age=0' }],
-      },
-      {
         source: '/geojson/:path*',
         headers: [{ key: 'Cache-Control', value: 'no-store, max-age=0' }],
       },

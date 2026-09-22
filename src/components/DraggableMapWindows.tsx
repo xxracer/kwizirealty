@@ -13,6 +13,7 @@ import {
   TopAreasCard,
   ForecastComparisonCard,
   SalesTaxRentCard,
+  forecastTitle,
   type MarketHealth,
   type Forecast,
   type ForecastRow,
@@ -208,6 +209,7 @@ export default function DraggableMapWindows({
                   forecast={forecast}
                   isLoading={isLoading}
                   compact
+                  period={period}
                   dragHandle={<div className="p-1 rounded bg-white/5 text-gray-500 cursor-move"><GripVertical className="w-3.5 h-3.5" /></div>}
                 />
               )}
@@ -249,9 +251,12 @@ export default function DraggableMapWindows({
 export function WindowSelector({
   active,
   onChange,
+  period,
 }: {
   active: WindowType[];
   onChange: (next: WindowType[]) => void;
+  /** Close Period filter — the forecast entry mirrors its label. */
+  period?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -324,7 +329,9 @@ export function WindowSelector({
                       className="rounded border-white/20 bg-white/5 text-blue-500 focus:ring-blue-500 disabled:opacity-40"
                     />
                     <div className={`w-6 h-6 rounded-lg bg-white/5 flex items-center justify-center ${def.color}`}>{def.icon}</div>
-                    <span className="text-[10px] font-semibold text-gray-300">{def.title}</span>
+                    <span className="text-[10px] font-semibold text-gray-300">
+                      {def.key === 'forecast' ? forecastTitle(period) : def.title}
+                    </span>
                   </div>
                   {checked && active.length > 1 && (
                     <div className="flex items-center justify-end gap-0.5">
