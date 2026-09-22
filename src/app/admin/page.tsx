@@ -11,6 +11,7 @@ import {
   type CMSStoreSummary,
   type CMSFileCategory,
 } from '@/lib/cmsStore';
+import { auth } from '@/lib/firebase';
 import { engine, type BoundaryKey, type MetricKey, type PropertyData } from '@/lib/engine';
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import {
@@ -1234,34 +1235,70 @@ function AdminPageInner() {
       rowCount: staged.record.category === 'boundary' || staged.record.category === 'custom-area' ? 0 : rowsToSave.length,
     };
 
+    // Property CSVs (sales, rent, current, tax, schools) go straight to SQL
+    // Connect; only GeoJSON boundaries stay in Firebase Storage.
+    const isSqlImport =
+      staged.record.category !== 'boundary' && staged.record.category !== 'custom-area';
+
     try {
-      // Remove every existing file with the same name BEFORE saving the new
-      // one — they all share ONE storage object (the path is the file name),
-      // so deleting after the save would destroy the new upload's bytes.
+      // Remove any existing file with the same name first so the metadata doc
+      // doesn't accumulate duplicates.
       for (const dup of files.filter((f) => f.name === staged.record.name)) {
         await cmsStore.removeFile(dup.id);
       }
-      await cmsStore.saveFile(recordToSave);
-      setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
-      await loadData();
-      // Dataset rebuild is asynchronous; wait for it to publish before
-      // refreshing the engine so the user sees the new data immediately.
-      const { waitForDatasetRebuild } = await import('@/lib/datasetRebuild/client');
-      try {
-        await waitForDatasetRebuild();
-      } catch (rebuildErr) {
-        setToast({ type: 'error', message: (rebuildErr as Error).message || 'Map data update failed.' });
-        setProcessing(false);
-        return;
+
+      if (isSqlImport) {
+        // Send the parsed rows directly to SQL Connect.
+        const token = await auth.currentUser?.getIdToken();
+        const importRes = await fetch('/api/sql/import', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            rows: rowsToSave,
+            type: staged.record.category,
+            fileName: staged.record.name,
+            mode,
+          }),
+        });
+        if (!importRes.ok) {
+          const errBody = await importRes.json().catch(() => ({}));
+          throw new Error(errBody.error || `SQL import failed (${importRes.status})`);
+        }
+        await cmsStore.saveSqlImportMetadata(recordToSave);
+        setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
+        await loadData();
+        await reloadEngine();
+        setToast({
+          type: 'success',
+          message: `${staged.record.name} imported into SQL (${rowsToSave.length.toLocaleString()} rows). The map will refresh automatically.`,
+        });
+      } else {
+        // GeoJSON: keep the Storage + Firestore flow.
+        await cmsStore.saveFile(recordToSave);
+        setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
+        await loadData();
+        // Dataset rebuild is asynchronous; wait for it to publish before
+        // refreshing the engine so the user sees the new data immediately.
+        const { waitForDatasetRebuild } = await import('@/lib/datasetRebuild/client');
+        try {
+          await waitForDatasetRebuild();
+        } catch (rebuildErr) {
+          setToast({ type: 'error', message: (rebuildErr as Error).message || 'Map data update failed.' });
+          setProcessing(false);
+          return;
+        }
+        await reloadEngine();
+        setToast({
+          type: 'success',
+          message: `${staged.record.name} added successfully and map data is now available (${rowsToSave.length.toLocaleString()} rows).`,
+        });
       }
-      await reloadEngine();
-      setToast({
-        type: 'success',
-        message: `${staged.record.name} added successfully and map data is now available (${rowsToSave.length.toLocaleString()} rows).`,
-      });
     } catch (err) {
       console.error('Upload error', err);
-      setToast({ type: 'error', message: `Error uploading ${staged.record.name}` });
+      setToast({ type: 'error', message: `Error uploading ${staged.record.name}: ${(err as Error).message}` });
     }
     setProcessing(false);
   };

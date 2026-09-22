@@ -253,6 +253,23 @@ export const cmsStore = {
     }
   },
 
+  /**
+   * SQL-first upload: persist only the metadata doc in Firestore. The CSV bytes
+   * are NOT sent to Storage — they were already upserted into SQL Connect by
+   * /api/sql/import. GeoJSON files still use saveFile() with Storage.
+   */
+  async saveSqlImportMetadata(record: CMSFileRecord): Promise<void> {
+    const { rows, rawContent, ...recordWithoutRows } = record;
+    const metadata = {
+      ...recordWithoutRows,
+      // No storageUrl/storagePath: the data lives in SQL, not Storage.
+      rowCount: record.rows.length,
+      sqlImport: true,
+    };
+    await setDoc(doc(db, FILES_STORE, record.id), metadata);
+    emit();
+  },
+
   async removeFile(id: string): Promise<void> {
     let removedRowCount = 0;
     let removedCategory: CMSFileCategory | null = null;
@@ -262,24 +279,28 @@ export const cmsStore = {
         const metadata = docSnap.data() as CMSFileRecord;
         removedRowCount = metadata.rowCount || 0;
         removedCategory = metadata.category;
-        const pathToDelete = metadata.storagePath || `cms_files/${id}.csv`;
-        // Two files with the same name share ONE storage object (the path is
-        // the file name). A replace flow saves the new file first and then
-        // removes the old doc — deleting the shared path here would destroy
-        // the NEW upload's bytes. Skip the storage delete whenever another
-        // metadata doc still references the same path.
-        let sharedPath = false;
-        try {
-          const dupSnap = await getDocs(
-            fsQuery(collection(db, FILES_STORE), where('storagePath', '==', pathToDelete))
-          );
-          sharedPath = dupSnap.docs.some((d) => d.id !== id);
-        } catch {
-          sharedPath = true; // fail-safe: never delete when the check fails
-        }
-        if (!sharedPath) {
-          const storageRef = ref(storage, pathToDelete);
-          await deleteObject(storageRef);
+        const pathToDelete = metadata.storagePath;
+        // SQL-only imports have no storagePath; only GeoJSON/legacy CSV files
+        // live in Storage and need cleanup there.
+        if (pathToDelete) {
+          // Two files with the same name share ONE storage object (the path is
+          // the file name). A replace flow saves the new file first and then
+          // removes the old doc — deleting after the save would destroy the
+          // NEW upload's bytes. Skip the storage delete whenever another
+          // metadata doc still references the same path.
+          let sharedPath = false;
+          try {
+            const dupSnap = await getDocs(
+              fsQuery(collection(db, FILES_STORE), where('storagePath', '==', pathToDelete))
+            );
+            sharedPath = dupSnap.docs.some((d) => d.id !== id);
+          } catch {
+            sharedPath = true; // fail-safe: never delete when the check fails
+          }
+          if (!sharedPath) {
+            const storageRef = ref(storage, pathToDelete);
+            await deleteObject(storageRef);
+          }
         }
       }
     } catch (e) {

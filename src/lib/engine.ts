@@ -5,6 +5,8 @@ import { ref, getDownloadURL } from 'firebase/storage';
 import { storage } from './firebase';
 import * as core from './engineCore';
 import type { DataSourcePlan } from './engineWorker/protocol';
+import { isSQLEnabled } from './sqlData';
+import { resolveSqlDatasetVersion } from './sqlSync';
 
 // Re-export the pure core (types + helpers + aggregation math) so every
 // existing `from '@/lib/engine'` import keeps working.
@@ -159,8 +161,22 @@ export class RealEstateEngine {
    * Resolve where the aggregation worker should fetch the dataset from.
    * Returns null when no chunked manifest is available — the caller then has
    * to fall back to the main-thread engine paths (master file / manifest).
+   *
+   * SQL-first mode: the map never downloads chunks, so the "plan" is just a
+   * version marker taken from the Firestore sync state. The Storage manifest
+   * is intentionally ignored because CSV files no longer live there.
    */
   public async resolveDataSource(): Promise<DataSourcePlan | null> {
+    if (isSQLEnabled()) {
+      const sqlVersion = await resolveSqlDatasetVersion();
+      if (!sqlVersion) return null;
+      return {
+        bucket: this.storageBucket,
+        chunks: [],
+        totalRows: sqlVersion.totalRows,
+        version: sqlVersion.version,
+      };
+    }
     const chunked = await this.findChunkedCache();
     if (!chunked) return null;
     if (chunked.boundaries) {

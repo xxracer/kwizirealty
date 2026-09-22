@@ -187,7 +187,7 @@ export async function POST(req: Request) {
 
   const pending = allChunks.filter((c) => !syncedChunks.includes(c));
   if (pending.length === 0) {
-    await stateRef.set({ version, syncedChunks, done: true, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    await stateRef.set({ version, syncedChunks, done: true, totalRows: manifest.totalRows ?? 0, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
     return NextResponse.json({ ok: true, done: true, version, synced: allChunks.length, total: allChunks.length });
   }
 

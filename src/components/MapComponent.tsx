@@ -374,12 +374,12 @@ export default function MapComponent({
       if (!key) return;
 
       const value = metricValues[key];
-      // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing
-      // or non-finite values mean "no data" for this area.
-      const hasMetric = typeof value === 'number' && isFinite(value);
-      if (!hasMetric && hasAnyMetric) return;
-      const color = hasMetric ? getColorForValue(value, colorStops) : '#374151';
       const count = sampleCounts[key] || 0;
+      // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing
+      // or non-finite values mean "no data" for this area. No-data areas are
+      // kept and rendered grey/opaque so boundaries are always visible.
+      const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
+      const color = hasMetric ? getColorForValue(value, colorStops) : '#374151';
       const name = nameMap[key] || String(rawName || key);
 
       // Only push if there's valid geometry
@@ -1190,16 +1190,26 @@ export default function MapComponent({
 
   const areaLayerJustBuiltRef = useRef(false);
 
-  const makeAreaStyle = (id: string, value: number | undefined, selected: boolean) => ({
-    // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing or
-    // non-finite values mean "no data", otherwise a true 0 would paint grey
-    // and contradict the legend.
-    fillColor: typeof value === 'number' && isFinite(value) ? getColorForValue(value, colorStopsRef.current) : '#374151',
-    color: selected ? '#ec4899' : '#ffffff',
-    weight: selected ? 2.5 : 0.75,
-    opacity: Math.min(0.65, fillOpacityRef.current + 0.15),
-    fillOpacity: selected ? Math.min(0.8, fillOpacityRef.current + 0.3) : fillOpacityRef.current,
-  });
+  const makeAreaStyle = (id: string, value: number | undefined, selected: boolean, count = 1) => {
+    const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
+    if (!hasMetric) {
+      // No-data polygons are always rendered so boundaries stay visible.
+      return {
+        fillColor: '#374151',
+        color: selected ? '#ec4899' : '#ffffff',
+        weight: selected ? 2.5 : 0.75,
+        opacity: Math.min(0.65, fillOpacityRef.current + 0.15),
+        fillOpacity: selected ? Math.min(0.8, fillOpacityRef.current + 0.3) : fillOpacityRef.current,
+      };
+    }
+    return {
+      fillColor: getColorForValue(value, colorStopsRef.current),
+      color: selected ? '#ec4899' : '#ffffff',
+      weight: selected ? 2.5 : 0.75,
+      opacity: Math.min(0.65, fillOpacityRef.current + 0.15),
+      fillOpacity: selected ? Math.min(0.8, fillOpacityRef.current + 0.3) : fillOpacityRef.current,
+    };
+  };
 
   const updateAreaLayerStyles = () => {
     if (!areaLayerRef.current) return;
@@ -1211,18 +1221,19 @@ export default function MapComponent({
       const value = metricValuesRef.current[id];
       const count = sampleCountsRef.current[id] || 0;
       const name = nameMapRef.current[id] || id;
-      // 0 is a legitimate metric value — see makeAreaStyle.
-      const hasMetric = typeof value === 'number' && isFinite(value);
+      const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
       const color = hasMetric ? getColorForValue(value, colorStopsRef.current) : '#374151';
 
       props.value = value ?? 0;
       props.count = count;
       props.name = name;
       props.color = color;
-      props.hasMetric = !!hasMetric;
+      props.hasMetric = hasMetric;
 
       const selected = selectedRef.current.includes(id);
-      layer.setStyle(makeAreaStyle(id, value, selected));
+      layer.setStyle(makeAreaStyle(id, value, selected, count));
+      // No-data boundaries stay interactive (hover/click) — they are visible.
+      if (layer.options) layer.options.interactive = true;
     });
   };
 
@@ -1264,12 +1275,13 @@ export default function MapComponent({
       style: (feature) => {
         const props = (feature?.properties || {}) as Record<string, any>;
         const id = String(props.id ?? (feature as any).id ?? '');
-        return makeAreaStyle(id, props.value, selectedRef.current.includes(id));
+        return makeAreaStyle(id, props.value, selectedRef.current.includes(id), props.count ?? 0);
       },
       onEachFeature: (feature, layer) => {
         const pathLayer = layer as L.Path;
         const props = (feature.properties || {}) as Record<string, any>;
         const id = String(props.id ?? (feature as any).id ?? '');
+        const hasMetric = props.hasMetric === true;
 
         pathLayer.on('mouseover', (e) => {
           pathLayer.setStyle({ weight: 1.6, color: '#00d4ff', fillOpacity: Math.min(0.8, fillOpacityRef.current + 0.3) });
@@ -1289,7 +1301,7 @@ export default function MapComponent({
 
         pathLayer.on('mouseout', () => {
           const selected = selectedRef.current.includes(id);
-          pathLayer.setStyle(makeAreaStyle(id, props.value, selected));
+          pathLayer.setStyle(makeAreaStyle(id, props.value, selected, props.count ?? 0));
           popupRef.current?.close();
         });
 
@@ -1359,7 +1371,8 @@ export default function MapComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [metricValues, sampleCounts, nameMap, colorStops, fillOpacity]);
 
-  // Sync selection styles without rebuilding layers
+  // Sync selection styles without rebuilding layers. Hidden (count 0) areas
+  // keep their invisible style regardless of selection.
   useEffect(() => {
     if (!areaLayerRef.current) return;
     areaLayerRef.current.eachLayer((layer: any) => {
@@ -1368,7 +1381,7 @@ export default function MapComponent({
       const props = (feature.properties || {}) as Record<string, any>;
       const id = String(props.id ?? feature.id ?? '');
       const selected = selectedIds.includes(id);
-      layer.setStyle(makeAreaStyle(id, props.value, selected));
+      layer.setStyle(makeAreaStyle(id, props.value, selected, props.count ?? 0));
     });
   }, [selectedIds]);
 

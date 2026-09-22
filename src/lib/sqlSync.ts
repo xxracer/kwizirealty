@@ -17,6 +17,7 @@ export const SQL_SYNC_STATE_PATH = 'cms_meta/sql_sync';
 export interface SqlSyncState {
   version: number;
   done: boolean;
+  totalRows?: number;
 }
 
 async function callSync(): Promise<{ done: boolean; version: number } | null> {
@@ -61,9 +62,21 @@ export async function readSqlSyncState(): Promise<SqlSyncState | null> {
   try {
     const snap = await getDoc(doc(db, 'cms_meta', 'sql_sync'));
     if (!snap.exists) return null;
-    const data = snap.data() as { version?: number; done?: boolean };
-    return { version: data.version ?? 0, done: data.done === true };
+    const data = snap.data() as { version?: number; done?: boolean; totalRows?: number };
+    return { version: data.version ?? 0, done: data.done === true, totalRows: data.totalRows ?? 0 };
   } catch {
     return null;
   }
+}
+
+/** SQL-first dataset source of truth. When SQL is enabled the map must not
+ *  depend on the Firebase Storage manifest (the user deleted those files).
+ *  This returns a DataSourcePlan-shaped object from the Firestore sync state.
+ */
+type SqlDatasetVersion = { version: number; totalRows: number } | null;
+
+export async function resolveSqlDatasetVersion(): Promise<SqlDatasetVersion> {
+  const st = await readSqlSyncState();
+  if (!st?.done) return null;
+  return { version: st.version, totalRows: st.totalRows ?? 0 };
 }

@@ -29,7 +29,7 @@ import {
   fetchSqlDistinct,
   type SqlAggregates,
 } from '@/lib/sqlData';
-import { readSqlSyncState, runSqlSync } from '@/lib/sqlSync';
+import { readSqlSyncState } from '@/lib/sqlSync';
 import { resolveQueriesToZips } from '@/lib/areaAliases';
 import { formatMetricValue } from '@/lib/legendFormat';
 import { useWorkerAggregates } from './useWorkerAggregates';
@@ -672,34 +672,16 @@ function MapPageInner() {
     // this drives the resumable CSV→SQL mirror and waits for it to complete.
     const runWorker = async (): Promise<boolean | 'sql-timeout'> => {
       if (isSQLEnabled()) {
+        // SQL-first: the dataset version comes from cms_meta/sql_sync, not from
+        // a Storage manifest. The admin panel now uploads CSVs directly to SQL,
+        // so there is no "mirror" loop to wait for.
         const sqlPlan = await engine.resolveDataSource();
-        const syncState = sqlPlan ? await readSqlSyncState() : null;
-        if (sqlPlan && syncState?.done && syncState.version === (sqlPlan.version ?? 0)) {
+        if (sqlPlan) {
           setSqlSyncReady(true);
           loadedDatasetVersionRef.current = sqlPlan.version ?? 0;
           return true;
         }
-        // Mirror missing or stale (e.g. a fresh CMS publish not mirrored yet).
-        // No worker fallback: SQL is the single source of property data, so
-        // keep the loading state, drive the mirror and poll until it lands.
         setSqlSyncReady(false);
-        loadedDatasetVersionRef.current = sqlPlan?.version ?? 0;
-        console.log('[Kwizi Map] SQL mirror not ready — syncing CSV → SQL');
-        runSqlSync().catch(() => {});
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < 600000) {
-          await new Promise((r) => setTimeout(r, 10000));
-          const st = await readSqlSyncState().catch(() => null);
-          if (st?.done && st.version === (sqlPlan?.version ?? 0)) {
-            setSqlSyncReady(true);
-            setReportPhase('ready');
-            setReportGeneration((g) => g + 1);
-            setReportError(null);
-            updateInFlightRef.current = false;
-            setDataUpdatePending(false);
-            return true;
-          }
-        }
         return 'sql-timeout';
       }
       if (workerAgg.workerUnavailable) return false;
@@ -817,35 +799,14 @@ function MapPageInner() {
         updateInFlightRef.current = true;
         setDataUpdatePending(true);
         if (isSQLEnabled()) {
-          // SQL-primary mode: never re-download the ~763k-row dataset just
-          // because the manifest moved — drive the SQL mirror from here and
-          // wait for it to catch up, then ONE cheap /api/query refresh serves
-          // the new data. Bounded: if the mirror doesn't land in 3 minutes the
-          // overlay clears and loadFullData re-enters its own mirror-wait loop
-          // (the map never falls back to a dataset download).
-          runSqlSync().catch(() => {});
-          const startedAt = Date.now();
-          const pollMirror = async () => {
-            while (!stopped && Date.now() - startedAt < 180000) {
-              await new Promise((r) => setTimeout(r, 10000));
-              if (stopped) return;
-              const st = await readSqlSyncState().catch(() => null);
-              if (stopped) return;
-              if (st?.done && st.version === version) {
-                setSqlSyncReady(true);
-                setSqlFailed(false);
-                updateInFlightRef.current = false;
-                setDataUpdatePending(false);
-                loadFullData({ force: true }); // SQL fast path + dropdown refresh
-                return;
-              }
-            }
-            if (stopped) return;
-            updateInFlightRef.current = false;
-            setDataUpdatePending(false);
-            loadFullData({ force: true }); // mirror stalled — re-enter the wait loop
-          };
-          pollMirror();
+          // SQL-primary mode: the admin uploads CSVs directly to SQL, so a new
+          // version in sql_sync already means SQL has the data. Just refresh the
+          // SQL aggregates — no Storage mirror to drive.
+          setSqlSyncReady(true);
+          setSqlFailed(false);
+          updateInFlightRef.current = false;
+          setDataUpdatePending(false);
+          loadFullData({ force: true }); // SQL fast path + dropdown refresh
           return;
         }
         loadFullData({ force: true });
