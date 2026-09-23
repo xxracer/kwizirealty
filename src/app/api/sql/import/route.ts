@@ -52,8 +52,11 @@ export async function POST(req: Request) {
   }
 
   const { rows, type, mode = 'upsert' } = body;
-  if (!Array.isArray(rows) || rows.length === 0 || !type) {
-    return NextResponse.json({ error: 'Bad request: rows and type required' }, { status: 400 });
+  if (!type) {
+    return NextResponse.json({ error: 'Bad request: type required' }, { status: 400 });
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return NextResponse.json({ error: 'Bad request: rows array required' }, { status: 400 });
   }
   if (mode !== 'upsert' && mode !== 'replace') {
     return NextResponse.json({ error: 'Bad request: mode must be upsert or replace' }, { status: 400 });

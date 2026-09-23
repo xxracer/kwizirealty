@@ -50,6 +50,9 @@ export interface PropertyData {
 
   propertyType: string;
   pool: boolean;
+
+  /** 'rent' for rental records (actual rental price in closePrice), otherwise treated as a sale. */
+  listingType?: string;
 }
 
 export type BoundaryKey =
@@ -424,6 +427,7 @@ export function normalizeRow(row: Record<string, unknown>): PropertyData | null 
 
     propertyType: String(row['Property Type'] || '').trim(),
     pool: cleanBool(String(row['Pool Private'] || '')),
+    listingType: String(row['Listing Type'] || '').trim() || 'sale',
   };
 }
 
@@ -658,7 +662,9 @@ export function getBoundaryKeyFor(boundary: BoundaryKey, item: PropertyData): st
 }
 
 export function getRentalPrice(item: PropertyData): number {
-  return item.closePrice * 0.008;
+  // When the row is an actual rental record, closePrice already holds the
+  // monthly rent; otherwise fall back to the sale-price estimate.
+  return item.listingType === 'rent' ? item.closePrice : item.closePrice * 0.008;
 }
 
 export function getAnnualHOAFee(item: PropertyData): number {

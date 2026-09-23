@@ -44,6 +44,7 @@ query filteredProperties(
   $middleRating: [String!]
   $highschoolsExplicit: [String!]
   $highSchoolRating: [String!]
+  $listingType: String!
   $limit: Int!
 ) @auth(level: USER) {
   properties: _select(
@@ -59,7 +60,8 @@ query filteredProperties(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND close_price * 0.008 >= $19 AND close_price * 0.008 <= $20
+      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) >= $19
+      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) <= $20
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -71,8 +73,13 @@ query filteredProperties(
       AND (COALESCE(cardinality($30::text[]), 0) = 0 OR middle = ANY($30::text[]))
       AND (COALESCE(cardinality($31::text[]), 0) = 0 OR highschools = ANY($31::text[]))
       AND (COALESCE(cardinality($32::text[]), 0) = 0 OR highschool_name = ANY($32::text[]))
+      AND (
+        $33 = 'both'
+        OR listing_type = $33
+        OR ($33 = 'sale' AND (listing_type IS NULL OR listing_type = ''))
+      )
     ORDER BY md5(mls_number)
-    LIMIT $33
+    LIMIT $34
     """,
     params: [
       $saleMin, $saleMax, $sqftMin, $sqftMax, $yearMin, $yearMax,
@@ -84,7 +91,7 @@ query filteredProperties(
       $elementaryExplicit, $elementaryRating,
       $middleExplicit, $middleRating,
       $highschoolsExplicit, $highSchoolRating,
-      $limit
+      $listingType, $limit
     ]
   )
 }
@@ -126,6 +133,7 @@ query filteredPropertiesForSelection(
   $highschoolsExplicit: [String!]
   $highSchoolRating: [String!]
   $selectedIds: [String!]!
+  $listingType: String!
 ) @auth(level: USER) {
   properties: _select(
     sql: """
@@ -140,7 +148,8 @@ query filteredPropertiesForSelection(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND close_price * 0.008 >= $19 AND close_price * 0.008 <= $20
+      AND (close_price * CASE WHEN $35 = 'rent' THEN 1 ELSE 0.008 END) >= $19
+      AND (close_price * CASE WHEN $35 = 'rent' THEN 1 ELSE 0.008 END) <= $20
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -162,6 +171,11 @@ query filteredPropertiesForSelection(
         WHEN 'areas' THEN area
         ELSE subdivisions
       END = ANY($33::text[])
+      AND (
+        $35 = 'both'
+        OR listing_type = $35
+        OR ($35 = 'sale' AND (listing_type IS NULL OR listing_type = ''))
+      )
     """,
     params: [
       $saleMin, $saleMax, $sqftMin, $sqftMax, $yearMin, $yearMax,
@@ -173,7 +187,7 @@ query filteredPropertiesForSelection(
       $elementaryExplicit, $elementaryRating,
       $middleExplicit, $middleRating,
       $highschoolsExplicit, $highSchoolRating,
-      $selectedIds, $boundary
+      $selectedIds, $boundary, $listingType
     ]
   )
 }
@@ -265,6 +279,7 @@ query areaMapValues(
   $middleRating: [String!]
   $highschoolsExplicit: [String!]
   $highSchoolRating: [String!]
+  $listingType: String!
 ) @auth(level: USER) {
   areas: _select(
     sql: """
@@ -285,10 +300,10 @@ query areaMapValues(
       percentile_cont(0.5) WITHIN GROUP (ORDER BY list_price::float / sqft) FILTER (WHERE list_price > 0 AND sqft > 0) AS med_ppsf_list,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) AS med_l2s,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) AS med_dom,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * 0.008) FILTER (WHERE close_price > 0) AS med_rent,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) FILTER (WHERE close_price > 0) AS med_rent,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY 0.096) FILTER (WHERE close_price > 0) AS med_rts,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * 0.008 / sqft) FILTER (WHERE sqft > 0 AND close_price > 0) AS med_rent_psf,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY ROUND((CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) * 0.85)) FILTER (WHERE (CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) > 0) AS med_rent_dom,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) / sqft) FILTER (WHERE sqft > 0 AND close_price > 0) AS med_rent_psf,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY ROUND((CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.85 END)) FILTER (WHERE (CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) > 0) AS med_rent_dom,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0) AS med_lot,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0)) AS med_tax_rate
@@ -303,7 +318,8 @@ query areaMapValues(
       AND lot_size >= $16 AND lot_size <= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $18
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $19
-      AND close_price * 0.008 >= $20 AND close_price * 0.008 <= $21
+      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) >= $20
+      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) <= $21
       AND ($22 IS NULL OR (close_date_ts >= $22::bigint AND close_date_ts <= $23::bigint))
       AND (COALESCE(cardinality($24::text[]), 0) = 0 OR property_type = ANY($24::text[]))
       AND ($25 = 'any' OR ($25 = 'yes' AND pool) OR ($25 = 'no' AND NOT pool))
@@ -335,6 +351,11 @@ query areaMapValues(
         WHEN 'areas' THEN area
         ELSE subdivisions
       END) NOT IN ('NA', 'N/A', 'NONE', 'NULL', 'UNKNOWN', 'UNINCORPORATED')
+      AND (
+        $34 = 'both'
+        OR listing_type = $34
+        OR ($34 = 'sale' AND (listing_type IS NULL OR listing_type = ''))
+      )
     GROUP BY 1
     """,
     params: [
@@ -347,7 +368,8 @@ query areaMapValues(
       $propertyTypes, $pool, $schoolDistricts, $cities,
       $elementaryExplicit, $elementaryRating,
       $middleExplicit, $middleRating,
-      $highschoolsExplicit, $highSchoolRating
+      $highschoolsExplicit, $highSchoolRating,
+      $listingType
     ]
   )
 }
@@ -387,6 +409,7 @@ query overallAggregates(
   $middleRating: [String!]
   $highschoolsExplicit: [String!]
   $highSchoolRating: [String!]
+  $listingType: String!
 ) @auth(level: USER) {
   totals: _selectFirst(
     sql: """
@@ -419,7 +442,8 @@ query overallAggregates(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND close_price * 0.008 >= $19 AND close_price * 0.008 <= $20
+      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) >= $19
+      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) <= $20
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -431,6 +455,11 @@ query overallAggregates(
       AND (COALESCE(cardinality($30::text[]), 0) = 0 OR middle = ANY($30::text[]))
       AND (COALESCE(cardinality($31::text[]), 0) = 0 OR highschools = ANY($31::text[]))
       AND (COALESCE(cardinality($32::text[]), 0) = 0 OR highschool_name = ANY($32::text[]))
+      AND (
+        $33 = 'both'
+        OR listing_type = $33
+        OR ($33 = 'sale' AND (listing_type IS NULL OR listing_type = ''))
+      )
     """,
     params: [
       $saleMin, $saleMax, $sqftMin, $sqftMax, $yearMin, $yearMax,
@@ -441,7 +470,8 @@ query overallAggregates(
       $propertyTypes, $pool, $schoolDistricts, $cities,
       $elementaryExplicit, $elementaryRating,
       $middleExplicit, $middleRating,
-      $highschoolsExplicit, $highSchoolRating
+      $highschoolsExplicit, $highSchoolRating,
+      $listingType
     ]
   )
 }
@@ -485,6 +515,7 @@ query monthlyTimeSeries(
   $middleRating: [String!]
   $highschoolsExplicit: [String!]
   $highSchoolRating: [String!]
+  $listingType: String!
 ) @auth(level: USER) {
   series: _select(
     sql: """
@@ -496,8 +527,8 @@ query monthlyTimeSeries(
       percentile_cont(0.5) WITHIN GROUP (ORDER BY list_price::float / sqft) FILTER (WHERE list_price > 0 AND sqft > 0) AS med_ppsf_list,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) AS med_l2s,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) AS med_dom,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * 0.008) FILTER (WHERE close_price > 0) AS med_rent,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * 0.008 / sqft) FILTER (WHERE sqft > 0 AND close_price > 0) AS med_rent_psf,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) FILTER (WHERE close_price > 0) AS med_rent,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) / sqft) FILTER (WHERE sqft > 0 AND close_price > 0) AS med_rent_psf,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0) AS med_lot,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0)) AS med_tax_rate
@@ -512,7 +543,8 @@ query monthlyTimeSeries(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND close_price * 0.008 >= $19 AND close_price * 0.008 <= $20
+      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) >= $19
+      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) <= $20
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -525,6 +557,11 @@ query monthlyTimeSeries(
       AND (COALESCE(cardinality($31::text[]), 0) = 0 OR highschools = ANY($31::text[]))
       AND (COALESCE(cardinality($32::text[]), 0) = 0 OR highschool_name = ANY($32::text[]))
       AND close_date_ts > 0
+      AND (
+        $33 = 'both'
+        OR listing_type = $33
+        OR ($33 = 'sale' AND (listing_type IS NULL OR listing_type = ''))
+      )
     GROUP BY 1
     ORDER BY 1
     """,
@@ -537,7 +574,8 @@ query monthlyTimeSeries(
       $propertyTypes, $pool, $schoolDistricts, $cities,
       $elementaryExplicit, $elementaryRating,
       $middleExplicit, $middleRating,
-      $highschoolsExplicit, $highSchoolRating
+      $highschoolsExplicit, $highSchoolRating,
+      $listingType
     ]
   )
 }
@@ -578,6 +616,7 @@ query mapPoints(
   $middleRating: [String!]
   $highschoolsExplicit: [String!]
   $highSchoolRating: [String!]
+  $listingType: String!
 ) @auth(level: USER) {
   points: _select(
     sql: """
@@ -592,7 +631,8 @@ query mapPoints(
       AND lot_size >= $16 AND lot_size <= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $18
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $19
-      AND close_price * 0.008 >= $20 AND close_price * 0.008 <= $21
+      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) >= $20
+      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) <= $21
       AND ($22 IS NULL OR (close_date_ts >= $22::bigint AND close_date_ts <= $23::bigint))
       AND (COALESCE(cardinality($24::text[]), 0) = 0 OR property_type = ANY($24::text[]))
       AND ($25 = 'any' OR ($25 = 'yes' AND pool) OR ($25 = 'no' AND NOT pool))
@@ -604,6 +644,11 @@ query mapPoints(
       AND (COALESCE(cardinality($31::text[]), 0) = 0 OR middle = ANY($31::text[]))
       AND (COALESCE(cardinality($32::text[]), 0) = 0 OR highschools = ANY($32::text[]))
       AND (COALESCE(cardinality($33::text[]), 0) = 0 OR highschool_name = ANY($33::text[]))
+      AND (
+        $34 = 'both'
+        OR listing_type = $34
+        OR ($34 = 'sale' AND (listing_type IS NULL OR listing_type = ''))
+      )
     ORDER BY md5(mls_number)
     LIMIT $1
     """,
@@ -617,7 +662,8 @@ query mapPoints(
       $propertyTypes, $pool, $schoolDistricts, $cities,
       $elementaryExplicit, $elementaryRating,
       $middleExplicit, $middleRating,
-      $highschoolsExplicit, $highSchoolRating
+      $highschoolsExplicit, $highSchoolRating,
+      $listingType
     ]
   )
 }

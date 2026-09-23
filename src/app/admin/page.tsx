@@ -5,6 +5,7 @@ import Link from 'next/link';
 import Papa from 'papaparse';
 import {
   cmsStore,
+  detectDatasetYear,
   type CMSFileRecord,
   type CMSMetricOverride,
   type CMSPropertyOverride,
@@ -70,12 +71,15 @@ const REQUIRED_PROPERTY_HEADERS = [
   'City/Location',
   'State Or Province',
   'Zip',
-  'Close Price',
+  { oneOf: ['Close Price', 'Lease Price', 'Rent Price', 'Rental Price', 'Monthly Rent', 'Price'] },
   'Latitude',
   'Longitude',
 ];
 const REQUIRED_SCHOOL_HEADERS = ['school_name_clean', 'Overall Score'];
-const REQUIRED_TAX_HEADERS = ['MLS #', 'Parcel ID', 'Address'];
+const REQUIRED_TAX_HEADERS = [
+  'MLS #',
+  { oneOf: ['Tax Year', 'Tax Amount', 'Tax Rate'] },
+];
 
 const BOUNDARY_OPTIONS: { value: BoundaryKey; label: string }[] = [
   { value: 'zipcodes', label: 'ZIP Code' },
@@ -118,7 +122,7 @@ interface SectionConfig {
   title: string;
   subtitle: string;
   whatItModifies: string[];
-  requiredColumns: string[];
+  requiredColumns: Array<string | { oneOf: string[] }>;
   category: CMSFileCategory | CMSFileCategory[];
   fileHint: string;
 }
@@ -357,9 +361,20 @@ function rowsToCsv(headers: string[], rows: Record<string, string>[]): string {
   return [headers.join(','), ...rows.map((r) => headers.map((h) => escapeCell(r[h])).join(','))].join('\n');
 }
 
-function validateHeaders(headers: string[] | undefined, required: string[]): { valid: boolean; missing: string[] } {
+function validateHeaders(
+  headers: string[] | undefined,
+  required: Array<string | { oneOf: string[] }>
+): { valid: boolean; missing: string[] } {
   const normalized = (headers || []).map((h) => h.trim().toLowerCase());
-  const missing = required.filter((h) => !normalized.includes(h.toLowerCase()));
+  const missing: string[] = [];
+  for (const r of required) {
+    if (typeof r === 'string') {
+      if (!normalized.includes(r.toLowerCase())) missing.push(r);
+    } else {
+      const hasOne = r.oneOf.some((h) => normalized.includes(h.toLowerCase()));
+      if (!hasOne) missing.push(`one of: ${r.oneOf.join(' / ')}`);
+    }
+  }
   return { valid: missing.length === 0, missing };
 }
 
@@ -545,13 +560,38 @@ type TreeNode = {
 
 function buildTree(files: Omit<CMSFileRecord, 'rows'>[], title: string): TreeNode {
   const root: TreeNode = { name: 'Root', files: [], folders: {} };
-  root.folders[title] = {
-    name: title,
-    files: files
-      .map((file) => ({ ...file, name: file.name.split('/').pop() || file.name }))
-      .sort((a, b) => a.name.localeCompare(b.name)),
-    folders: {},
-  };
+  const sectionNode: TreeNode = { name: title, files: [], folders: {} };
+  root.folders[title] = sectionNode;
+
+  // Group files by detected year so the admin sees "2021", "2022", ... folders.
+  const byYear: Record<string, Omit<CMSFileRecord, 'rows'>[]> = {};
+  for (const file of files) {
+    const cleanName = file.name.split('/').pop() || file.name;
+    const year = file.year ?? null;
+    const folder = year != null ? String(year) : 'No Year';
+    byYear[folder] = byYear[folder] || [];
+    byYear[folder].push({ ...file, name: cleanName });
+  }
+
+  const sortedFolders = Object.keys(byYear).sort((a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    const aIsNum = !isNaN(na);
+    const bIsNum = !isNaN(nb);
+    if (aIsNum && bIsNum) return na - nb;
+    if (aIsNum) return -1;
+    if (bIsNum) return 1;
+    return a.localeCompare(b);
+  });
+
+  for (const folder of sortedFolders) {
+    sectionNode.folders[folder] = {
+      name: folder,
+      files: byYear[folder].sort((a, b) => a.name.localeCompare(b.name)),
+      folders: {},
+    };
+  }
+
   return root;
 }
 
@@ -1038,6 +1078,9 @@ function AdminPageInner() {
         }
 
         const id = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const detectedYear = actualCategory !== 'boundary' && actualCategory !== 'custom-area'
+          ? detectDatasetYear(relativePath, newRows)
+          : null;
         const record: CMSFileRecord = {
           id,
           name: relativePath,
@@ -1047,6 +1090,7 @@ function AdminPageInner() {
           headers: parsed.meta.fields || [],
           uploadedAt: Date.now(),
           source: 'upload',
+          year: detectedYear,
         };
 
         newStaged.push({
@@ -1081,6 +1125,21 @@ function AdminPageInner() {
     }
 
     setProcessing(false);
+
+    if (newStaged.length > 0) {
+      // Trigger a quick dedupe pass so staged rows also honor the same-MCS
+      // duplicate detection. This is normally a no-op, but prevents stale state.
+      setStagedFiles((prev) =>
+        prev.map((s) => ({
+          ...s,
+          stats: {
+            total: s.record.rows.length,
+            new: s.record.rows.length,
+            duplicate: 0,
+          },
+        }))
+      );
+    }
   };
 
   const handleConfirmUpload = async (stagedId: string, mode: 'new' | 'replace' = 'new') => {
@@ -1205,11 +1264,17 @@ function AdminPageInner() {
     }
 
     // Generic CSV/section upload (sales, rent, current, tax, schools, boundaries).
-    let rowsToSave = staged.record.rows;
+    let rowsToSave = staged.record.rows || [];
 
+    // Property CSVs go straight to SQL Connect, which upserts by mls_number.
+    // Local de-duplication against an existing Storage file is not needed there
+    // and can incorrectly collapse a re-upload to zero rows, so skip it for
+    // SQL imports. Legacy GeoJSON/Storage CSV flows still de-duplicate locally.
     const dataSection = staged.section as Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries' | 'ads' | 'users'>;
     const columns = getDedupeColumns(dataSection);
-    if (existingFile && columns.length) {
+    const isSqlImport =
+      staged.record.category !== 'boundary' && staged.record.category !== 'custom-area';
+    if (existingFile && columns.length && !isSqlImport) {
       const existingFull = await cmsStore.getFile(existingFile.id);
       const existingRows = existingFull?.rows || [];
       const seen = new Set<string>();
@@ -1223,6 +1288,15 @@ function AdminPageInner() {
       }
     }
 
+    if (!Array.isArray(rowsToSave) || rowsToSave.length === 0) {
+      setToast({
+        type: 'error',
+        message: `No new records to upload for ${staged.record.name}. The file may already be imported or every row is a duplicate.`,
+      });
+      setProcessing(false);
+      return;
+    }
+
     const rawContent = rowsToCsv(staged.record.headers, rowsToSave);
     const recordToSave: CMSFileRecord = {
       ...staged.record,
@@ -1234,11 +1308,6 @@ function AdminPageInner() {
       uploadedAt: Date.now(),
       rowCount: staged.record.category === 'boundary' || staged.record.category === 'custom-area' ? 0 : rowsToSave.length,
     };
-
-    // Property CSVs (sales, rent, current, tax, schools) go straight to SQL
-    // Connect; only GeoJSON boundaries stay in Firebase Storage.
-    const isSqlImport =
-      staged.record.category !== 'boundary' && staged.record.category !== 'custom-area';
 
     try {
       // Remove any existing file with the same name first so the metadata doc
@@ -1260,7 +1329,7 @@ function AdminPageInner() {
             rows: rowsToSave,
             type: staged.record.category,
             fileName: staged.record.name,
-            mode,
+            mode: mode === 'replace' ? 'replace' : 'upsert',
           }),
         });
         if (!importRes.ok) {
@@ -1310,17 +1379,28 @@ function AdminPageInner() {
   const handleConfirmAllUploads = async () => {
     if (stagedFiles.length === 0) return;
     setProcessing(true);
-    const total = stagedFiles.length;
+
+    // Sort staged files by detected year so SQL receives them in chronological
+    // order and the admin tree shows them grouped consistently.
+    const ordered = [...stagedFiles].sort((a, b) => {
+      const ya = a.record.year ?? detectDatasetYear(a.record.name, a.record.rows) ?? 9999;
+      const yb = b.record.year ?? detectDatasetYear(b.record.name, b.record.rows) ?? 9999;
+      if (ya !== yb) return ya - yb;
+      return a.record.name.localeCompare(b.record.name);
+    });
+    setStagedFiles(ordered);
+
+    const total = ordered.length;
     setUploadProgress({ current: 0, total, fileName: '', phase: 'Uploading files…', startedAt: Date.now() });
 
-    // Process sequentially to respect the "no heavy things in parallel" rule
-    // and keep memory pressure low. Each upload triggers one coalesced rebuild.
+    // Process sequentially: no parallel heavy imports, and each file's SQL upsert
+    // is fully committed before the next one starts.
     for (let i = 0; i < total; i++) {
-      const staged = stagedFiles[i];
+      const staged = ordered[i];
       setUploadProgress({
         current: i,
         total,
-        fileName: staged.record.name,
+        fileName: `${staged.record.year ? `[${staged.record.year}] ` : ''}${staged.record.name}`,
         phase: 'Uploading file…',
         startedAt: Date.now(),
       });

@@ -32,6 +32,8 @@ export interface CMSFileRecord {
   storagePath?: string;
   rowCount?: number;
   rawContent?: string;
+  /** Detected year from filename or row dates — drives the admin folder tree. */
+  year?: number | null;
 }
 
 export interface CMSMetricOverride {
@@ -61,6 +63,58 @@ export interface CMSStoreSummary {
   overrides: number;
   propertyOverrides: number;
   lastUploadAt: number | null;
+}
+
+/**
+ * Detect the dataset year for a CSV so the admin panel can group files into
+ * folders like "2021", "2022", etc. First try the filename, then sample a few
+ * rows looking for date/year columns.
+ */
+export function detectDatasetYear(name: string, rows: Record<string, string>[]): number | null {
+  // 1) Filename: any 4-digit run that looks like a year (1900-2099).
+  const yearMatches = name.match(/(?:^|\D)(19\d{2}|20\d{2})(?:\D|$)/g);
+  if (yearMatches) {
+    const years = yearMatches
+      .map((m) => parseInt(m.replace(/\D/g, ''), 10))
+      .filter((y) => y >= 1900 && y <= 2099);
+    if (years.length === 1) return years[0];
+    if (years.length > 1) {
+      // If several years appear, prefer the one closest to current date but not
+      // in the future (e.g. "report_2020_2021.csv" => 2021).
+      const now = new Date().getFullYear();
+      const valid = years.filter((y) => y <= now);
+      return valid.length ? Math.max(...valid) : years[years.length - 1];
+    }
+  }
+
+  // 2) Row sample: look for common date/year headers.
+  const sample = rows.slice(0, 20);
+  if (sample.length === 0) return null;
+
+  const yearHeaders = ['Close Year', 'Year', 'CloseDate', 'Close Date', 'List Year', 'Sale Year'];
+  const dateHeaders = ['Close Date', 'CloseDate', 'List Date', 'Sale Date', 'Date'];
+
+  for (const header of yearHeaders) {
+    const values = sample.map((r) => Number(r[header])).filter((n) => n >= 1900 && n <= 2099);
+    if (values.length > 0) {
+      return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
+    }
+  }
+
+  for (const header of dateHeaders) {
+    const years: number[] = [];
+    for (const r of sample) {
+      const raw = r[header];
+      if (!raw) continue;
+      const m = raw.match(/\b(19\d{2}|20\d{2})\b/);
+      if (m) years.push(parseInt(m[1], 10));
+    }
+    if (years.length > 0) {
+      return Math.round(years.reduce((a, b) => a + b, 0) / years.length);
+    }
+  }
+
+  return null;
 }
 
 const FILES_STORE = 'cms_files';
@@ -208,11 +262,15 @@ export const cmsStore = {
     const downloadUrl = await getDownloadURL(storageRef);
 
     const { rows, rawContent, ...recordWithoutRows } = record;
+    const year = record.category !== 'boundary' && record.category !== 'custom-area'
+      ? detectDatasetYear(record.name, rows)
+      : null;
     const metadata = {
       ...recordWithoutRows,
       storageUrl: downloadUrl,
       storagePath: storagePath,
       rowCount: record.category === 'boundary' ? 0 : rows.length,
+      year,
     };
 
     // The metadata write is the step that makes an upload "exist". The object
@@ -260,11 +318,13 @@ export const cmsStore = {
    */
   async saveSqlImportMetadata(record: CMSFileRecord): Promise<void> {
     const { rows, rawContent, ...recordWithoutRows } = record;
+    const year = detectDatasetYear(record.name, rows);
     const metadata = {
       ...recordWithoutRows,
       // No storageUrl/storagePath: the data lives in SQL, not Storage.
       rowCount: record.rows.length,
       sqlImport: true,
+      year,
     };
     await setDoc(doc(db, FILES_STORE, record.id), metadata);
     emit();

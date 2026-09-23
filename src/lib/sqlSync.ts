@@ -61,7 +61,7 @@ export async function runSqlSync(): Promise<void> {
 export async function readSqlSyncState(): Promise<SqlSyncState | null> {
   try {
     const snap = await getDoc(doc(db, 'cms_meta', 'sql_sync'));
-    if (!snap.exists) return null;
+    if (!snap.exists()) return null;
     const data = snap.data() as { version?: number; done?: boolean; totalRows?: number };
     return { version: data.version ?? 0, done: data.done === true, totalRows: data.totalRows ?? 0 };
   } catch {

@@ -58,4 +58,8 @@ type Property
   lng: Float
   propertyType: String
   pool: Boolean
+
+  # Distinguishes sales records (default) from rental records when both are
+  # stored in the same table. Empty/null is treated as a sale.
+  listingType: String
 }

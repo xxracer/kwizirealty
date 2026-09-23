@@ -123,6 +123,7 @@ function toSqlRow(row: ChunkRecord): Record<string, unknown> | null {
     lng,
     propertyType: String(row.propertyType ?? ''),
     pool: !!row.pool,
+    listingType: 'sale',
   };
 }
 

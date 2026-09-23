@@ -97,10 +97,31 @@ function rowToProperty(row: any): PropertyData {
     lng: row.lng ?? 0,
     propertyType: row.property_type ?? '',
     pool: !!row.pool,
+    listingType: row.listing_type ?? 'sale',
   };
 }
 
-function buildVariables(filters: PropertyFilters, resolved: QueryBody['resolved'], startTs: number | null, endTs: number | null) {
+const RENTAL_METRICS = new Set<MetricKey>([
+  'Est. Rental Price',
+  'Rent-to-Sale Ratio',
+  'Rental Price per Sqft',
+  'Rental Days On Market',
+]);
+
+/** Metrics whose SQL aggregates should read actual rental rows (not sales estimates). */
+const RENTAL_DATA_METRICS = new Set<MetricKey>([
+  'Est. Rental Price',
+  'Rental Price per Sqft',
+  'Rental Days On Market',
+]);
+
+function buildVariables(
+  filters: PropertyFilters,
+  resolved: QueryBody['resolved'],
+  startTs: number | null,
+  endTs: number | null,
+  metric: MetricKey
+) {
   return {
     saleMin: filters.saleMin ?? 0,
     saleMax: filters.saleMax ?? 20000000,
@@ -134,6 +155,7 @@ function buildVariables(filters: PropertyFilters, resolved: QueryBody['resolved'
     middleRating: resolved?.middle ?? [],
     highschoolsExplicit: filters.highschools ?? [],
     highSchoolRating: resolved?.high ?? [],
+    listingType: RENTAL_DATA_METRICS.has(metric) ? 'rent' : 'sale',
     limit: SQL_ROW_CAP,
   };
 }
@@ -261,7 +283,7 @@ export async function POST(req: Request) {
   }
 
   const dc = getAdminDataConnect();
-  const variables = buildVariables(filters, body.resolved, body.startTs, body.endTs);
+  const variables = buildVariables(filters, body.resolved, body.startTs, body.endTs, metric);
 
   // FAST PATH — no selection, no CMS overrides, metric supported by the SQL
   // percentiles (or an Elem/Middle ETA metric, which is count + TEA lookup).

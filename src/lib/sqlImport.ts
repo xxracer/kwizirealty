@@ -31,6 +31,38 @@ const SALES_REQUIRED_HEADERS = [
   'Longitude',
 ];
 
+const RENT_PRICE_HEADERS = [
+  'Lease Price',
+  'Rent Price',
+  'Rental Price',
+  'Monthly Rent',
+  'Lease Amount',
+  'Price',
+  'Close Price',
+  'Original List Price',
+];
+
+const LIST_RENT_HEADERS = [
+  'Original List Price',
+  'List Price',
+  'Original Rent',
+  'Listed Rent',
+];
+
+const LEASE_DATE_HEADERS = [
+  'Lease Date',
+  'Rented Date',
+  'Contract Date',
+  'Close Date',
+  'Lease Start Date',
+  'Lease Date',
+];
+
+const TAX_MLS_HEADERS = ['MLS #', 'MLS Number', 'MLS'];
+const TAX_YEAR_HEADERS = ['Tax Year'];
+const TAX_AMOUNT_HEADERS = ['Tax Amount', 'Taxes'];
+const TAX_RATE_HEADERS = ['Tax Rate', 'Tax Rate %'];
+
 function stripBom(str: string): string {
   return str.replace(/^﻿/, '');
 }
@@ -117,13 +149,35 @@ function cleanSchoolName(raw: unknown): string {
   return cleanBoundaryName(v);
 }
 
-/** True when the row has the minimum fields required for a sales property. */
-export function isSalesRowValid(row: Record<string, string>): boolean {
-  const closePrice = cleanNumber(row['Close Price'] || row['Original List Price']);
+function pickFirst(row: Record<string, string>, headers: string[]): string {
+  for (const h of headers) {
+    const v = row[h];
+    if (v != null && String(v).trim() !== '') return String(v).trim();
+  }
+  return '';
+}
+
+function isRentType(type: SqlImportType): boolean {
+  return type === 'rent' || type === 'current-rent';
+}
+
+function isSaleType(type: SqlImportType): boolean {
+  return type === 'sales' || type === 'current-sale';
+}
+
+function isTaxType(type: SqlImportType): boolean {
+  return type === 'tax';
+}
+
+/** True when the row has the minimum fields required for a property row. */
+export function isPropertyRowValid(row: Record<string, string>, type: SqlImportType): boolean {
+  const price = isRentType(type)
+    ? cleanNumber(pickFirst(row, RENT_PRICE_HEADERS))
+    : cleanNumber(row['Close Price'] || row['Original List Price']);
   const lat = Number(row['Latitude']);
   const lng = Number(row['Longitude']);
   const mls = String(row['MLS Number'] || '').trim();
-  return !!(mls && closePrice && lat && lng);
+  return !!(mls && price && lat && lng);
 }
 
 /**
@@ -136,8 +190,8 @@ export function csvRowsToSqlPropertyRows(
   rows: Record<string, string>[],
   type: SqlImportType
 ): Record<string, unknown>[] {
-  if (type !== 'sales') {
-    // Reserved for future rent/tax/school imports.
+  if (!isSaleType(type) && !isRentType(type) && !isTaxType(type)) {
+    // Reserved for future school imports.
     throw new Error(`SQL import type '${type}' is not implemented yet.`);
   }
 
@@ -148,14 +202,41 @@ export function csvRowsToSqlPropertyRows(
       row[stripBom(key)] = raw[key];
     }
 
-    if (!isSalesRowValid(row)) continue;
+    if (isTaxType(type)) {
+      const mls = String(pickFirst(row, TAX_MLS_HEADERS) || '').trim();
+      if (!mls) continue;
+      const taxRate = cleanNumber(pickFirst(row, TAX_RATE_HEADERS));
+      const taxYear = cleanNumber(pickFirst(row, TAX_YEAR_HEADERS));
+      const taxAmount = cleanNumber(pickFirst(row, TAX_AMOUNT_HEADERS));
+      // Skip empty tax rows, but a single non-zero field is enough to keep.
+      if (!taxRate && !taxYear && !taxAmount) continue;
+      sqlRows.push({
+        mlsNumber: mls,
+        listingType: 'tax',
+        taxRate,
+        taxYear,
+        taxAmount,
+      });
+      continue;
+    }
 
-    const close = cleanDate(row['Close Date'] || '');
+    if (!isPropertyRowValid(row, type)) continue;
+
+    const rentMode = isRentType(type);
+    const close = rentMode
+      ? cleanDate(pickFirst(row, LEASE_DATE_HEADERS))
+      : cleanDate(row['Close Date'] || '');
     const baths = cleanNumber(row['FB']) + cleanNumber(row['HB']);
     const sqft = cleanNumber(row['SF']);
-    const closePrice = cleanNumber(row['Close Price'] || row['Original List Price']);
-    const listPrice = cleanNumber(row['Original List Price']);
-    const pricePerSqft = cleanNumber(row['Price Sq Ft Sold'] || row['Prc/SF']) || (sqft ? closePrice / sqft : 0);
+    const closePrice = rentMode
+      ? cleanNumber(pickFirst(row, RENT_PRICE_HEADERS))
+      : cleanNumber(row['Close Price'] || row['Original List Price']);
+    const listPrice = rentMode
+      ? cleanNumber(pickFirst(row, LIST_RENT_HEADERS))
+      : cleanNumber(row['Original List Price']);
+    const pricePerSqft =
+      cleanNumber(row['Price Sq Ft Sold'] || row['Prc/SF']) ||
+      (sqft ? closePrice / sqft : 0);
     const zipRaw = String(row['Zip'] || '').trim();
 
     sqlRows.push({
@@ -180,12 +261,11 @@ export function csvRowsToSqlPropertyRows(
       maintFee: cleanNumber(row['Maint Fee Amt']),
       maintFeeSchedule: String(row['Maint Fee Pay Schedule'] || '').toLowerCase(),
 
-      // Tax data is intentionally left at defaults for sales imports.
-      taxRate: 0,
-      taxYear: 0,
-      taxAmount: 0,
+      // Tax data is intentionally left untouched for property imports.
+      // Tax records are imported separately via type: 'tax' so they never
+      // overwrite tax fields on subsequent sales uploads.
 
-      // Boundary / area fields that come from the sales CSV itself.
+      // Boundary / area fields that come from the CSV itself.
       subdivisions: cleanBoundaryName(row['Subdivision']),
       zipcodes: zipRaw,
       highschools: cleanDistrictCode(row['School District']),
@@ -201,6 +281,9 @@ export function csvRowsToSqlPropertyRows(
 
       propertyType: String(row['Property Type'] || '').trim(),
       pool: cleanBool(row['Pool Private']),
+
+      // Distinguishes rental records from sales records in the SQL table.
+      listingType: rentMode ? 'rent' : 'sale',
     });
   }
   return sqlRows;
