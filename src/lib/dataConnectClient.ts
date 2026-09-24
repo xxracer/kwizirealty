@@ -15,6 +15,7 @@
  * honoring the connector's `authMode: USER`.
  */
 import { app, auth } from './firebase';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 
 const connectorConfig = {
   location: process.env.NEXT_PUBLIC_DATACONNECT_LOCATION || 'us-central1',
@@ -36,8 +37,27 @@ async function getIdToken(): Promise<string> {
   // Auth state is restored asynchronously after a page reload. Wait until it is
   // settled before reading currentUser, otherwise all Data Connect calls fail
   // with UNAUTHENTICATED even though the admin user is logged in.
-  await (auth as any).authStateReady?.().catch(() => {});
-  const user = auth.currentUser;
+  const settledUser = await new Promise<User | null>(
+    (resolve) => {
+      if (auth.currentUser) {
+        resolve(auth.currentUser);
+        return;
+      }
+      const unsub = onAuthStateChanged(auth, (user) => {
+        if (user) {
+          unsub();
+          resolve(user);
+        }
+      });
+      // Safety cap: if auth never settles after a few seconds, fall back so the
+      // caller gets a clear "not signed in" error instead of hanging forever.
+      setTimeout(() => {
+        unsub();
+        resolve(auth.currentUser);
+      }, 3000);
+    }
+  );
+  const user = settledUser;
   if (!user) {
     throw new Error('You must be signed in to upload data to the database.');
   }
