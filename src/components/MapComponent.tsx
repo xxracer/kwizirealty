@@ -1349,6 +1349,29 @@ export default function MapComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geoJsonData, boundary]);
 
+  // Dedicated bounds effect: the initial mount fit and the per-rebuild fit can
+  // both miss because the container size or geoJsonDataRef aren't stable yet.
+  // Retry the GeoJSON bounds a few times with a short delay so the map always
+  // frames Houston on first paint.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !geoJsonData?.features?.length) return;
+    let attempts = 0;
+    const tryFit = () => {
+      const bounds = computeGeoJSONBounds(geoJsonData);
+      if (bounds) {
+        map.invalidateSize();
+        map.fitBounds(bounds, { padding: [16, 16], maxZoom: 12, animate: false });
+        return true;
+      }
+      return false;
+    };
+    const timer = setInterval(() => {
+      if (tryFit() || attempts++ > 8) clearInterval(timer);
+    }, 150);
+    return () => clearInterval(timer);
+  }, [geoJsonData]);
+
   // If the visible area set changed (e.g. filter/metric made an area lose/gain
   // data), rebuild so grey no-data placeholders never appear. Otherwise just
   // update colors/fills in place to keep palette/opacity tweaks cheap.
