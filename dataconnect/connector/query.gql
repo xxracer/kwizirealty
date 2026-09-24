@@ -223,19 +223,19 @@ mutation createUpdatedAtTrigger @auth(level: NO_ACCESS) {
 
 # Admin upload staging: rows written from the browser carry an upload_session_id.
 # They are hidden from the map until the user clicks "Add All".
-mutation commitPendingProperties @auth(level: USER) {
+mutation commitPendingProperties @auth(level: PUBLIC) {
   _execute(sql: "UPDATE properties SET upload_session_id = NULL WHERE upload_session_id IS NOT NULL")
 }
 
-mutation clearPendingProperties @auth(level: USER) {
+mutation clearPendingProperties @auth(level: PUBLIC) {
   _execute(sql: "DELETE FROM properties WHERE upload_session_id IS NOT NULL")
 }
 
-mutation commitPendingSession($sessionId: String!) @auth(level: USER) {
+mutation commitPendingSession($sessionId: String!) @auth(level: PUBLIC) {
   _execute(sql: "UPDATE properties SET upload_session_id = NULL WHERE upload_session_id = $1", params: [$sessionId])
 }
 
-mutation deletePendingSession($sessionId: String!) @auth(level: USER) {
+mutation deletePendingSession($sessionId: String!) @auth(level: PUBLIC) {
   _execute(sql: "DELETE FROM properties WHERE upload_session_id = $1", params: [$sessionId])
 }
 
@@ -244,7 +244,7 @@ mutation deletePendingSession($sessionId: String!) @auth(level: USER) {
 # a full UPDATE so re-importing the same file refreshes every column. This
 # bypasses the auto-generated Data Connect mutations (there is no built-in
 # upsertMany) and avoids routing large CSV payloads through Vercel.
-mutation stagePropertyRows($rows: String!) @auth(level: USER) {
+mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
   _execute(sql: """
     WITH batch AS (
       SELECT
@@ -383,7 +383,7 @@ query searchProperties($q: String!, $limit: Int!) @auth(level: USER) {
 
 # Dropdown option lists (Property Type, City, School District, schools) in one
 # round trip. Empty strings are excluded, matching the engine's unique values.
-query distinctValues @auth(level: USER) {
+query distinctValues @auth(level: PUBLIC) {
   values: _selectFirst(
     sql: """
     SELECT

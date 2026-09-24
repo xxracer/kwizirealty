@@ -15,7 +15,6 @@
  * honoring the connector's `authMode: USER`.
  */
 import { app, auth } from './firebase';
-import { onAuthStateChanged, type User } from 'firebase/auth';
 
 const connectorConfig = {
   location: process.env.NEXT_PUBLIC_DATACONNECT_LOCATION || 'us-central1',
@@ -33,34 +32,18 @@ function connectorName(): string {
   return `projects/${projectId}/locations/${connectorConfig.location}/services/${connectorConfig.service}/connectors/${connectorConfig.connector}`;
 }
 
-async function getIdToken(): Promise<string> {
-  // Auth state is restored asynchronously after a page reload. Wait until it is
-  // settled before reading currentUser, otherwise all Data Connect calls fail
-  // with UNAUTHENTICATED even though the admin user is logged in.
-  const settledUser = await new Promise<User | null>(
-    (resolve) => {
-      if (auth.currentUser) {
-        resolve(auth.currentUser);
-        return;
-      }
-      const unsub = onAuthStateChanged(auth, (user) => {
-        if (user) {
-          unsub();
-          resolve(user);
-        }
-      });
-      // Safety cap: if auth never settles after a few seconds, fall back so the
-      // caller gets a clear "not signed in" error instead of hanging forever.
-      setTimeout(() => {
-        unsub();
-        resolve(auth.currentUser);
-      }, 3000);
-    }
-  );
-  const user = settledUser;
+async function getIdToken(): Promise<string | null> {
+  // Auth is currently OFF in this app (anyone can use the admin page), and the
+  // staging ops are @auth(level: PUBLIC), so a signed-in user is optional. When
+  // a session exists we still attach its token — the day auth is switched back
+  // on these ops go to USER again and this code keeps working unchanged.
+  await auth.authStateReady();
+  const user = auth.currentUser;
   if (!user) {
-    throw new Error('You must be signed in to upload data to the database.');
+    console.log('[dataConnect] no signed-in user — calling PUBLIC ops anonymously');
+    return null;
   }
+  console.log('[dataConnect] auth ok:', user.email);
   return user.getIdToken(true);
 }
 
@@ -78,12 +61,12 @@ async function dataConnectFetch<T>(
       ? { name, operationName, arguments: payload }
       : { name, operationName, variables: payload };
 
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(body),
   });
 
