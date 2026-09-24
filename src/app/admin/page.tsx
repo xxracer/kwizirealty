@@ -1153,7 +1153,7 @@ function AdminPageInner() {
                   )
                 );
               });
-              setStagedFiles((prev) =
+              setStagedFiles((prev) =>
                 prev.map((s) =>
                   s.id === id ? { ...s, importProgress: { ...s.importProgress!, loaded: sqlRows.length, total: sqlRows.length, status: 'done' } } : s
                 )
@@ -1161,7 +1161,7 @@ function AdminPageInner() {
             } catch (err) {
               const message = (err as Error).message || 'SQL import failed';
               console.error('[admin] direct SQL import failed', err);
-              setStagedFiles((prev) =
+              setStagedFiles((prev) =>
                 prev.map((s) =>
                   s.id === id ? { ...s, importProgress: { ...s.importProgress!, status: 'error', error: message } } : s
                 )
