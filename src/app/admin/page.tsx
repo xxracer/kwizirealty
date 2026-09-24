@@ -246,6 +246,8 @@ interface StagedFile {
   newNames?: string[];
   /** CSV rows that were skipped during conversion (with reason). */
   csvSkipped?: { row: number; reason: string }[];
+  /** For SQL-bound property CSVs: warning shown when some MLS numbers already exist in the live DB. */
+  duplicateWarning?: { count: number; sampleMlsNumbers: string[]; status: 'pending' | 'confirmed' };
 }
 
 /** Preview modal state — extends CMSFileRecord with GeoJSON awareness. */
@@ -415,6 +417,16 @@ function makeEngineDedupeKey(d: PropertyData): string {
     { 'MLS Number': d.mlsNumber, Address: d.address, Zip: d.zip },
     ['MLS Number', 'Address', 'Zip']
   );
+}
+
+function findMlsColumn(headers: string[] | undefined): string | undefined {
+  if (!headers) return undefined;
+  const normalized = headers.map((h) => h.trim().toLowerCase());
+  const candidates = ['mls number', 'mls #', 'mls', 'mls_number', 'mlsnum'];
+  for (let i = 0; i < normalized.length; i++) {
+    if (candidates.includes(normalized[i])) return headers[i];
+  }
+  return undefined;
 }
 
 async function buildDedupeKeySet(
@@ -1140,35 +1152,32 @@ function AdminPageInner() {
         if (isSqlImport) {
           const sessionId = `${id}_${Date.now()}`;
           staged.sessionId = sessionId;
-          staged.importProgress = { loaded: 0, total: newRows.length, status: 'running' };
 
-          (async () => {
-            try {
-              const { csvRowsToSqlPropertyRows } = await import('@/lib/sqlImport');
-              const sqlRows = csvRowsToSqlPropertyRows(newRows, actualCategory as any, sessionId);
-              await stagePropertyRows(sqlRows, (loaded) => {
-                setStagedFiles((prev) =>
-                  prev.map((s) =>
-                    s.id === id ? { ...s, importProgress: { ...s.importProgress!, loaded, total: sqlRows.length, status: 'running' } } : s
-                  )
-                );
-              });
-              setStagedFiles((prev) =>
-                prev.map((s) =>
-                  s.id === id ? { ...s, importProgress: { ...s.importProgress!, loaded: sqlRows.length, total: sqlRows.length, status: 'done' } } : s
-                )
-              );
-            } catch (err) {
-              const message = (err as Error).message || 'SQL import failed';
-              console.error('[admin] direct SQL import failed', err);
-              setStagedFiles((prev) =>
-                prev.map((s) =>
-                  s.id === id ? { ...s, importProgress: { ...s.importProgress!, status: 'error', error: message } } : s
-                )
-              );
-              setToast({ type: 'error', message: `${relativePath}: ${message}` });
+          const mlsColumn = findMlsColumn(parsed.meta.fields || []);
+          const eng = getEngine();
+          let existingCount = 0;
+          const sampleMlsNumbers: string[] = [];
+          if (mlsColumn && eng.isLoaded) {
+            const engineMlsSet = new Set(eng.data.map((d) => d.mlsNumber));
+            const seen = new Set<string>();
+            for (const row of parsed.data) {
+              const raw = row[mlsColumn]?.trim();
+              if (!raw || seen.has(raw)) continue;
+              seen.add(raw);
+              if (engineMlsSet.has(raw)) {
+                if (sampleMlsNumbers.length < 5) sampleMlsNumbers.push(raw);
+                existingCount++;
+              }
             }
-          })();
+          }
+
+          if (existingCount > 0) {
+            staged.duplicateWarning = { count: existingCount, sampleMlsNumbers, status: 'pending' };
+            staged.importProgress = { loaded: 0, total: newRows.length, status: 'error', error: 'This data is already on the database' };
+          } else {
+            staged.importProgress = { loaded: 0, total: newRows.length, status: 'running' };
+            runSqlStaging(id, newRows, actualCategory as any, sessionId);
+          }
         }
 
         newStaged.push(staged);
@@ -1208,6 +1217,56 @@ function AdminPageInner() {
         }))
       );
     }
+  };
+
+  const runSqlStaging = async (
+    id: string,
+    rows: Record<string, string>[],
+    category: any,
+    sessionId: string
+  ) => {
+    try {
+      const { csvRowsToSqlPropertyRows } = await import('@/lib/sqlImport');
+      const sqlRows = csvRowsToSqlPropertyRows(rows, category, sessionId);
+      await stagePropertyRows(sqlRows, (loaded) => {
+        setStagedFiles((prev) =>
+          prev.map((s) =>
+            s.id === id ? { ...s, importProgress: { ...s.importProgress!, loaded, total: sqlRows.length, status: 'running' } } : s
+          )
+        );
+      });
+      setStagedFiles((prev) =>
+        prev.map((s) =>
+          s.id === id ? { ...s, importProgress: { ...s.importProgress!, loaded: sqlRows.length, total: sqlRows.length, status: 'done' } } : s
+        )
+      );
+    } catch (err) {
+      const message = (err as Error).message || 'SQL import failed';
+      console.error('[admin] direct SQL import failed', err);
+      setStagedFiles((prev) =>
+        prev.map((s) =>
+          s.id === id ? { ...s, importProgress: { ...s.importProgress!, status: 'error', error: message } } : s
+        )
+      );
+      setToast({ type: 'error', message: `${stagedFiles.find((s) => s.id === id)?.record.name}: ${message}` });
+    }
+  };
+
+  const handleContinueStaged = async (stagedId: string) => {
+    const staged = stagedFiles.find((s) => s.id === stagedId);
+    if (!staged || !staged.sessionId) return;
+    setStagedFiles((prev) =>
+      prev.map((s) =>
+        s.id === stagedId
+          ? {
+              ...s,
+              duplicateWarning: s.duplicateWarning ? { ...s.duplicateWarning, status: 'confirmed' } : undefined,
+              importProgress: { ...s.importProgress!, loaded: 0, total: s.importProgress?.total ?? s.record.rows.length, status: 'running' },
+            }
+          : s
+      )
+    );
+    await runSqlStaging(stagedId, staged.record.rows, staged.record.category as any, staged.sessionId);
   };
 
   const handleConfirmUpload = async (stagedId: string, mode: 'new' | 'replace' = 'new') => {
@@ -1456,17 +1515,18 @@ function AdminPageInner() {
     });
     setStagedFiles(ordered);
 
-    const sqlStaged = ordered.filter((s) => s.sessionId);
+    const readySqlStaged = ordered.filter((s) => s.sessionId && s.importProgress?.status === 'done');
+    const pendingSqlStaged = ordered.filter((s) => s.sessionId && s.importProgress?.status !== 'done');
     const otherStaged = ordered.filter((s) => !s.sessionId);
 
     // Commit every pending SQL session in a single mutation, then save all
     // metadata docs. This avoids multiple round trips to Vercel.
-    if (sqlStaged.length > 0) {
-      setUploadProgress({ current: 0, total: sqlStaged.length, fileName: '', phase: 'Committing to SQL…', startedAt: Date.now() });
+    if (readySqlStaged.length > 0) {
+      setUploadProgress({ current: 0, total: readySqlStaged.length, fileName: '', phase: 'Committing to SQL…', startedAt: Date.now() });
       await commitPendingProperties();
-      for (let i = 0; i < sqlStaged.length; i++) {
-        const staged = sqlStaged[i];
-        setUploadProgress({ current: i + 1, total: sqlStaged.length, fileName: staged.record.name, phase: 'Saving metadata…', startedAt: Date.now() });
+      for (let i = 0; i < readySqlStaged.length; i++) {
+        const staged = readySqlStaged[i];
+        setUploadProgress({ current: i + 1, total: readySqlStaged.length, fileName: staged.record.name, phase: 'Saving metadata…', startedAt: Date.now() });
         const rawContent = rowsToCsv(staged.record.headers, staged.record.rows);
         const recordToSave: CMSFileRecord = {
           ...staged.record,
@@ -1483,7 +1543,7 @@ function AdminPageInner() {
       }
       const totalRows = await countCommittedProperties();
       await publishSqlDatasetVersion(totalRows);
-      setStagedFiles((prev) => prev.filter((s) => !s.sessionId));
+      setStagedFiles((prev) => prev.filter((s) => !readySqlStaged.some((r) => r.id === s.id)));
       await loadData();
       await reloadEngine();
     }
@@ -1502,7 +1562,7 @@ function AdminPageInner() {
     }
 
     setUploadProgress({
-      current: sqlStaged.length + otherStaged.length,
+      current: readySqlStaged.length + otherStaged.length,
       total: stagedFiles.length,
       fileName: '',
       phase: 'Finishing up…',
@@ -2798,13 +2858,20 @@ function AdminPageInner() {
                       <h3 className="text-sm font-bold text-white flex items-center gap-2">
                         <AlertTriangle className="w-4 h-4 text-blue-400" /> Staging Area: Review New Rows
                       </h3>
-                      <button
-                        onClick={() => handleConfirmAllUploads()}
-                        disabled={processing}
-                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                      >
-                        <Plus className="w-3.5 h-3.5" /> Add all
-                      </button>
+                      {(() => {
+                        const readyCount = stagedFiles.filter(
+                          (s) => !s.sessionId || s.importProgress?.status === 'done'
+                        ).length;
+                        return (
+                          <button
+                            onClick={() => handleConfirmAllUploads()}
+                            disabled={processing || readyCount === 0}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <Plus className="w-3.5 h-3.5" /> Add all ({readyCount})
+                          </button>
+                        );
+                      })()}
                     </div>
                     <div className="space-y-3">
                       {stagedFiles.map((staged) => (
@@ -2869,7 +2936,36 @@ function AdminPageInner() {
 
                           {staged.sessionId && staged.importProgress ? (
                             <div className="mt-3">
-                              {staged.importProgress.status === 'error' ? (
+                              {staged.duplicateWarning?.status === 'pending' ? (
+                                <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                                  <div className="flex items-start gap-2 text-amber-400 text-xs font-semibold mb-1">
+                                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                                    This data is already on the database
+                                  </div>
+                                  <div className="text-xs text-gray-300 mb-2">
+                                    {staged.duplicateWarning.count.toLocaleString()} existing MLS row(s) were found. Continuing will overwrite them with the new file.
+                                    {staged.duplicateWarning.sampleMlsNumbers.length > 0 && (
+                                      <div className="mt-1 text-amber-300/80">
+                                        Examples: {staged.duplicateWarning.sampleMlsNumbers.join(', ')}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="flex gap-2">
+                                    <button
+                                      onClick={() => handleContinueStaged(staged.id)}
+                                      className="px-3 py-1.5 bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 border border-amber-500/30 rounded-lg text-xs font-medium transition-colors"
+                                    >
+                                      Continue anyway
+                                    </button>
+                                    <button
+                                      onClick={() => handleDiscardStaged(staged.id)}
+                                      className="px-3 py-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-xs font-medium transition-colors"
+                                    >
+                                      Discard
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : staged.importProgress.status === 'error' ? (
                                 <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-2 text-xs text-red-400">
                                   Import failed: {staged.importProgress.error || 'unknown error'}
                                 </div>
