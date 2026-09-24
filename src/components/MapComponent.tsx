@@ -605,10 +605,17 @@ export default function MapComponent({
     // only one reacting to shift/mouse-drag and to avoid event conflicts.
     map.boxZoom.disable();
 
+    const HOUSTON_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
     const applyBoundsOnce = () => {
       if (boundsSetRef.current) return;
       const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
-      if (!bounds) return;
+      if (!bounds) {
+        // Last-resort: frame Houston so the map never shows the whole-world view.
+        map.invalidateSize();
+        map.fitBounds(HOUSTON_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
+        boundsSetRef.current = true;
+        return;
+      }
       map.invalidateSize();
       // Tight fit with almost no padding so polygons/circles fill the container.
       const zoom = Math.min(12, map.getBoundsZoom(bounds, false, L.point(8, 8)));
@@ -1355,10 +1362,11 @@ export default function MapComponent({
   // frames Houston on first paint.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !geoJsonData?.features?.length) return;
+    if (!map) return;
     let attempts = 0;
+    const HOUSTON_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
     const tryFit = () => {
-      const bounds = computeGeoJSONBounds(geoJsonData);
+      const bounds = geoJsonData?.features?.length ? computeGeoJSONBounds(geoJsonData) : null;
       if (bounds) {
         map.invalidateSize();
         map.fitBounds(bounds, { padding: [16, 16], maxZoom: 12, animate: false });
@@ -1367,7 +1375,15 @@ export default function MapComponent({
       return false;
     };
     const timer = setInterval(() => {
-      if (tryFit() || attempts++ > 8) clearInterval(timer);
+      if (tryFit()) {
+        clearInterval(timer);
+        return;
+      }
+      if (attempts++ > 8) {
+        clearInterval(timer);
+        map.invalidateSize();
+        map.fitBounds(HOUSTON_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
+      }
     }, 150);
     return () => clearInterval(timer);
   }, [geoJsonData]);

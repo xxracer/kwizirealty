@@ -1,9 +1,9 @@
 /**
  * sqlImport.ts — CSV → SQL Connect mapping for direct SQL uploads.
  *
- * The admin panel no longer sends property CSVs to Firebase Storage.
- * Instead it POSTs parsed rows to /api/sql/import, which upserts them into
- * the Data Connect `properties` table keyed by mls_number.
+ * The admin panel no longer sends property CSVs to Firebase Storage or Vercel.
+ * Parsed rows are upserted directly into the Data Connect `properties` table
+ * from the browser, keyed by mls_number.
  *
  * IMPORTANT: sales-data CSVs may carry extra columns (tax, schools, etc.)
  * but this mapper intentionally ignores them — those categories are imported
@@ -188,7 +188,8 @@ export function isPropertyRowValid(row: Record<string, string>, type: SqlImportT
  */
 export function csvRowsToSqlPropertyRows(
   rows: Record<string, string>[],
-  type: SqlImportType
+  type: SqlImportType,
+  sessionId?: string
 ): Record<string, unknown>[] {
   if (!isSaleType(type) && !isRentType(type) && !isTaxType(type)) {
     // Reserved for future school imports.
@@ -216,6 +217,8 @@ export function csvRowsToSqlPropertyRows(
         taxRate,
         taxYear,
         taxAmount,
+        uploadSessionId: sessionId ?? null,
+        updatedAt: new Date().toISOString(),
       });
       continue;
     }
@@ -284,6 +287,12 @@ export function csvRowsToSqlPropertyRows(
 
       // Distinguishes rental records from sales records in the SQL table.
       listingType: rentMode ? 'rent' : 'sale',
+
+      // Staging session id. Null means committed/visible to the map.
+      uploadSessionId: sessionId ?? null,
+
+      // Last-modification timestamp for ETag/conditional caching.
+      updatedAt: new Date().toISOString(),
     });
   }
   return sqlRows;

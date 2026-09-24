@@ -50,7 +50,8 @@ query filteredProperties(
   properties: _select(
     sql: """
     SELECT * FROM properties
-    WHERE close_price >= $1 AND close_price <= $2
+    WHERE upload_session_id IS NULL
+      AND close_price >= $1 AND close_price <= $2
       AND sqft >= $3 AND sqft <= $4
       AND year_built >= $5 AND year_built <= $6
       AND br >= $7 AND br <= $8
@@ -138,7 +139,8 @@ query filteredPropertiesForSelection(
   properties: _select(
     sql: """
     SELECT * FROM properties
-    WHERE close_price >= $1 AND close_price <= $2
+    WHERE upload_session_id IS NULL
+      AND close_price >= $1 AND close_price <= $2
       AND sqft >= $3 AND sqft <= $4
       AND year_built >= $5 AND year_built <= $6
       AND br >= $7 AND br <= $8
@@ -199,16 +201,71 @@ mutation clearProperties @auth(level: NO_ACCESS) {
   _execute(sql: "DELETE FROM properties")
 }
 
+# Ensure every UPDATE on properties refreshes updated_at automatically. This
+# catches manual SQL edits or tools that don't supply the column explicitly.
+mutation createUpdatedAtTrigger @auth(level: NO_ACCESS) {
+  _execute(sql: """
+    CREATE OR REPLACE FUNCTION properties_set_updated_at()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      NEW.updated_at = now();
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS properties_updated_at ON properties;
+    CREATE TRIGGER properties_updated_at
+    BEFORE UPDATE ON properties
+    FOR EACH ROW
+    EXECUTE FUNCTION properties_set_updated_at();
+  """)
+}
+
+# Admin upload staging: rows written from the browser carry an upload_session_id.
+# They are hidden from the map until the user clicks "Add All".
+mutation commitPendingProperties @auth(level: USER) {
+  _execute(sql: "UPDATE properties SET upload_session_id = NULL WHERE upload_session_id IS NOT NULL")
+}
+
+mutation clearPendingProperties @auth(level: USER) {
+  _execute(sql: "DELETE FROM properties WHERE upload_session_id IS NOT NULL")
+}
+
+mutation commitPendingSession($sessionId: String!) @auth(level: USER) {
+  _execute(sql: "UPDATE properties SET upload_session_id = NULL WHERE upload_session_id = $1", params: [$sessionId])
+}
+
+mutation deletePendingSession($sessionId: String!) @auth(level: USER) {
+  _execute(sql: "DELETE FROM properties WHERE upload_session_id = $1", params: [$sessionId])
+}
+
+# Dataset version for conditional HTTP caching. The ETag of /api/query is
+# derived from this timestamp plus a hash of the request body, so unchanged
+# data yields a 304 Not Modified with zero payload.
+query datasetVersion @auth(level: USER) {
+  version: _selectFirst(
+    sql: """
+    SELECT
+      COALESCE(max(updated_at), '1970-01-01T00:00:00Z') AS updated_at,
+      count(*) FILTER (WHERE upload_session_id IS NULL) AS total_rows
+    FROM properties
+    WHERE upload_session_id IS NULL
+    """,
+    params: []
+  )
+}
+
 # Row-level search for the map's search box (address / zip / MLS / city).
 # $q arrives pre-escaped with % wildcards; escape % and _ in the route.
 query searchProperties($q: String!, $limit: Int!) @auth(level: USER) {
   results: _select(
     sql: """
     SELECT * FROM properties
-    WHERE mls_number ILIKE $1
+    WHERE upload_session_id IS NULL
+      AND (mls_number ILIKE $1
        OR address ILIKE $1
        OR zip ILIKE $1
-       OR city ILIKE $1
+       OR city ILIKE $1)
     ORDER BY address
     LIMIT $2
     """,
@@ -222,14 +279,15 @@ query distinctValues @auth(level: USER) {
   values: _selectFirst(
     sql: """
     SELECT
-      count(*) AS total_rows,
-      array_agg(DISTINCT property_type) FILTER (WHERE property_type <> '') AS property_types,
-      array_agg(DISTINCT city) FILTER (WHERE city <> '') AS cities,
-      array_agg(DISTINCT school_district) FILTER (WHERE school_district <> '') AS school_districts,
-      array_agg(DISTINCT elementary) FILTER (WHERE elementary <> '') AS elementary,
-      array_agg(DISTINCT middle) FILTER (WHERE middle <> '') AS middle,
-      array_agg(DISTINCT highschools) FILTER (WHERE highschools <> '') AS highschools
+      count(*) FILTER (WHERE upload_session_id IS NULL) AS total_rows,
+      array_agg(DISTINCT property_type) FILTER (WHERE property_type <> '' AND upload_session_id IS NULL) AS property_types,
+      array_agg(DISTINCT city) FILTER (WHERE city <> '' AND upload_session_id IS NULL) AS cities,
+      array_agg(DISTINCT school_district) FILTER (WHERE school_district <> '' AND upload_session_id IS NULL) AS school_districts,
+      array_agg(DISTINCT elementary) FILTER (WHERE elementary <> '' AND upload_session_id IS NULL) AS elementary,
+      array_agg(DISTINCT middle) FILTER (WHERE middle <> '' AND upload_session_id IS NULL) AS middle,
+      array_agg(DISTINCT highschools) FILTER (WHERE highschools <> '' AND upload_session_id IS NULL) AS highschools
     FROM properties
+    WHERE upload_session_id IS NULL
     """,
     params: []
   )
@@ -308,7 +366,8 @@ query areaMapValues(
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0)) AS med_tax_rate
     FROM properties
-    WHERE close_price >= $2 AND close_price <= $3
+    WHERE upload_session_id IS NULL
+      AND close_price >= $2 AND close_price <= $3
       AND sqft >= $4 AND sqft <= $5
       AND year_built >= $6 AND year_built <= $7
       AND br >= $8 AND br <= $9
@@ -432,7 +491,8 @@ query overallAggregates(
       COUNT(*) FILTER (WHERE year_built >= 1990 AND year_built < 2010)::int AS era3,
       COUNT(*) FILTER (WHERE year_built >= 2010)::int AS era4
     FROM properties
-    WHERE close_price >= $1 AND close_price <= $2
+    WHERE upload_session_id IS NULL
+      AND close_price >= $1 AND close_price <= $2
       AND sqft >= $3 AND sqft <= $4
       AND year_built >= $5 AND year_built <= $6
       AND br >= $7 AND br <= $8
@@ -533,7 +593,8 @@ query monthlyTimeSeries(
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0)) AS med_tax_rate
     FROM properties
-    WHERE close_price >= $1 AND close_price <= $2
+    WHERE upload_session_id IS NULL
+      AND close_price >= $1 AND close_price <= $2
       AND sqft >= $3 AND sqft <= $4
       AND year_built >= $5 AND year_built <= $6
       AND br >= $7 AND br <= $8
@@ -621,7 +682,8 @@ query mapPoints(
   points: _select(
     sql: """
     SELECT lat, lng FROM properties
-    WHERE close_price >= $2 AND close_price <= $3
+    WHERE upload_session_id IS NULL
+      AND close_price >= $2 AND close_price <= $3
       AND sqft >= $4 AND sqft <= $5
       AND year_built >= $6 AND year_built <= $7
       AND br >= $8 AND br <= $9

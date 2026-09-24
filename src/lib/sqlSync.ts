@@ -9,7 +9,7 @@
  * data (a partial sync must never feed the map: the worker path stays active
  * until the synced version matches the manifest version).
  */
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 
 export const SQL_SYNC_STATE_PATH = 'cms_meta/sql_sync';
@@ -67,6 +67,20 @@ export async function readSqlSyncState(): Promise<SqlSyncState | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Publish a new SQL-first dataset version from the admin panel.
+ * The map uses this doc as the signal that fresh data is available.
+ */
+export async function publishSqlDatasetVersion(totalRows: number): Promise<void> {
+  await setDoc(doc(db, 'cms_meta', 'sql_sync'), {
+    version: Date.now(),
+    done: true,
+    totalRows,
+    updatedAt: serverTimestamp(),
+    importedAt: serverTimestamp(),
+  });
 }
 
 /** SQL-first dataset source of truth. When SQL is enabled the map must not

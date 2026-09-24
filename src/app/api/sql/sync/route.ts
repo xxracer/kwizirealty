@@ -124,6 +124,7 @@ function toSqlRow(row: ChunkRecord): Record<string, unknown> | null {
     propertyType: String(row.propertyType ?? ''),
     pool: !!row.pool,
     listingType: 'sale',
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -194,6 +195,16 @@ export async function POST(req: Request) {
 
   // 3. Ingest chunks until the time budget runs out (resumable loop).
   const dc = getAdminDataConnect();
+
+  // Idempotent: ensure the Postgres trigger that refreshes updated_at on every
+  // UPDATE exists. Ignored if already present or if Data Connect permissions
+  // block it; rows also carry updatedAt explicitly from the client/server.
+  try {
+    await dc.executeMutation('createUpdatedAtTrigger', {});
+  } catch {
+    // ignore
+  }
+
   const started = Date.now();
   let ingested = 0;
   let rows = 0;

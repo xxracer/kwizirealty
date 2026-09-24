@@ -12,9 +12,18 @@ import {
   type CMSStoreSummary,
   type CMSFileCategory,
 } from '@/lib/cmsStore';
-import { auth } from '@/lib/firebase';
 import { engine, type BoundaryKey, type MetricKey, type PropertyData } from '@/lib/engine';
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
+import { auth } from '@/lib/firebase';
+import {
+  clearPendingProperties,
+  commitPendingProperties,
+  commitPendingSession,
+  countCommittedProperties,
+  deletePendingSession,
+  stagePropertyRows,
+} from '@/lib/dataConnectClient';
+import { publishSqlDatasetVersion } from '@/lib/sqlSync';
 import {
   csvToFeatureCollection,
   diffAgainstExisting,
@@ -225,6 +234,10 @@ interface StagedFile {
     new: number;
     duplicate: number;
   };
+  /** For SQL-bound property CSVs: session id used to stage/commit rows. */
+  sessionId?: string;
+  /** Background import progress for SQL-bound files. */
+  importProgress?: { loaded: number; total: number; status: 'running' | 'done' | 'error'; error?: string };
   /** Set only for Area Metrics uploads; holds the parsed FeatureCollection. */
   geoJson?: GeoJsonFeatureCollection;
   /** Names of duplicate features detected against the existing custom-area set. */
@@ -739,6 +752,15 @@ function AdminPageInner() {
     return () => unsubscribe();
   }, [loadData]);
 
+  // On admin mount, remove any SQL rows that were staged in a previous session
+  // but never committed. They are invisible to the map, so if the user reloaded
+  // before clicking Add All they should be gone.
+  useEffect(() => {
+    clearPendingProperties().catch((err) =>
+      console.warn('[admin] clearPendingProperties failed on mount', err)
+    );
+  }, []);
+
   // Self-healing: when the admin opens, verify the published dataset actually
   // matches the CSVs currently in the CMS and rebuild automatically if they
   // diverged (e.g. a rebuild failed while the tab was closed). Runs once per
@@ -1063,19 +1085,27 @@ function AdminPageInner() {
         }
 
         const actualCategory = categories.includes(category) ? category : categories[0];
+        const isSqlImport =
+          actualCategory !== 'boundary' && actualCategory !== 'custom-area' && !actualCategory.startsWith('school');
 
-        const columns = getDedupeColumns(dataSection);
-        const newRows: Record<string, string>[] = [];
-        let duplicateCount = 0;
-        for (const row of parsed.data) {
-          const key = makeDedupeKey(row, columns);
-          if (baseKeySet.has(key) || batchKeySet.has(key)) {
-            duplicateCount++;
-          } else {
-            newRows.push(row);
-            batchKeySet.add(key);
+        // SQL-bound property CSVs are upserted by mls_number, so local
+        // de-duplication only hides valid re-uploads. Keep raw parsed rows.
+        const newRows = isSqlImport ? parsed.data : (() => {
+          const columns = getDedupeColumns(dataSection);
+          const kept: Record<string, string>[] = [];
+          let duplicateCount = 0;
+          for (const row of parsed.data) {
+            const key = makeDedupeKey(row, columns);
+            if (baseKeySet.has(key) || batchKeySet.has(key)) {
+              duplicateCount++;
+            } else {
+              kept.push(row);
+              batchKeySet.add(key);
+            }
           }
-        }
+          return kept;
+        })();
+        const duplicateCount = parsed.data.length - newRows.length;
 
         const id = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const detectedYear = actualCategory !== 'boundary' && actualCategory !== 'custom-area'
@@ -1093,7 +1123,7 @@ function AdminPageInner() {
           year: detectedYear,
         };
 
-        newStaged.push({
+        const staged: StagedFile = {
           id,
           file,
           section,
@@ -1103,7 +1133,45 @@ function AdminPageInner() {
             new: newRows.length,
             duplicate: duplicateCount,
           },
-        });
+        };
+
+        // Property CSVs go straight to SQL as soon as they are selected.
+        // They are tagged with a session id so they stay invisible until Add All.
+        if (isSqlImport) {
+          const sessionId = `${id}_${Date.now()}`;
+          staged.sessionId = sessionId;
+          staged.importProgress = { loaded: 0, total: newRows.length, status: 'running' };
+
+          (async () => {
+            try {
+              const { csvRowsToSqlPropertyRows } = await import('@/lib/sqlImport');
+              const sqlRows = csvRowsToSqlPropertyRows(newRows, actualCategory as any, sessionId);
+              await stagePropertyRows(sqlRows, (loaded) => {
+                setStagedFiles((prev) =>
+                  prev.map((s) =>
+                    s.id === id ? { ...s, importProgress: { ...s.importProgress!, loaded, total: sqlRows.length, status: 'running' } } : s
+                  )
+                );
+              });
+              setStagedFiles((prev) =
+                prev.map((s) =>
+                  s.id === id ? { ...s, importProgress: { ...s.importProgress!, loaded: sqlRows.length, total: sqlRows.length, status: 'done' } } : s
+                )
+              );
+            } catch (err) {
+              const message = (err as Error).message || 'SQL import failed';
+              console.error('[admin] direct SQL import failed', err);
+              setStagedFiles((prev) =
+                prev.map((s) =>
+                  s.id === id ? { ...s, importProgress: { ...s.importProgress!, status: 'error', error: message } } : s
+                )
+              );
+              setToast({ type: 'error', message: `${relativePath}: ${message}` });
+            }
+          })();
+        }
+
+        newStaged.push(staged);
       } catch (err) {
         console.error('File read error', err);
         setToast({ type: 'error', message: `Error processing ${file.name}` });
@@ -1317,46 +1385,21 @@ function AdminPageInner() {
       }
 
       if (isSqlImport) {
-        // Vercel rejects request bodies larger than ~4.5 MB, so large CSVs are
-        // uploaded in chunks. Each chunk upserts; the final chunk publishes the
-        // new dataset version in cms_meta/sql_sync.
-        const CHUNK_SIZE = 1000;
-        const totalChunks = Math.max(1, Math.ceil(rowsToSave.length / CHUNK_SIZE));
-        const token = await auth.currentUser?.getIdToken();
-        let importedCount = 0;
-
-        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-          const chunkRows = rowsToSave.slice(chunkIndex * CHUNK_SIZE, (chunkIndex + 1) * CHUNK_SIZE);
-          const importRes = await fetch('/api/sql/import', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({
-              rows: chunkRows,
-              type: staged.record.category,
-              fileName: staged.record.name,
-              mode: mode === 'replace' ? 'replace' : 'upsert',
-              chunkIndex,
-              totalChunks,
-            }),
-          });
-          if (!importRes.ok) {
-            const errBody = await importRes.json().catch(() => ({}));
-            throw new Error(errBody.error || `SQL import failed (${importRes.status})`);
-          }
-          const chunkResult = await importRes.json().catch(() => ({}));
-          importedCount += Number(chunkResult.imported) || chunkRows.length;
+        // Rows are already staged in SQL with upload_session_id. Confirming
+        // commits this file's session and saves the metadata doc.
+        if (staged.sessionId) {
+          await commitPendingSession(staged.sessionId);
         }
 
         await cmsStore.saveSqlImportMetadata(recordToSave);
+        const totalRows = await countCommittedProperties();
+        await publishSqlDatasetVersion(totalRows);
         setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
         await loadData();
         await reloadEngine();
         setToast({
           type: 'success',
-          message: `${staged.record.name} imported into SQL (${importedCount.toLocaleString()} rows). The map will refresh automatically.`,
+          message: `${staged.record.name} confirmed (${rowsToSave.length.toLocaleString()} rows, ${totalRows.toLocaleString()} total). The map will refresh automatically.`,
         });
       } else {
         // GeoJSON: keep the Storage + Firestore flow.
@@ -1386,16 +1429,25 @@ function AdminPageInner() {
     setProcessing(false);
   };
 
-  const handleDiscardStaged = (stagedId: string) => {
-    setStagedFiles(prev => prev.filter(s => s.id !== stagedId));
+  const handleDiscardStaged = async (stagedId: string) => {
+    const staged = stagedFiles.find((s) => s.id === stagedId);
+    if (staged?.sessionId) {
+      try {
+        await deletePendingSession(staged.sessionId);
+      } catch (err) {
+        console.warn('[admin] deletePendingSession failed', err);
+      }
+    }
+    setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
   };
 
   const handleConfirmAllUploads = async () => {
     if (stagedFiles.length === 0) return;
     setProcessing(true);
 
-    // Sort staged files by detected year so SQL receives them in chronological
-    // order and the admin tree shows them grouped consistently.
+    // Sort staged files by detected year so the admin tree shows them grouped
+    // consistently. Property CSVs are already in SQL as pending sessions; GeoJSON
+    // still needs the Storage flow.
     const ordered = [...stagedFiles].sort((a, b) => {
       const ya = a.record.year ?? detectDatasetYear(a.record.name, a.record.rows) ?? 9999;
       const yb = b.record.year ?? detectDatasetYear(b.record.name, b.record.rows) ?? 9999;
@@ -1404,17 +1456,45 @@ function AdminPageInner() {
     });
     setStagedFiles(ordered);
 
-    const total = ordered.length;
-    setUploadProgress({ current: 0, total, fileName: '', phase: 'Uploading files…', startedAt: Date.now() });
+    const sqlStaged = ordered.filter((s) => s.sessionId);
+    const otherStaged = ordered.filter((s) => !s.sessionId);
 
-    // Process sequentially: no parallel heavy imports, and each file's SQL upsert
-    // is fully committed before the next one starts.
-    for (let i = 0; i < total; i++) {
-      const staged = ordered[i];
+    // Commit every pending SQL session in a single mutation, then save all
+    // metadata docs. This avoids multiple round trips to Vercel.
+    if (sqlStaged.length > 0) {
+      setUploadProgress({ current: 0, total: sqlStaged.length, fileName: '', phase: 'Committing to SQL…', startedAt: Date.now() });
+      await commitPendingProperties();
+      for (let i = 0; i < sqlStaged.length; i++) {
+        const staged = sqlStaged[i];
+        setUploadProgress({ current: i + 1, total: sqlStaged.length, fileName: staged.record.name, phase: 'Saving metadata…', startedAt: Date.now() });
+        const rawContent = rowsToCsv(staged.record.headers, staged.record.rows);
+        const recordToSave: CMSFileRecord = {
+          ...staged.record,
+          rows: staged.record.rows,
+          rawContent,
+          size: new Blob([rawContent]).size,
+          uploadedAt: Date.now(),
+          rowCount: staged.record.rows.length,
+        };
+        for (const dup of files.filter((f) => f.name === staged.record.name)) {
+          await cmsStore.removeFile(dup.id);
+        }
+        await cmsStore.saveSqlImportMetadata(recordToSave);
+      }
+      const totalRows = await countCommittedProperties();
+      await publishSqlDatasetVersion(totalRows);
+      setStagedFiles((prev) => prev.filter((s) => !s.sessionId));
+      await loadData();
+      await reloadEngine();
+    }
+
+    // Process GeoJSON / non-SQL files one by one (Storage + dataset rebuild).
+    for (let i = 0; i < otherStaged.length; i++) {
+      const staged = otherStaged[i];
       setUploadProgress({
         current: i,
-        total,
-        fileName: `${staged.record.year ? `[${staged.record.year}] ` : ''}${staged.record.name}`,
+        total: otherStaged.length,
+        fileName: staged.record.name,
         phase: 'Uploading file…',
         startedAt: Date.now(),
       });
@@ -1422,8 +1502,8 @@ function AdminPageInner() {
     }
 
     setUploadProgress({
-      current: total,
-      total,
+      current: sqlStaged.length + otherStaged.length,
+      total: stagedFiles.length,
       fileName: '',
       phase: 'Finishing up…',
       startedAt: Date.now(),
@@ -2757,10 +2837,16 @@ function AdminPageInner() {
                               ) : (
                                 <button
                                   onClick={() => handleConfirmUpload(staged.id)}
-                                  disabled={processing || staged.stats.new === 0}
+                                  disabled={
+                                    processing ||
+                                    staged.stats.new === 0 ||
+                                    staged.importProgress?.status === 'running' ||
+                                    staged.importProgress?.status === 'error'
+                                  }
                                   className="px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:opacity-50"
                                 >
-                                  <Plus className="w-3 h-3" /> Add {staged.stats.new.toLocaleString()} new
+                                  <Plus className="w-3 h-3" />
+                                  {staged.sessionId ? `Confirm ${staged.stats.new.toLocaleString()}` : `Add ${staged.stats.new.toLocaleString()} new`}
                                 </button>
                               )}
                             </div>
@@ -2780,6 +2866,24 @@ function AdminPageInner() {
                               <div className="text-xs sm:text-sm font-bold text-amber-400">{staged.stats.duplicate.toLocaleString()}</div>
                             </div>
                           </div>
+
+                          {staged.sessionId && staged.importProgress ? (
+                            <div className="mt-3">
+                              {staged.importProgress.status === 'error' ? (
+                                <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-2 text-xs text-red-400">
+                                  Import failed: {staged.importProgress.error || 'unknown error'}
+                                </div>
+                              ) : staged.importProgress.status === 'running' ? (
+                                <div className="text-xs text-gray-400">
+                                  Staging in SQL… {staged.importProgress.loaded.toLocaleString()} / {staged.importProgress.total.toLocaleString()} rows
+                                </div>
+                              ) : (
+                                <div className="text-xs text-emerald-400">
+                                  Staged in SQL: {staged.importProgress.loaded.toLocaleString()} rows — click Add to confirm
+                                </div>
+                              )}
+                            </div>
+                          ) : null}
 
                           {staged.section === 'areas' && (staged.duplicateNames?.length || staged.newNames?.length || staged.csvSkipped?.length) ? (
                             <details className="mt-3 bg-white/[0.03] border border-border-subtle rounded-lg p-3 text-xs">

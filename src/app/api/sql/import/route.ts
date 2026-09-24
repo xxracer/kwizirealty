@@ -1,9 +1,9 @@
 /**
  * /api/sql/import — direct CSV → SQL Connect ingestion.
  *
- * The admin panel POSTs parsed CSV rows here instead of sending them to
- * Firebase Storage. The endpoint upserts them into the `properties` table
- * (keyed by mls_number) and bumps the dataset version in Firestore
+ * The admin panel POSTs parsed CSV rows here in small chunks instead of sending
+ * them to Firebase Storage. The endpoint upserts them into the `properties`
+ * table (keyed by mls_number) and bumps the dataset version in Firestore
  * (cms_meta/sql_sync) so the map picks up the change immediately.
  */
 import { NextResponse } from 'next/server';
@@ -80,17 +80,24 @@ export async function POST(req: Request) {
   }
 
   const dc = getAdminDataConnect();
+
+  // Idempotent: ensure the Postgres trigger that refreshes updated_at on every
+  // UPDATE exists. Ignored if already present or if Data Connect permissions
+  // block it; rows also carry updatedAt explicitly from the client/server.
+  try {
+    await dc.executeMutation('createUpdatedAtTrigger', {});
+  } catch {
+    // ignore
+  }
+
   const db = getFirestore();
   const stateRef = db.collection(STATE_DOC.collection).doc(STATE_DOC.id);
 
-  // Replace mode: clear the table first. Only do this on the first chunk so a
-  // chunked re-upload does not wipe rows between chunks.
-  if (mode === 'replace' && chunkIndex === 0) {
-    await dc.executeMutation('clearProperties', {});
-  }
+  const now = new Date().toISOString();
+  const rowsWithTimestamp = sqlRows.map((r) => ({ ...r, updatedAt: r.updatedAt ?? now }));
 
-  for (let i = 0; i < sqlRows.length; i += UPSERT_BATCH) {
-    await dc.upsertMany('Property', sqlRows.slice(i, i + UPSERT_BATCH));
+  for (let i = 0; i < rowsWithTimestamp.length; i += UPSERT_BATCH) {
+    await dc.upsertMany('Property', rowsWithTimestamp.slice(i, i + UPSERT_BATCH));
   }
 
   const isFinalChunk = chunkIndex === totalChunks - 1;

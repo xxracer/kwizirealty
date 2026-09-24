@@ -34,6 +34,13 @@ import { guardPublicRead } from '@/lib/server/requestGuard';
 import { getTeaScoreMaps } from '@/lib/server/teaScores';
 import { applyPropertyOverrides } from '@/lib/engineCore';
 import type { PropertyOverrideLite } from '@/lib/engineCore';
+import { getDatasetVersionTag } from '@/lib/server/datasetVersion';
+import {
+  generateETag,
+  isMatch,
+  notModifiedResponse,
+  withETag,
+} from '@/lib/server/etag';
 
 export const runtime = 'nodejs';
 
@@ -282,6 +289,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Bad request' }, { status: 400 });
   }
 
+  // Conditional cache: compute an ETag from the request body + dataset version.
+  // If the browser already has this exact response, return 304 with no body.
+  const datasetVersion = await getDatasetVersionTag();
+  const etag = generateETag(body, datasetVersion);
+  if (isMatch(req, etag)) {
+    return notModifiedResponse(etag);
+  }
+
   const dc = getAdminDataConnect();
   const variables = buildVariables(filters, body.resolved, body.startTs, body.endTs, metric);
 
@@ -378,7 +393,7 @@ export async function POST(req: Request) {
 
       const points = pointRows.map((row: any) => ({ lat: Number(row.lat ?? 0), lng: Number(row.lng ?? 0) }));
 
-      return NextResponse.json({
+      return withETag({
         mapValues: { values, counts, names },
         reportStats,
         marketHealth,
@@ -386,7 +401,7 @@ export async function POST(req: Request) {
         forecastComparison: [],
         yearBuiltData,
         points,
-      });
+      }, etag);
     } catch (err) {
       // Ops not deployed yet (or a thin result) — fall through to the legacy
       // full-row path so the response stays identical while the connector
@@ -452,7 +467,7 @@ export async function POST(req: Request) {
     // Year-built distribution for the report widget (mirrors page.tsx).
     const yearBuiltData = buildYearBuiltData(engine, reportProps, boundary, selectedIds || []);
 
-    return NextResponse.json({
+    return withETag({
       mapValues: { values: mapValues.values, counts: mapValues.counts, names: mapValues.names },
       reportStats,
       marketHealth,
@@ -460,7 +475,7 @@ export async function POST(req: Request) {
       forecastComparison,
       yearBuiltData,
       points,
-    });
+    }, etag);
   } catch (err) {
     console.error('[api/query] SQL Connect failed:', err);
     return NextResponse.json({ error: 'SQL query failed' }, { status: 500 });

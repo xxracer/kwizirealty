@@ -62,4 +62,15 @@ type Property
   # Distinguishes sales records (default) from rental records when both are
   # stored in the same table. Empty/null is treated as a sale.
   listingType: String
+
+  # Staging marker for the admin upload flow. Rows imported from the browser
+  # are written with a session id; they are invisible to the map until the
+  # user clicks "Add All", which sets this column to NULL. If the page is
+  # reloaded before committing, pending rows are deleted automatically.
+  uploadSessionId: String
+
+  # Last-modification timestamp. Used for ETag/conditional-cache generation so
+  # the browser only re-downloads query results when the dataset changes.
+  # Populated by the upload/sync code and backed by a Postgres trigger.
+  updatedAt: Timestamp
 }

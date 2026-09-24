@@ -9,6 +9,13 @@
 import { NextResponse } from 'next/server';
 import { getAdminDataConnect } from '@/lib/firebaseAdmin';
 import { guardPublicRead } from '@/lib/server/requestGuard';
+import { getDatasetVersionTag } from '@/lib/server/datasetVersion';
+import {
+  generateETag,
+  isMatch,
+  notModifiedResponse,
+  withETag,
+} from '@/lib/server/etag';
 
 export const runtime = 'nodejs';
 
@@ -27,6 +34,14 @@ export async function POST(req: Request) {
   }
   if (!query) return NextResponse.json({ results: [] });
 
+  // Conditional cache: ETag from the search query + dataset version.
+  const cacheKey = { query };
+  const datasetVersion = await getDatasetVersionTag();
+  const etag = generateETag(cacheKey, datasetVersion);
+  if (isMatch(req, etag)) {
+    return notModifiedResponse(etag);
+  }
+
   // ILIKE literal: escape the LIKE metacharacters, then wrap in wildcards.
   const escaped = query.replace(/[\\%_]/g, (m) => `\\${m}`);
   const pattern = `%${escaped}%`;
@@ -35,7 +50,7 @@ export async function POST(req: Request) {
     const dc = getAdminDataConnect();
     const res = await dc.executeQuery('searchProperties', { q: pattern, limit: SEARCH_LIMIT });
     const rows: any[] = (res.data as any)?.results || [];
-    return NextResponse.json({
+    return withETag({
       results: rows.map((r) => ({
         id: r.mls_number ?? '',
         address: r.address ?? '',
@@ -53,7 +68,7 @@ export async function POST(req: Request) {
         middle: r.middle ?? '',
         highschools: r.highschools ?? '',
       })),
-    });
+    }, etag);
   } catch (err) {
     console.error('[api/search] failed:', err);
     return NextResponse.json({ error: 'Search failed' }, { status: 500 });

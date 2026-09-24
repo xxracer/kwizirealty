@@ -313,8 +313,8 @@ export const cmsStore = {
 
   /**
    * SQL-first upload: persist only the metadata doc in Firestore. The CSV bytes
-   * are NOT sent to Storage — they were already upserted into SQL Connect by
-   * /api/sql/import. GeoJSON files still use saveFile() with Storage.
+   * are NOT sent to Storage — they were already upserted into SQL Connect
+   * directly from the browser. GeoJSON files still use saveFile() with Storage.
    */
   async saveSqlImportMetadata(record: CMSFileRecord): Promise<void> {
     const { rows, rawContent, ...recordWithoutRows } = record;
