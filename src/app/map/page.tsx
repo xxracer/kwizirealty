@@ -12,6 +12,7 @@ import HommieChat from '@/components/HommieChat';
 import { RequireAuth } from '@/components/RequireAuth';
 import { useAuth } from '@/lib/authContext';
 import { purgeDatasetCache, readGeoCache, writeGeoCache } from '@/lib/csvCache';
+import { enforceFreshBuild } from '@/lib/cacheBuster';
 import {
   PropertyData,
   BoundaryKey,
@@ -653,6 +654,18 @@ function MapPageInner() {
   // next visit. Deleting a non-existent DB is a no-op, so this stays cheap.
   useEffect(() => {
     purgeDatasetCache();
+  }, []);
+
+  // Automatic cache-bust on new deploys. If the build version changed, clear
+  // IndexedDB, local/session storage, unregister service workers, and hard-reload.
+  // This must run early so stale bundles/state never drive the map.
+  useEffect(() => {
+    enforceFreshBuild().then((reloaded) => {
+      if (reloaded) {
+        // The page is navigating away; prevent any further effect work.
+        setReportError('Updating to the latest version… please wait.');
+      }
+    });
   }, []);
 
   // Load (or re-load) the full dataset into the engine. Until it lands, every
