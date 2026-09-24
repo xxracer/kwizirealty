@@ -6,17 +6,15 @@
  * tagged with `uploadSessionId`; rows stay invisible to the map until the user
  * clicks "Add All", which calls commitPendingProperties(). If the page is
  * reloaded before committing, clearPendingProperties() deletes the staged rows.
+ *
+ * NOTE: we call the Data Connect REST API directly rather than using the
+ * `executeMutation`/`executeQuery` helpers from the JS SDK. The SDK was returning
+ * UNAUTHENTICATED (401) because it was not attaching the Firebase Auth ID token
+ * to requests even when the admin user was signed in. By manually attaching
+ * `Authorization: Bearer <idToken>` we keep the browser-to-SQL path while
+ * honoring the connector's `authMode: USER`.
  */
-import { app } from './firebase';
-import {
-  getDataConnect,
-  executeMutation,
-  executeQuery,
-  mutationRef,
-  queryRef,
-  type DataConnect,
-  type MutationRef,
-} from 'firebase/data-connect';
+import { app, auth } from './firebase';
 
 const connectorConfig = {
   location: process.env.NEXT_PUBLIC_DATACONNECT_LOCATION || 'us-central1',
@@ -24,20 +22,66 @@ const connectorConfig = {
   service: process.env.NEXT_PUBLIC_DATACONNECT_SERVICE_ID || 'kwizi-sql',
 };
 
-let dc: DataConnect | null = null;
-
-export function getClientDataConnect(): DataConnect {
-  if (!dc) {
-    dc = getDataConnect(app, connectorConfig);
-  }
-  return dc;
-}
-
-function mut(name: string, variables?: Record<string, unknown>): MutationRef<any, any> {
-  return mutationRef(getClientDataConnect(), name, variables ?? {});
-}
+const projectId =
+  process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ||
+  app.options.projectId;
 
 const CLIENT_BATCH = 500;
+
+function connectorName(): string {
+  return `projects/${projectId}/locations/${connectorConfig.location}/services/${connectorConfig.service}/connectors/${connectorConfig.connector}`;
+}
+
+async function getIdToken(): Promise<string> {
+  // Auth state is restored asynchronously after a page reload. Wait until it is
+  // settled before reading currentUser, otherwise all Data Connect calls fail
+  // with UNAUTHENTICATED even though the admin user is logged in.
+  await (auth as any).authStateReady?.().catch(() => {});
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('You must be signed in to upload data to the database.');
+  }
+  return user.getIdToken(true);
+}
+
+async function dataConnectFetch<T>(
+  method: 'executeMutation' | 'executeQuery',
+  operationName: string,
+  payload: Record<string, unknown>
+): Promise<{ data?: T }> {
+  const token = await getIdToken();
+  const name = `${connectorName()}/${method === 'executeMutation' ? 'mutations' : 'queries'}/${operationName}`;
+  const url = `https://firebasedataconnect.googleapis.com/v1alpha/${connectorName()}:${method}`;
+
+  const body =
+    method === 'executeMutation'
+      ? { name, operationName, arguments: payload }
+      : { name, operationName, variables: payload };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    let detail: any;
+    try {
+      detail = await res.json();
+    } catch {
+      detail = await res.text();
+    }
+    const message =
+      (detail?.error?.message) ||
+      (typeof detail === 'string' ? detail : `Data Connect ${res.status}`);
+    throw new Error(`Data Connect ${operationName} failed: ${message}`);
+  }
+
+  return res.json();
+}
 
 /**
  * Upsert property rows in batches, tagging them with the upload session id.
@@ -50,7 +94,6 @@ export async function stagePropertyRows(
   rows: Record<string, unknown>[],
   onProgress?: (done: number) => void
 ): Promise<number> {
-  const dc = getClientDataConnect();
   let inserted = 0;
   for (let i = 0; i < rows.length; i += CLIENT_BATCH) {
     const batch = rows.slice(i, i + CLIENT_BATCH);
@@ -61,8 +104,7 @@ export async function stagePropertyRows(
       closeDateTs: r.closeDateTs != null ? String(r.closeDateTs) : r.closeDateTs,
       updatedAt: r.updatedAt ?? now,
     }));
-    const ref = mutationRef(dc, 'stagePropertyRows', { rows: JSON.stringify(normalized) });
-    await executeMutation(ref);
+    await dataConnectFetch('executeMutation', 'stagePropertyRows', { rows: JSON.stringify(normalized) });
     inserted += batch.length;
     onProgress?.(inserted);
   }
@@ -73,14 +115,14 @@ export async function stagePropertyRows(
  * Promote all staged rows to committed (visible to the map).
  */
 export async function commitPendingProperties(): Promise<void> {
-  await executeMutation(mut('commitPendingProperties'));
+  await dataConnectFetch('executeMutation', 'commitPendingProperties', {});
 }
 
 /**
  * Promote one upload session to committed.
  */
 export async function commitPendingSession(sessionId: string): Promise<void> {
-  await executeMutation(mut('commitPendingSession', { sessionId }));
+  await dataConnectFetch('executeMutation', 'commitPendingSession', { sessionId });
 }
 
 /**
@@ -88,7 +130,7 @@ export async function commitPendingSession(sessionId: string): Promise<void> {
  * uploads that were never committed before a refresh.
  */
 export async function clearPendingProperties(): Promise<void> {
-  await executeMutation(mut('clearPendingProperties'));
+  await dataConnectFetch('executeMutation', 'clearPendingProperties', {});
 }
 
 /**
@@ -96,15 +138,13 @@ export async function clearPendingProperties(): Promise<void> {
  * committing the rest).
  */
 export async function deletePendingSession(sessionId: string): Promise<void> {
-  await executeMutation(mut('deletePendingSession', { sessionId }));
+  await dataConnectFetch('executeMutation', 'deletePendingSession', { sessionId });
 }
 
 /**
  * Return the current committed row count from SQL. Excludes staged rows.
  */
 export async function countCommittedProperties(): Promise<number> {
-  const ref = queryRef(getClientDataConnect(), 'distinctValues', {});
-  const res = await executeQuery(ref);
-  const values = (res.data as any)?.values;
-  return Number(values?.total_rows ?? 0);
+  const res = await dataConnectFetch<{ values: { total_rows: number } }>('executeQuery', 'distinctValues', {});
+  return Number(res.data?.values?.total_rows ?? 0);
 }
