@@ -53,13 +53,13 @@ async function dataConnectFetch<T>(
   payload: Record<string, unknown>
 ): Promise<{ data?: T }> {
   const token = await getIdToken();
-  const name = `${connectorName()}/${method === 'executeMutation' ? 'mutations' : 'queries'}/${operationName}`;
-  const url = `https://firebasedataconnect.googleapis.com/v1alpha/${connectorName()}:${method}`;
+  const name = connectorName();
+  const url = `https://firebasedataconnect.googleapis.com/v1beta/${name}:${method}`;
 
-  const body =
-    method === 'executeMutation'
-      ? { name, operationName, arguments: payload }
-      : { name, operationName, variables: payload };
+  // Per the Data Connect REST reference: both executeQuery and executeMutation
+  // take { operationName, variables }; the connector resource name lives in the
+  // URL, not the body. Variables use the protobuf Struct JSON mapping.
+  const body = { operationName, variables: payload };
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -83,7 +83,13 @@ async function dataConnectFetch<T>(
     throw new Error(`Data Connect ${operationName} failed: ${message}`);
   }
 
-  return res.json();
+  const json = await res.json();
+  // GraphQL-style responses carry errors even on HTTP 200.
+  if (json.errors?.length) {
+    const first = json.errors[0];
+    throw new Error(`Data Connect ${operationName} failed: ${first.message || JSON.stringify(first)}`);
+  }
+  return json;
 }
 
 /**
