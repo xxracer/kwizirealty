@@ -37,11 +37,14 @@ function mut(name: string, variables?: Record<string, unknown>): MutationRef<any
   return mutationRef(getClientDataConnect(), name, variables ?? {});
 }
 
-const CLIENT_BATCH = 100;
+const CLIENT_BATCH = 500;
 
 /**
  * Upsert property rows in batches, tagging them with the upload session id.
- * Uses the auto-generated `property_upsertMany` mutation.
+ * Uses the custom `stagePropertyRows` mutation that performs a Postgres
+ * bulk INSERT ... ON CONFLICT from a JSON array string. Data Connect does
+ * not provide an auto-generated `upsertMany`, so this SQL bypass avoids
+ * thousands of single-row round trips.
  */
 export async function stagePropertyRows(
   rows: Record<string, unknown>[],
@@ -52,13 +55,13 @@ export async function stagePropertyRows(
   for (let i = 0; i < rows.length; i += CLIENT_BATCH) {
     const batch = rows.slice(i, i + CLIENT_BATCH);
     const now = new Date().toISOString();
-    // Int64 fields must be strings in the client SDK.
+    // Int64 must be passed as a string to stay inside Data Connect's safe range.
     const normalized = batch.map((r) => ({
       ...r,
       closeDateTs: r.closeDateTs != null ? String(r.closeDateTs) : r.closeDateTs,
       updatedAt: r.updatedAt ?? now,
     }));
-    const ref = mutationRef(dc, 'property_upsertMany', { data: normalized });
+    const ref = mutationRef(dc, 'stagePropertyRows', { rows: JSON.stringify(normalized) });
     await executeMutation(ref);
     inserted += batch.length;
     onProgress?.(inserted);

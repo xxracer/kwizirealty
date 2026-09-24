@@ -239,6 +239,114 @@ mutation deletePendingSession($sessionId: String!) @auth(level: USER) {
   _execute(sql: "DELETE FROM properties WHERE upload_session_id = $1", params: [$sessionId])
 }
 
+# Browser-side bulk upsert for staging property CSV rows. Rows arrive as a JSON
+# array string; each row is keyed by mlsNumber and conflicts are resolved with
+# a full UPDATE so re-importing the same file refreshes every column. This
+# bypasses the auto-generated Data Connect mutations (there is no built-in
+# upsertMany) and avoids routing large CSV payloads through Vercel.
+mutation stagePropertyRows($rows: String!) @auth(level: USER) {
+  _execute(sql: """
+    WITH batch AS (
+      SELECT
+        r->>'mlsNumber' AS mls_number,
+        r->>'address' AS address,
+        r->>'city' AS city,
+        r->>'state' AS state,
+        r->>'zip' AS zip,
+        NULLIF(r->>'closePrice', '')::int AS close_price,
+        NULLIF(r->>'listPrice', '')::int AS list_price,
+        NULLIF(r->>'pricePerSqft', '')::float AS price_per_sqft,
+        NULLIF(r->>'sqft', '')::int AS sqft,
+        NULLIF(r->>'lotSize', '')::float AS lot_size,
+        NULLIF(r->>'br', '')::int AS br,
+        NULLIF(r->>'baths', '')::int AS baths,
+        NULLIF(r->>'yearBuilt', '')::int AS year_built,
+        NULLIF(r->>'dom', '')::int AS dom,
+        NULLIF(r->>'cdom', '')::int AS cdom,
+        r->>'closeDate' AS close_date,
+        NULLIF(r->>'closeYear', '')::int AS close_year,
+        NULLIF(r->>'closeDateTs', '')::bigint AS close_date_ts,
+        NULLIF(r->>'maintFee', '')::float AS maint_fee,
+        r->>'maintFeeSchedule' AS maint_fee_schedule,
+        NULLIF(r->>'taxRate', '')::float AS tax_rate,
+        NULLIF(r->>'taxYear', '')::int AS tax_year,
+        NULLIF(r->>'taxAmount', '')::float AS tax_amount,
+        r->>'subdivisions' AS subdivisions,
+        r->>'zipcodes' AS zipcodes,
+        r->>'highschools' AS highschools,
+        r->>'highschoolName' AS highschool_name,
+        r->>'elementary' AS elementary,
+        r->>'middle' AS middle,
+        r->>'schoolDistrict' AS school_district,
+        r->>'marketArea' AS market_area,
+        r->>'area' AS area,
+        NULLIF(r->>'lat', '')::float AS lat,
+        NULLIF(r->>'lng', '')::float AS lng,
+        r->>'propertyType' AS property_type,
+        (r->>'pool')::boolean AS pool,
+        r->>'listingType' AS listing_type,
+        r->>'uploadSessionId' AS upload_session_id,
+        NULLIF(r->>'updatedAt', '')::timestamptz AS updated_at
+      FROM jsonb_array_elements($1::jsonb) AS r
+    )
+    INSERT INTO properties (
+      mls_number, address, city, state, zip, close_price, list_price,
+      price_per_sqft, sqft, lot_size, br, baths, year_built, dom, cdom,
+      close_date, close_year, close_date_ts, maint_fee, maint_fee_schedule,
+      tax_rate, tax_year, tax_amount, subdivisions, zipcodes, highschools,
+      highschool_name, elementary, middle, school_district, market_area, area,
+      lat, lng, property_type, pool, listing_type, upload_session_id, updated_at
+    )
+    SELECT
+      mls_number, address, city, state, zip, close_price, list_price,
+      price_per_sqft, sqft, lot_size, br, baths, year_built, dom, cdom,
+      close_date, close_year, close_date_ts, maint_fee, maint_fee_schedule,
+      tax_rate, tax_year, tax_amount, subdivisions, zipcodes, highschools,
+      highschool_name, elementary, middle, school_district, market_area, area,
+      lat, lng, property_type, pool, listing_type, upload_session_id, updated_at
+    FROM batch
+    ON CONFLICT (mls_number) DO UPDATE SET
+      address = EXCLUDED.address,
+      city = EXCLUDED.city,
+      state = EXCLUDED.state,
+      zip = EXCLUDED.zip,
+      close_price = EXCLUDED.close_price,
+      list_price = EXCLUDED.list_price,
+      price_per_sqft = EXCLUDED.price_per_sqft,
+      sqft = EXCLUDED.sqft,
+      lot_size = EXCLUDED.lot_size,
+      br = EXCLUDED.br,
+      baths = EXCLUDED.baths,
+      year_built = EXCLUDED.year_built,
+      dom = EXCLUDED.dom,
+      cdom = EXCLUDED.cdom,
+      close_date = EXCLUDED.close_date,
+      close_year = EXCLUDED.close_year,
+      close_date_ts = EXCLUDED.close_date_ts,
+      maint_fee = EXCLUDED.maint_fee,
+      maint_fee_schedule = EXCLUDED.maint_fee_schedule,
+      tax_rate = EXCLUDED.tax_rate,
+      tax_year = EXCLUDED.tax_year,
+      tax_amount = EXCLUDED.tax_amount,
+      subdivisions = EXCLUDED.subdivisions,
+      zipcodes = EXCLUDED.zipcodes,
+      highschools = EXCLUDED.highschools,
+      highschool_name = EXCLUDED.highschool_name,
+      elementary = EXCLUDED.elementary,
+      middle = EXCLUDED.middle,
+      school_district = EXCLUDED.school_district,
+      market_area = EXCLUDED.market_area,
+      area = EXCLUDED.area,
+      lat = EXCLUDED.lat,
+      lng = EXCLUDED.lng,
+      property_type = EXCLUDED.property_type,
+      pool = EXCLUDED.pool,
+      listing_type = EXCLUDED.listing_type,
+      upload_session_id = EXCLUDED.upload_session_id,
+      updated_at = EXCLUDED.updated_at
+  """, params: [$rows])
+}
+
 # Dataset version for conditional HTTP caching. The ETag of /api/query is
 # derived from this timestamp plus a hash of the request body, so unchanged
 # data yields a 304 Not Modified with zero payload.
