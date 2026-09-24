@@ -187,6 +187,28 @@ function computeDataBounds(data: PropertyData[]): L.LatLngBounds | null {
   return bounds;
 }
 
+/** Compute bounds directly from a GeoJSON FeatureCollection. Kept at module
+ *  scope so both the map-init fit and the post-load rebuild can frame the
+ *  polygons even when no property rows are held client-side (SQL-first mode). */
+function computeGeoJSONBounds(collection: GeoJSON.FeatureCollection | null): L.LatLngBounds | null {
+  if (!collection?.features?.length) return null;
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+  for (const f of collection.features) {
+    const bbox = computeFeatureBBox(f);
+    if (!bbox) continue;
+    const [fMinLng, fMinLat, fMaxLng, fMaxLat] = bbox;
+    if (fMinLng < minLng) minLng = fMinLng;
+    if (fMinLat < minLat) minLat = fMinLat;
+    if (fMaxLng > maxLng) maxLng = fMaxLng;
+    if (fMaxLat > maxLat) maxLat = fMaxLat;
+  }
+  if (!isFinite(minLng) || !isFinite(minLat) || !isFinite(maxLng) || !isFinite(maxLat)) return null;
+  return L.latLngBounds([minLat, minLng], [maxLat, maxLng]);
+}
+
 function formatMoney(num: number): string {
   if (!num || !isFinite(num)) return '$0';
   if (num >= 1e6) return '$' + (num / 1e6).toFixed(1) + 'M';
@@ -583,32 +605,9 @@ export default function MapComponent({
     // only one reacting to shift/mouse-drag and to avoid event conflicts.
     map.boxZoom.disable();
 
-    // Constrain map to the data bounds once data is loaded. If the CSV data has
-    // not been requested yet, fall back to the GeoJSON boundary bounds so the
-    // map still frames the Houston metro immediately.
-    const computeGeoJSONBounds = (): L.LatLngBounds | null => {
-      const collection = geoJsonDataRef.current;
-      if (!collection?.features?.length) return null;
-      let minLng = Infinity;
-      let minLat = Infinity;
-      let maxLng = -Infinity;
-      let maxLat = -Infinity;
-      for (const f of collection.features) {
-        const bbox = computeFeatureBBox(f);
-        if (!bbox) continue;
-        const [fMinLng, fMinLat, fMaxLng, fMaxLat] = bbox;
-        if (fMinLng < minLng) minLng = fMinLng;
-        if (fMinLat < minLat) minLat = fMinLat;
-        if (fMaxLng > maxLng) maxLng = fMaxLng;
-        if (fMaxLat > maxLat) maxLat = fMaxLat;
-      }
-      if (!isFinite(minLng)) return null;
-      return L.latLngBounds([minLat, minLng], [maxLat, maxLng]);
-    };
-
     const applyBoundsOnce = () => {
       if (boundsSetRef.current) return;
-      const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds();
+      const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
       if (!bounds) return;
       map.invalidateSize();
       // Tight fit with almost no padding so polygons/circles fill the container.
@@ -1332,7 +1331,7 @@ export default function MapComponent({
     }
 
     if (fitBounds) {
-      const pointBounds = computeDataBounds(rawDataRef.current);
+      const pointBounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
       if (pointBounds) {
         map.invalidateSize();
         map.fitBounds(pointBounds, { padding: [8, 8], maxZoom: 12, animate: false });
