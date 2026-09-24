@@ -1317,32 +1317,46 @@ function AdminPageInner() {
       }
 
       if (isSqlImport) {
-        // Send the parsed rows directly to SQL Connect.
+        // Vercel rejects request bodies larger than ~4.5 MB, so large CSVs are
+        // uploaded in chunks. Each chunk upserts; the final chunk publishes the
+        // new dataset version in cms_meta/sql_sync.
+        const CHUNK_SIZE = 1000;
+        const totalChunks = Math.max(1, Math.ceil(rowsToSave.length / CHUNK_SIZE));
         const token = await auth.currentUser?.getIdToken();
-        const importRes = await fetch('/api/sql/import', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({
-            rows: rowsToSave,
-            type: staged.record.category,
-            fileName: staged.record.name,
-            mode: mode === 'replace' ? 'replace' : 'upsert',
-          }),
-        });
-        if (!importRes.ok) {
-          const errBody = await importRes.json().catch(() => ({}));
-          throw new Error(errBody.error || `SQL import failed (${importRes.status})`);
+        let importedCount = 0;
+
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+          const chunkRows = rowsToSave.slice(chunkIndex * CHUNK_SIZE, (chunkIndex + 1) * CHUNK_SIZE);
+          const importRes = await fetch('/api/sql/import', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+              rows: chunkRows,
+              type: staged.record.category,
+              fileName: staged.record.name,
+              mode: mode === 'replace' ? 'replace' : 'upsert',
+              chunkIndex,
+              totalChunks,
+            }),
+          });
+          if (!importRes.ok) {
+            const errBody = await importRes.json().catch(() => ({}));
+            throw new Error(errBody.error || `SQL import failed (${importRes.status})`);
+          }
+          const chunkResult = await importRes.json().catch(() => ({}));
+          importedCount += Number(chunkResult.imported) || chunkRows.length;
         }
+
         await cmsStore.saveSqlImportMetadata(recordToSave);
         setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
         await loadData();
         await reloadEngine();
         setToast({
           type: 'success',
-          message: `${staged.record.name} imported into SQL (${rowsToSave.length.toLocaleString()} rows). The map will refresh automatically.`,
+          message: `${staged.record.name} imported into SQL (${importedCount.toLocaleString()} rows). The map will refresh automatically.`,
         });
       } else {
         // GeoJSON: keep the Storage + Firestore flow.

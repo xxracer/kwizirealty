@@ -23,6 +23,8 @@ interface ImportBody {
   type: SqlImportType;
   fileName?: string;
   mode?: 'upsert' | 'replace';
+  chunkIndex?: number;
+  totalChunks?: number;
 }
 
 export async function POST(req: Request) {
@@ -51,7 +53,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Bad request' }, { status: 400 });
   }
 
-  const { rows, type, mode = 'upsert' } = body;
+  const { rows, type, mode = 'upsert', chunkIndex = 0, totalChunks = 1 } = body;
   if (!type) {
     return NextResponse.json({ error: 'Bad request: type required' }, { status: 400 });
   }
@@ -60,6 +62,9 @@ export async function POST(req: Request) {
   }
   if (mode !== 'upsert' && mode !== 'replace') {
     return NextResponse.json({ error: 'Bad request: mode must be upsert or replace' }, { status: 400 });
+  }
+  if (chunkIndex < 0 || chunkIndex >= totalChunks || totalChunks < 1) {
+    return NextResponse.json({ error: 'Bad request: invalid chunk metadata' }, { status: 400 });
   }
 
   let sqlRows: Record<string, unknown>[];
@@ -78,9 +83,9 @@ export async function POST(req: Request) {
   const db = getFirestore();
   const stateRef = db.collection(STATE_DOC.collection).doc(STATE_DOC.id);
 
-  // Replace mode: clear the table first. Use with care — intended for a
-  // complete dataset re-upload, not a single file.
-  if (mode === 'replace') {
+  // Replace mode: clear the table first. Only do this on the first chunk so a
+  // chunked re-upload does not wipe rows between chunks.
+  if (mode === 'replace' && chunkIndex === 0) {
     await dc.executeMutation('clearProperties', {});
   }
 
@@ -88,30 +93,43 @@ export async function POST(req: Request) {
     await dc.upsertMany('Property', sqlRows.slice(i, i + UPSERT_BATCH));
   }
 
-  // Count live rows and publish the new dataset version.
-  // (distinctValues already exists in the deployed connector and returns the
-  // total row count as total_rows, so no new Data Connect deploy is required.)
-  const countRes = await dc.executeQuery('distinctValues', {});
-  const totalRows = Number((countRes.data as any)?.values?.total_rows ?? 0);
-  const version = Date.now();
-  await stateRef.set(
-    {
-      version,
-      syncedChunks: [],
-      done: true,
+  const isFinalChunk = chunkIndex === totalChunks - 1;
+  if (isFinalChunk) {
+    // Count live rows and publish the new dataset version.
+    // (distinctValues already exists in the deployed connector and returns the
+    // total row count as total_rows, so no new Data Connect deploy is required.)
+    const countRes = await dc.executeQuery('distinctValues', {});
+    const totalRows = Number((countRes.data as any)?.values?.total_rows ?? 0);
+    const version = Date.now();
+    await stateRef.set(
+      {
+        version,
+        syncedChunks: [],
+        done: true,
+        totalRows,
+        updatedAt: FieldValue.serverTimestamp(),
+        importedAt: FieldValue.serverTimestamp(),
+        importedFile: body.fileName || '',
+      },
+      { merge: true }
+    );
+
+    return NextResponse.json({
+      ok: true,
+      imported: sqlRows.length,
       totalRows,
-      updatedAt: FieldValue.serverTimestamp(),
-      importedAt: FieldValue.serverTimestamp(),
-      importedFile: body.fileName || '',
-    },
-    { merge: true }
-  );
+      version,
+      mode,
+      chunkIndex,
+      totalChunks,
+    });
+  }
 
   return NextResponse.json({
     ok: true,
     imported: sqlRows.length,
-    totalRows,
-    version,
-    mode,
+    chunkIndex,
+    totalChunks,
+    pending: true,
   });
 }

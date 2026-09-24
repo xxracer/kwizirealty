@@ -32,12 +32,22 @@ function getAdminApp(): App {
   let credential;
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (raw) {
-    const sa = raw.trim().startsWith('{') ? JSON.parse(raw) : JSON.parse(fs.readFileSync(raw, 'utf8'));
-    credential = cert(sa);
+    try {
+      const sa = raw.trim().startsWith('{') ? JSON.parse(raw) : JSON.parse(fs.readFileSync(raw, 'utf8'));
+      credential = cert(sa);
+    } catch (err) {
+      console.error('[firebaseAdmin] Failed to parse FIREBASE_SERVICE_ACCOUNT:', err);
+      throw err;
+    }
   }
   // Without a service account, firebase-admin falls back to Application
   // Default Credentials (GOOGLE_APPLICATION_CREDENTIALS / metadata server).
-  adminApp = initializeApp({ credential });
+  try {
+    adminApp = initializeApp({ credential });
+  } catch (err) {
+    console.error('[firebaseAdmin] initializeApp failed:', err);
+    throw err;
+  }
   return adminApp;
 }
 
