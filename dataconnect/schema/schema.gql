@@ -66,7 +66,8 @@ type Property
   # Dataset year for this row. It lets the same property keep one record per
   # historical year (e.g. tax 2021 vs tax 2022) instead of overwriting the
   # previous upload. Sales/rent rows use closeYear; tax rows use taxYear.
-  datasetYear: Int @default(expr: "0")
+  # Non-null because it is part of the primary key.
+  datasetYear: Int!
 
   # Staging marker for the admin upload flow. Rows imported from the browser
   # are written with a session id; they are invisible to the map until the

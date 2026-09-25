@@ -178,6 +178,24 @@ export async function POST(req: Request) {
     ? { version: stateData.version ?? 0, syncedChunks: stateData.syncedChunks ?? [] }
     : { version: 0, syncedChunks: [] };
 
+  // Direct SQL import mode (SQL_FIRST / admin uploads): the admin panel is the
+  // source of truth. The legacy Storage manifest must NEVER wipe rows that were
+  // uploaded directly to SQL, because the manifest is empty when CSVs live in
+  // SQL only. Skip the destructive clear/ingest cycle in that mode.
+  if (stateData?.directImport === true) {
+    return NextResponse.json({ ok: true, done: true, version, skipped: true });
+  }
+
+  // Empty manifest = no published Storage dataset. Do not wipe SQL rows; the
+  // admin may have populated SQL directly and we must preserve them.
+  if (allChunks.length === 0 || (manifest.totalRows ?? 0) === 0) {
+    await stateRef.set(
+      { version, syncedChunks: [], done: true, totalRows: manifest.totalRows ?? 0, updatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+    return NextResponse.json({ ok: true, done: true, version, empty: true });
+  }
+
   // 2. New published version → start over. The DELETE clears rows that no
   //    longer exist in the CMS (deletes must propagate to SQL too).
   let syncedChunks = current.syncedChunks;

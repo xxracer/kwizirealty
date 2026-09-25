@@ -239,6 +239,10 @@ mutation deletePendingSession($sessionId: String!) @auth(level: PUBLIC) {
   _execute(sql: "DELETE FROM properties WHERE upload_session_id = $1", params: [$sessionId])
 }
 
+mutation deletePropertyByMls($mlsNumber: String!, $datasetYear: Int!) @auth(level: PUBLIC) {
+  _execute(sql: "DELETE FROM properties WHERE mls_number = $1 AND dataset_year = $2", params: [$mlsNumber, $datasetYear])
+}
+
 # Browser-side bulk upsert for staging property CSV rows. Rows arrive as a JSON
 # array string; each row is keyed by mlsNumber and conflicts are resolved with
 # a full UPDATE so re-importing the same file refreshes every column. This
@@ -285,7 +289,7 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
         r->>'propertyType' AS property_type,
         (r->>'pool')::boolean AS pool,
         r->>'listingType' AS listing_type,
-        NULLIF(r->>'datasetYear', '')::int AS dataset_year,
+        COALESCE(NULLIF(r->>'datasetYear', '')::int, 0) AS dataset_year,
         r->>'uploadSessionId' AS upload_session_id,
         NULLIF(r->>'updatedAt', '')::timestamptz AS updated_at
       FROM jsonb_array_elements($1::jsonb) AS r

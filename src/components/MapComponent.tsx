@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import * as turf from '@turf/turf';
@@ -321,6 +321,38 @@ export default function MapComponent({
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const updateOverlayRef = useRef<(() => void) | null>(null);
 
+  // Central bounds helper: re-frame the map on Houston/data whenever the map
+  // is created, the container resizes, or new data arrives. It refuses to lock
+  // in a "world view" (zoom <= 3) so the retry interval/resize observer keeps
+  // trying until the container has real pixel dimensions.
+  const recenterMap = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (boundsSetRef.current && map.getZoom() > 3) return;
+
+    const HOUSTON_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
+    map.invalidateSize();
+    const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
+
+    if (!bounds) {
+      map.fitBounds(HOUSTON_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
+      if (map.getZoom() <= 3) {
+        map.setView(HOUSTON_BOUNDS.getCenter(), 10, { animate: false });
+      }
+      if (map.getZoom() > 3) boundsSetRef.current = true;
+      return;
+    }
+
+    const zoom = Math.min(12, map.getBoundsZoom(bounds, false, L.point(8, 8)));
+    if (zoom <= 3) {
+      // Container still too small; try again on the next resize/data update.
+      return;
+    }
+    map.setView(bounds.getCenter(), zoom, { animate: false });
+    map.setMaxBounds(bounds.pad(0.05));
+    boundsSetRef.current = true;
+  }, []);
+
   const [tool, setTool] = useState<ToolMode>('select');
   const [geoJsonData, setGeoJsonData] = useState<GeoJSON.FeatureCollection | null>(null);
   const geoJsonDataRef = useRef(geoJsonData);
@@ -605,32 +637,14 @@ export default function MapComponent({
     // only one reacting to shift/mouse-drag and to avoid event conflicts.
     map.boxZoom.disable();
 
-    const HOUSTON_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
-    const applyBoundsOnce = () => {
-      if (boundsSetRef.current) return;
-      const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
-      if (!bounds) {
-        // Last-resort: frame Houston so the map never shows the whole-world view.
-        map.invalidateSize();
-        map.fitBounds(HOUSTON_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
-        boundsSetRef.current = true;
-        return;
-      }
-      map.invalidateSize();
-      // Tight fit with almost no padding so polygons/circles fill the container.
-      const zoom = Math.min(12, map.getBoundsZoom(bounds, false, L.point(8, 8)));
-      map.setView(bounds.getCenter(), zoom, { animate: false });
-      map.setMaxBounds(bounds.pad(0.05));
-      boundsSetRef.current = true;
-    };
-    applyBoundsOnce();
+    recenterMap();
     const boundsInterval = setInterval(() => {
-      if (boundsSetRef.current) {
+      if (boundsSetRef.current && map.getZoom() > 3) {
         clearInterval(boundsInterval);
         return;
       }
-      applyBoundsOnce();
-    }, 100);
+      recenterMap();
+    }, 200);
     const clearBoundsInterval = () => clearInterval(boundsInterval);
 
     const overlay = document.createElement('div');
@@ -864,6 +878,9 @@ export default function MapComponent({
         // for the frame the cleanup runs in).
         if (!mapRef.current) return;
         map.invalidateSize();
+        // Re-frame whenever the container gains real height so we don't stay
+        // stuck on a world-level gray view.
+        recenterMap();
       });
       resizeObserver.observe(containerRef.current);
     }
@@ -914,6 +931,13 @@ export default function MapComponent({
       try { map.dragging.disable(); } catch {}
     }
   }, [tool]);
+
+  // Re-frame the map whenever data/boundaries arrive or change. Once the map
+  // has been successfully centered on Houston/data, this becomes a no-op
+  // unless it falls back to a world-level zoom.
+  useEffect(() => {
+    recenterMap();
+  }, [rawData, geoJsonData, pointsBounds, recenterMap]);
 
   // Load boundary GeoJSON for the active boundary. We prefer same-domain files in
   // /geojson so Vercel serves them instantly, and fall back to Firebase CMS only
@@ -1793,7 +1817,11 @@ export default function MapComponent({
   const showBoundaryOverlay = boundaryLoading || boundarySwitching;
 
   return (
-    <div ref={containerRef} className="h-full w-full relative" aria-label="Interactive real estate market map">
+    <div
+      ref={containerRef}
+      className="h-full w-full relative min-h-[280px] sm:min-h-[380px]"
+      aria-label="Interactive real estate market map"
+    >
       <AnimatePresence>
         {showBoundaryOverlay && (
           <motion.div

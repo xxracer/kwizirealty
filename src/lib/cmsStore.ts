@@ -312,20 +312,40 @@ export const cmsStore = {
   },
 
   /**
-   * SQL-first upload: persist only the metadata doc in Firestore. The CSV bytes
-   * are NOT sent to Storage — they were already upserted into SQL Connect
-   * directly from the browser. GeoJSON files still use saveFile() with Storage.
+   * SQL-first upload: persist the metadata doc in Firestore AND keep a backup
+   * of the CSV bytes in Firebase Storage under cms_files/sql_imports/. If SQL
+   * staging ever fails or rows are cleared, the CSV can be re-imported from this
+   * backup. The backup is NOT part of the legacy dataset rebuild path.
    */
   async saveSqlImportMetadata(record: CMSFileRecord): Promise<void> {
     const { rows, rawContent, ...recordWithoutRows } = record;
+    const csvText = rawContent || rowsToCsv(record.headers, rows);
+
+    // Upload a compressed backup to Storage so the data is never lost if SQL
+    // is wiped. The path is separate from the legacy dataset CSV folder.
+    const backupPath = `cms_files/sql_imports/${record.id}.csv.gz`;
+    const backupRef = ref(storage, backupPath);
+    let blob: Blob;
+    if (typeof CompressionStream !== 'undefined') {
+      const gzipped = new Blob([csvText]).stream().pipeThrough(new CompressionStream('gzip'));
+      blob = new Blob([await new Response(gzipped).arrayBuffer()], { type: 'application/gzip' });
+    } else {
+      blob = new Blob([csvText], { type: 'text/csv' });
+    }
+    await uploadBytes(backupRef, blob);
+    const downloadUrl = await getDownloadURL(backupRef);
+
     const year = detectDatasetYear(record.name, rows);
-    const metadata = {
+    const metadata: Record<string, any> = {
       ...recordWithoutRows,
-      // No storageUrl/storagePath: the data lives in SQL, not Storage.
       rowCount: record.rows.length,
       sqlImport: true,
       year,
+      storageUrl: downloadUrl,
+      storagePath: backupPath,
     };
+    // Inline only if under ~900 KB; never store undefined (Firestore rejects it).
+    if (csvText.length < 900_000) metadata.rawContent = csvText;
     await setDoc(doc(db, FILES_STORE, record.id), metadata);
     emit();
   },

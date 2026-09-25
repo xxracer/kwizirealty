@@ -16,7 +16,6 @@ import { engine, type BoundaryKey, type MetricKey, type PropertyData } from '@/l
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import { auth } from '@/lib/firebase';
 import {
-  clearPendingProperties,
   commitPendingProperties,
   commitPendingSession,
   countCommittedProperties,
@@ -250,6 +249,17 @@ interface StagedFile {
   duplicateWarning?: { count: number; sampleMlsNumbers: string[]; status: 'pending' | 'confirmed' };
 }
 
+/** Confirmation modal shown before committing all staged files. */
+interface ConfirmAllState {
+  open: boolean;
+  totalFiles: number;
+  totalRows: number;
+  sqlFiles: number;
+  sqlRows: number;
+  geoJsonFiles: number;
+  years: (number | null)[];
+}
+
 /** Preview modal state — extends CMSFileRecord with GeoJSON awareness. */
 interface PreviewState extends CMSFileRecord {
   isGeoJson?: boolean;
@@ -481,29 +491,47 @@ async function collectFilesFromDataTransfer(items: DataTransferItemList | null):
     if (entry) entries.push(entry);
   }
   await Promise.all(entries.map((entry) => readEntryRecursive(entry, files)));
+  console.log(`[Folder upload] discovered ${files.length} file(s) from ${entries.length} dropped item(s)`);
   return files;
 }
 
-function readEntryRecursive(entry: FileSystemEntry, files: File[]): Promise<void> {
-  return new Promise((resolve) => {
-    if (entry.isFile) {
-      (entry as FileSystemFileEntry).file((f) => {
-        files.push(f);
-        resolve();
-      }, () => resolve());
-    } else if (entry.isDirectory) {
-      const dirReader = (entry as FileSystemDirectoryEntry).createReader();
-      const readBatch = () => {
-        dirReader.readEntries(async (entries) => {
+/** Read every entry in a directory, continuing until readEntries returns empty.
+ *  Chrome's DataTransfer directory reader batches entries (~100 at a time),
+ *  so a single call is not enough for large folders. */
+function readDirectoryEntry(dirReader: FileSystemDirectoryReader, files: File[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const collect = () => {
+      dirReader.readEntries(
+        async (entries) => {
           if (entries.length === 0) {
             resolve();
             return;
           }
-          await Promise.all(entries.map((e) => readEntryRecursive(e, files)));
-          readBatch();
-        }, () => resolve());
-      };
-      readBatch();
+          // Wait for this batch (including any subdirectories) before asking for the next batch.
+          await Promise.all(entries.map((entry) => readEntryRecursive(entry, files)));
+          // Use setTimeout(0, ...) to avoid stack overflow on very deep directory trees.
+          setTimeout(collect, 0);
+        },
+        (err) => reject(err)
+      );
+    };
+    collect();
+  });
+}
+
+function readEntryRecursive(entry: FileSystemEntry, files: File[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (entry.isFile) {
+      (entry as FileSystemFileEntry).file(
+        (f) => {
+          files.push(f);
+          resolve();
+        },
+        (err) => reject(err)
+      );
+    } else if (entry.isDirectory) {
+      const dirReader = (entry as FileSystemDirectoryEntry).createReader();
+      readDirectoryEntry(dirReader, files).then(resolve, reject);
     } else {
       resolve();
     }
@@ -705,6 +733,22 @@ function AdminPageInner() {
     phase: string;
     startedAt: number;
   } | null>(null);
+  const [uploadSummary, setUploadSummary] = useState<{
+    found: number;
+    staged: number;
+    skipped: number;
+    reasons: Record<string, number>;
+  } | null>(null);
+
+  const [confirmAll, setConfirmAll] = useState<ConfirmAllState>({
+    open: false,
+    totalFiles: 0,
+    totalRows: 0,
+    sqlFiles: 0,
+    sqlRows: 0,
+    geoJsonFiles: 0,
+    years: [],
+  });
   const [dragActive, setDragActive] = useState(false);
   const [previewFile, setPreviewFile] = useState<PreviewState | null>(null);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -736,45 +780,81 @@ function AdminPageInner() {
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncSectionTitle, setSyncSectionTitle] = useState('');
-  const [sqlStatus, setSqlStatus] = useState<{ total: number; committed: number; pending: number; lastUpdated: string | null; loading: boolean }>({
+  const [sqlStatus, setSqlStatus] = useState<{
+    total: number;
+    committed: number;
+    pending: number;
+    lastUpdated: string | null;
+    loading: boolean;
+    error: string | null;
+  }>({
     total: 0,
     committed: 0,
     pending: 0,
     lastUpdated: null,
     loading: true,
+    error: null,
   });
 
   const loadSqlStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/sql/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      if (!res.ok) throw new Error('Status request failed');
+      const res = await fetch('/api/sql/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', cache: 'no-store' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || body.error || `Status request failed (${res.status})`);
+      }
       const data = await res.json();
+      console.log('[admin] loadSqlStatus received', data);
       setSqlStatus({
         total: Number(data.total ?? 0),
         committed: Number(data.committed ?? 0),
         pending: Number(data.pending ?? 0),
         lastUpdated: data.lastUpdated ?? null,
         loading: false,
+        error: null,
       });
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       console.error('[admin] loadSqlStatus failed', err);
-      setSqlStatus((s) => ({ ...s, loading: false }));
+      setSqlStatus((s) => ({ ...s, loading: false, error: message }));
     }
   }, []);
 
+  const handleHardReload = async () => {
+    try {
+      localStorage.clear();
+      sessionStorage.clear();
+      const dbs = await (window as any).indexedDB?.databases?.();
+      if (Array.isArray(dbs)) {
+        for (const db of dbs) {
+          if (db.name) (window as any).indexedDB.deleteDatabase(db.name);
+        }
+      }
+    } catch {
+      // ignore cleanup errors
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set('_cb', Date.now().toString());
+    window.location.href = url.toString();
+  };
+
   const handleForceCommit = async () => {
-    setSqlStatus((s) => ({ ...s, loading: true }));
+    setSqlStatus((s) => ({ ...s, loading: true, error: null }));
     try {
       const res = await fetch('/api/sql/force-commit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      if (!res.ok) throw new Error('Force commit failed');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || body.error || `Force commit failed (${res.status})`);
+      }
       const data = await res.json();
       setToast({ type: 'success', message: data.message || 'Pending rows are now visible on the map.' });
       await loadSqlStatus();
       await reloadEngine();
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       console.error('[admin] force commit failed', err);
-      setToast({ type: 'error', message: 'Could not force commit pending rows.' });
-      setSqlStatus((s) => ({ ...s, loading: false }));
+      setToast({ type: 'error', message: `Could not force commit: ${message}` });
+      setSqlStatus((s) => ({ ...s, loading: false, error: message }));
     }
   };
 
@@ -803,7 +883,13 @@ function AdminPageInner() {
     loadData();
     loadSqlStatus();
     const unsubscribe = cmsStore.subscribe(() => loadData());
-    return () => unsubscribe();
+    // Refresh SQL counts every 10s so the dashboard never shows stale zeros
+    // while rows are being committed in another tab.
+    const interval = setInterval(() => loadSqlStatus(), 10000);
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
   }, [loadData, loadSqlStatus]);
 
   // Self-healing: when the admin opens, verify the published dataset actually
@@ -922,6 +1008,7 @@ function AdminPageInner() {
     }
 
     const newStaged: StagedFile[] = [];
+    const sqlStagingPromises: Promise<void>[] = [];
     const batchKeySet = new Set<string>();
 
     const inputFiles = Array.from(fileList);
@@ -930,10 +1017,20 @@ function AdminPageInner() {
         ? ['.geojson', '.json']
         : ['.csv'];
 
+    console.log(`[handleFiles] section=${section}, received ${inputFiles.length} file(s)`, inputFiles.map((f) => ({ name: f.name, path: (f as any).webkitRelativePath || f.name, size: f.size })));
+
+    let skippedCount = 0;
+    let skippedReasons: Record<string, number> = {};
+
     for (let i = 0; i < inputFiles.length; i++) {
       const file = inputFiles[i];
       const ext = '.' + file.name.split('.').pop()?.toLowerCase();
-      if (!acceptedExt.includes(ext)) continue;
+      if (!acceptedExt.includes(ext)) {
+        skippedCount++;
+        skippedReasons['wrong-extension'] = (skippedReasons['wrong-extension'] || 0) + 1;
+        console.log(`[handleFiles] skipping ${file.name}: extension ${ext} not in`, acceptedExt);
+        continue;
+      }
 
       const relativePath = (file as any).webkitRelativePath || file.name;
       if (section === 'boundaries' || section === 'areas') {
@@ -1112,7 +1209,10 @@ function AdminPageInner() {
 
         const validation = validateHeaders(parsed.meta.fields || [], config.requiredColumns);
         if (!validation.valid) {
+          skippedCount++;
+          skippedReasons['missing-columns'] = (skippedReasons['missing-columns'] || 0) + 1;
           setToast({ type: 'error', message: `${file.name} is missing columns: ${validation.missing.join(', ')}` });
+          console.log(`[handleFiles] skipping ${file.name}: missing columns`, validation.missing);
           continue;
         }
 
@@ -1122,10 +1222,13 @@ function AdminPageInner() {
         // This prevents a "Sale 2024.csv" from being stored as Rent data just
         // because the user had the Rent tab open.
         if (category !== 'property' && !categories.includes(category)) {
+          skippedCount++;
+          skippedReasons['wrong-section'] = (skippedReasons['wrong-section'] || 0) + 1;
           setToast({
             type: 'error',
             message: `${relativePath} looks like ${categorySectionName(category)} data — upload it in the ${categorySectionName(category)} section instead.`,
           });
+          console.log(`[handleFiles] skipping ${relativePath}: detected category=${category}, not in current section`);
           continue;
         }
 
@@ -1206,15 +1309,25 @@ function AdminPageInner() {
 
           if (existingCount > 0) {
             staged.duplicateWarning = { count: existingCount, sampleMlsNumbers, status: 'pending' };
-            staged.importProgress = { loaded: 0, total: newRows.length, status: 'error', error: 'This data is already on the database' };
+            staged.importProgress = { loaded: 0, total: newRows.length, status: 'error', error: 'This data is already in the database' };
           } else {
             staged.importProgress = { loaded: 0, total: newRows.length, status: 'running' };
-            runSqlStaging(id, newRows, actualCategory as any, sessionId, record.year);
+            sqlStagingPromises.push(
+              runSqlStaging(id, newRows, actualCategory as any, sessionId, record.year).then(() => {
+                setUploadProgress((prev) =>
+                  prev && prev.phase === 'Staging CSV rows in SQL…'
+                    ? { ...prev, current: Math.min(prev.current + 1, prev.total) }
+                    : prev
+                );
+              })
+            );
           }
         }
 
         newStaged.push(staged);
       } catch (err) {
+        skippedCount++;
+        skippedReasons['parse-error'] = (skippedReasons['parse-error'] || 0) + 1;
         console.error('File read error', err);
         setToast({ type: 'error', message: `Error processing ${file.name}` });
       }
@@ -1224,6 +1337,9 @@ function AdminPageInner() {
       if ((i + 1) % 5 === 0) await new Promise((r) => setTimeout(r, 0));
     }
 
+    console.log(`[handleFiles] done. ${inputFiles.length} received, ${newStaged.length} staged, ${skippedCount} skipped. Reasons:`, skippedReasons);
+    setUploadSummary({ found: inputFiles.length, staged: newStaged.length, skipped: skippedCount, reasons: skippedReasons });
+
     if (newStaged.length > 0) {
       setStagedFiles((prev) => [...prev, ...newStaged]);
       const totalNew = newStaged.reduce((sum, s) => sum + s.stats.new, 0);
@@ -1232,6 +1348,21 @@ function AdminPageInner() {
         type: 'success',
         message: `${newStaged.length} file(s) staged: ${totalNew.toLocaleString()} new rows, ${totalDup.toLocaleString()} duplicates skipped.`,
       });
+    }
+
+    // Wait for every direct SQL staging job to finish before closing the
+    // loading popup. Non-SQL files (GeoJSON, school CSVs) just sit in staged
+    // files and need the user to click Add All, so they don't block the popup.
+    if (sqlStagingPromises.length > 0) {
+      setUploadProgress({
+        current: 0,
+        total: sqlStagingPromises.length,
+        fileName: '',
+        phase: 'Staging CSV rows in SQL…',
+        startedAt: Date.now(),
+      });
+      await Promise.all(sqlStagingPromises);
+      setUploadProgress(null);
     }
 
     setProcessing(false);
@@ -1534,8 +1665,35 @@ function AdminPageInner() {
     setStagedFiles((prev) => prev.filter((s) => s.id !== stagedId));
   };
 
+  const openConfirmAllModal = () => {
+    if (stagedFiles.length === 0) return;
+    const sqlStaged = stagedFiles.filter((s) => s.sessionId);
+    const geoStaged = stagedFiles.filter((s) => !s.sessionId);
+    const sqlRows = sqlStaged.reduce((sum, s) => sum + s.stats.new, 0);
+    const geoRows = geoStaged.reduce((sum, s) => sum + s.stats.new, 0);
+    const years = Array.from(
+      new Set(
+        stagedFiles.map((s) => s.record.year ?? detectDatasetYear(s.record.name, s.record.rows)).filter(Boolean)
+      )
+    ) as number[];
+    setConfirmAll({
+      open: true,
+      totalFiles: stagedFiles.length,
+      totalRows: sqlRows + geoRows,
+      sqlFiles: sqlStaged.length,
+      sqlRows,
+      geoJsonFiles: geoStaged.length,
+      years,
+    });
+  };
+
+  const closeConfirmAllModal = () => {
+    setConfirmAll((s) => ({ ...s, open: false }));
+  };
+
   const handleConfirmAllUploads = async () => {
     if (stagedFiles.length === 0) return;
+    closeConfirmAllModal();
     setProcessing(true);
 
     // Sort staged files by detected year so the admin tree shows them grouped
@@ -1580,6 +1738,10 @@ function AdminPageInner() {
       setStagedFiles((prev) => prev.filter((s) => !readySqlStaged.some((r) => r.id === s.id)));
       await loadData();
       await reloadEngine();
+      setToast({
+        type: 'success',
+        message: `Confirmed ${readySqlStaged.length.toLocaleString()} SQL file(s). Database now has ${totalRows.toLocaleString()} committed properties.`,
+      });
     }
 
     // Process GeoJSON / non-SQL files one by one (Storage + dataset rebuild).
@@ -2138,27 +2300,52 @@ function AdminPageInner() {
         ))}
       </div>
 
-      {!sqlStatus.loading && sqlStatus.pending > 0 && (
-        <div className="bg-orange-500/10 border border-orange-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
-            <div>
-              <div className="text-sm font-semibold text-white">{sqlStatus.pending.toLocaleString()} propiedad(es) están pendientes de confirmación</div>
-              <div className="text-xs text-gray-400 mt-1">
-                Estos datos ya están en la base de datos pero el mapa no puede mostrarlos hasta que se confirmen.
-                Haz clic en “Confirmar todo” o en “Add All” para hacerlos visibles.
-              </div>
+      <div className="bg-orange-500/10 border border-orange-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
+          <div>
+            <div className="text-sm font-semibold text-white">
+              {sqlStatus.loading
+                ? 'Checking SQL status…'
+                : sqlStatus.pending > 0
+                ? `${sqlStatus.pending.toLocaleString()} pending propert${sqlStatus.pending === 1 ? 'y' : 'ies'} waiting for confirmation`
+                : sqlStatus.error
+                ? 'Could not check SQL status'
+                : 'Emergency tool: confirm pending rows'}
+            </div>
+            <div className="text-xs text-gray-400 mt-1">
+              {sqlStatus.pending > 0
+                ? 'These rows are already in the database but the map cannot show them until they are confirmed. Click “Confirm all now”. If you just uploaded files and have not confirmed them yet, this is expected.'
+                : 'If the map still shows 0 properties after uploading files, click here to force-confirm any rows waiting in SQL.'}
             </div>
           </div>
-          <button
-            onClick={handleForceCommit}
-            disabled={sqlStatus.loading}
-            className="shrink-0 px-4 py-2 bg-orange-600 hover:bg-orange-500 disabled:bg-gray-600 text-white text-sm font-medium rounded-xl transition-colors"
-          >
-            {sqlStatus.loading ? 'Procesando…' : 'Confirmar todo ahora'}
-          </button>
         </div>
-      )}
+        <button
+          onClick={handleForceCommit}
+          disabled={sqlStatus.loading}
+          className="shrink-0 px-4 py-2 bg-orange-600 hover:bg-orange-500 disabled:bg-gray-600 text-white text-sm font-medium rounded-xl transition-colors"
+        >
+          {sqlStatus.loading ? 'Processing…' : 'Confirm all now'}
+        </button>
+      </div>
+
+      <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <RefreshCw className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
+          <div>
+            <div className="text-sm font-semibold text-white">Browser cache looks stale?</div>
+            <div className="text-xs text-gray-400 mt-1">
+              If numbers look wrong after uploading, clear local storage, IndexedDB and reload with a fresh cache key.
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={handleHardReload}
+          className="shrink-0 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-xl transition-colors"
+        >
+          Clear cache &amp; reload
+        </button>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {SECTIONS.filter((s) => s.id !== 'dashboard').map((s) => {
@@ -2910,6 +3097,24 @@ function AdminPageInner() {
               </div>
 
               <div className="lg:col-span-2">
+                {uploadSummary && uploadSummary.skipped > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 mb-4">
+                    <div className="text-sm font-semibold text-white mb-1">
+                      {uploadSummary.found} file(s) found · {uploadSummary.staged} staged · {uploadSummary.skipped} skipped
+                    </div>
+                    <div className="text-xs text-gray-400">
+                      {Object.entries(uploadSummary.reasons).map(([reason, count]) => {
+                        const labels: Record<string, string> = {
+                          'wrong-extension': 'wrong file type',
+                          'missing-columns': 'missing required columns',
+                          'wrong-section': 'belongs to a different section',
+                          'parse-error': 'parse/read error',
+                        };
+                        return <span key={reason} className="mr-3">{count} {labels[reason] || reason}</span>;
+                      })}
+                    </div>
+                  </div>
+                )}
                 {stagedFiles.length > 0 && (
                   <div className="bg-surface border border-blue-500/50 rounded-2xl p-5 mb-6 shadow-[0_0_15px_rgba(59,130,246,0.1)]">
                     <div className="flex items-center justify-between mb-4">
@@ -2922,11 +3127,11 @@ function AdminPageInner() {
                         ).length;
                         return (
                           <button
-                            onClick={() => handleConfirmAllUploads()}
+                            onClick={() => openConfirmAllModal()}
                             disabled={processing || readyCount === 0}
                             className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50"
                           >
-                            <Plus className="w-3.5 h-3.5" /> Add all ({readyCount})
+                            <Plus className="w-3.5 h-3.5" /> Confirm all ({readyCount})
                           </button>
                         );
                       })()}
@@ -2979,11 +3184,11 @@ function AdminPageInner() {
 
                           <div className="grid grid-cols-3 gap-2">
                             <div className="bg-white/5 rounded-lg p-2 text-center">
-                              <div className="text-[10px] sm:text-xs text-gray-400 mb-1">Total Areas</div>
+                              <div className="text-[10px] sm:text-xs text-gray-400 mb-1">Total Rows</div>
                               <div className="text-xs sm:text-sm font-bold text-white">{staged.stats.total.toLocaleString()}</div>
                             </div>
                             <div className="bg-blue-500/10 rounded-lg p-2 text-center border border-blue-500/20">
-                              <div className="text-[10px] sm:text-xs text-blue-400 mb-1">New Areas</div>
+                              <div className="text-[10px] sm:text-xs text-blue-400 mb-1">New Rows</div>
                               <div className="text-xs sm:text-sm font-bold text-blue-400">{staged.stats.new.toLocaleString()}</div>
                             </div>
                             <div className="bg-amber-500/10 rounded-lg p-2 text-center border border-amber-500/20">
@@ -2998,7 +3203,7 @@ function AdminPageInner() {
                                 <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
                                   <div className="flex items-start gap-2 text-amber-400 text-xs font-semibold mb-1">
                                     <AlertTriangle className="w-4 h-4 shrink-0" />
-                                    This data is already on the database
+                                    This data is already in the database
                                   </div>
                                   <div className="text-xs text-gray-300 mb-2">
                                     {staged.duplicateWarning.count.toLocaleString()} existing MLS row(s) were found. Continuing will overwrite them with the new file.
@@ -3029,7 +3234,7 @@ function AdminPageInner() {
                                 </div>
                               ) : staged.importProgress.status === 'running' ? (
                                 <div className="text-xs text-gray-400">
-                                  Staging in SQL… {staged.importProgress.loaded.toLocaleString()} / {staged.importProgress.total.toLocaleString()} rows
+                                  Staging in SQL: {staged.importProgress.loaded.toLocaleString()} / {staged.importProgress.total.toLocaleString()} rows
                                 </div>
                               ) : (
                                 <div className="text-xs text-emerald-400">
@@ -3233,12 +3438,18 @@ function AdminPageInner() {
               </div>
 
               <div className="w-full">
-                <p className="text-base font-bold text-white">{uploadProgress ? 'Uploading map data…' : 'Reloading map data…'}</p>
+                <p className="text-base font-bold text-white">
+                  {uploadProgress
+                    ? uploadProgress.phase || 'Uploading map data…'
+                    : 'Reloading map data…'}
+                </p>
                 <p className="text-xs text-gray-400 mt-1">
                   {uploadProgress
                     ? uploadProgress.fileName
                       ? `Uploading ${uploadProgress.fileName}`
-                      : uploadProgress.phase
+                      : uploadProgress.phase === 'Staging CSV rows in SQL…'
+                        ? 'Rows are being inserted into SQL. The popup will close when all files are ready.'
+                        : 'Please wait while the dataset refreshes.'
                     : 'Please wait while the dataset refreshes.'}
                 </p>
               </div>
@@ -3338,6 +3549,63 @@ function AdminPageInner() {
             </div>
             <div className="px-5 py-3 border-t border-border-subtle text-xs text-gray-500">
               Showing first 100 of {previewFile.rows.length.toLocaleString()} {previewFile.isGeoJson ? 'features' : 'rows'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmAll.open && (
+        <div className="fixed inset-0 z-[10001] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#121620] border border-white/[0.08] rounded-2xl shadow-2xl p-6 max-w-md w-full flex flex-col gap-4">
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-amber-400" />
+              Confirm all uploads
+            </h3>
+
+            <div className="text-sm text-gray-300 space-y-2">
+              <p>
+                You are about to publish <strong className="text-white">{confirmAll.totalFiles.toLocaleString()}</strong> staged file(s)
+                with <strong className="text-white">{confirmAll.totalRows.toLocaleString()}</strong> new row(s).
+              </p>
+              {confirmAll.sqlFiles > 0 && (
+                <p>
+                  • <strong className="text-white">{confirmAll.sqlFiles.toLocaleString()}</strong> SQL file(s){' '}
+                  ({confirmAll.sqlRows.toLocaleString()} rows) will become visible on the map.
+                </p>
+              )}
+              {confirmAll.geoJsonFiles > 0 && (
+                <p>
+                  • <strong className="text-white">{confirmAll.geoJsonFiles.toLocaleString()}</strong> GeoJSON file(s) will update the map layers.
+                </p>
+              )}
+              {confirmAll.years.length > 0 && (
+                <p>
+                  Dataset years detected:{' '}
+                  <strong className="text-white">{confirmAll.years.filter((y): y is number => y != null).sort((a, b) => a - b).join(', ')}</strong>.
+                  Rows with the same MLS and different year will be kept as history.
+                </p>
+              )}
+              <p className="text-xs text-gray-400">
+                This action commits the data to the live database. Existing rows with the same MLS + year will be updated,
+                but historical records with other years will not be deleted.
+              </p>
+            </div>
+
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={closeConfirmAllModal}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-gray-300 hover:text-white hover:bg-white/5 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleConfirmAllUploads()}
+                disabled={processing}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-600 text-white transition-colors flex items-center gap-2"
+              >
+                {processing ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                Yes, publish all data
+              </button>
             </div>
           </div>
         </div>

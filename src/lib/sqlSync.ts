@@ -77,6 +77,7 @@ export async function publishSqlDatasetVersion(totalRows: number): Promise<void>
   await setDoc(doc(db, 'cms_meta', 'sql_sync'), {
     version: Date.now(),
     done: true,
+    directImport: true,
     totalRows,
     updatedAt: serverTimestamp(),
     importedAt: serverTimestamp(),

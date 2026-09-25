@@ -11,22 +11,40 @@ import { guardPublicRead } from '@/lib/server/requestGuard';
 
 export const runtime = 'nodejs';
 
+async function runStatus() {
+  const dc = getAdminDataConnect();
+  const res = await dc.executeQuery('datasetStatus', {});
+  const row = (res.data as any)?.status;
+  return {
+    total: Number(row?.total ?? 0),
+    committed: Number(row?.committed ?? 0),
+    pending: Number(row?.pending ?? 0),
+    lastUpdated: row?.last_updated ?? null,
+  };
+}
+
 export async function POST(req: Request) {
   const blocked = guardPublicRead(req);
   if (blocked) return blocked;
 
   try {
-    const dc = getAdminDataConnect();
-    const res = await dc.executeQuery('datasetStatus', {});
-    const row = (res.data as any)?.status;
-    return NextResponse.json({
-      total: Number(row?.total ?? 0),
-      committed: Number(row?.committed ?? 0),
-      pending: Number(row?.pending ?? 0),
-      lastUpdated: row?.last_updated ?? null,
-    });
+    return NextResponse.json(await runStatus());
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     console.error('[api/sql/status] failed:', err);
-    return NextResponse.json({ error: 'Status query failed' }, { status: 500 });
+    return NextResponse.json({ error: 'Status query failed', detail: message }, { status: 500 });
+  }
+}
+
+export async function GET(req: Request) {
+  const blocked = guardPublicRead(req);
+  if (blocked) return blocked;
+
+  try {
+    return NextResponse.json(await runStatus());
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[api/sql/status] failed:', err);
+    return NextResponse.json({ error: 'Status query failed', detail: message }, { status: 500 });
   }
 }
