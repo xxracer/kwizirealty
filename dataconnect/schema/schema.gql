@@ -12,7 +12,7 @@
 # Float in Postgres — the first deploy created them as Int (values like $93.75
 # and 2.8% were rejected), fixed by dataconnect:sql:migrate.
 type Property
-  @table(name: "properties", key: ["mlsNumber"])
+  @table(name: "properties", key: ["mlsNumber", "datasetYear"])
   @index(fields: ["subdivisions", "closeDateTs"], order: [ASC, DESC])
   @index(fields: ["zipcodes", "closeDateTs"], order: [ASC, DESC])
   @index(fields: ["highschools", "closeDateTs"], order: [ASC, DESC])
@@ -62,6 +62,11 @@ type Property
   # Distinguishes sales records (default) from rental records when both are
   # stored in the same table. Empty/null is treated as a sale.
   listingType: String
+
+  # Dataset year for this row. It lets the same property keep one record per
+  # historical year (e.g. tax 2021 vs tax 2022) instead of overwriting the
+  # previous upload. Sales/rent rows use closeYear; tax rows use taxYear.
+  datasetYear: Int @default(expr: "0")
 
   # Staging marker for the admin upload flow. Rows imported from the browser
   # are written with a session id; they are invisible to the map until the

@@ -736,6 +736,47 @@ function AdminPageInner() {
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncSectionTitle, setSyncSectionTitle] = useState('');
+  const [sqlStatus, setSqlStatus] = useState<{ total: number; committed: number; pending: number; lastUpdated: string | null; loading: boolean }>({
+    total: 0,
+    committed: 0,
+    pending: 0,
+    lastUpdated: null,
+    loading: true,
+  });
+
+  const loadSqlStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/sql/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!res.ok) throw new Error('Status request failed');
+      const data = await res.json();
+      setSqlStatus({
+        total: Number(data.total ?? 0),
+        committed: Number(data.committed ?? 0),
+        pending: Number(data.pending ?? 0),
+        lastUpdated: data.lastUpdated ?? null,
+        loading: false,
+      });
+    } catch (err) {
+      console.error('[admin] loadSqlStatus failed', err);
+      setSqlStatus((s) => ({ ...s, loading: false }));
+    }
+  }, []);
+
+  const handleForceCommit = async () => {
+    setSqlStatus((s) => ({ ...s, loading: true }));
+    try {
+      const res = await fetch('/api/sql/force-commit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!res.ok) throw new Error('Force commit failed');
+      const data = await res.json();
+      setToast({ type: 'success', message: data.message || 'Pending rows are now visible on the map.' });
+      await loadSqlStatus();
+      await reloadEngine();
+    } catch (err) {
+      console.error('[admin] force commit failed', err);
+      setToast({ type: 'error', message: 'Could not force commit pending rows.' });
+      setSqlStatus((s) => ({ ...s, loading: false }));
+    }
+  };
 
   const reloadEngine = useCallback(async () => {
     await getEngine().loadAllCSV(true);
@@ -760,18 +801,10 @@ function AdminPageInner() {
 
   useEffect(() => {
     loadData();
+    loadSqlStatus();
     const unsubscribe = cmsStore.subscribe(() => loadData());
     return () => unsubscribe();
-  }, [loadData]);
-
-  // On admin mount, remove any SQL rows that were staged in a previous session
-  // but never committed. They are invisible to the map, so if the user reloaded
-  // before clicking Add All they should be gone.
-  useEffect(() => {
-    clearPendingProperties().catch((err) =>
-      console.warn('[admin] clearPendingProperties failed on mount', err)
-    );
-  }, []);
+  }, [loadData, loadSqlStatus]);
 
   // Self-healing: when the admin opens, verify the published dataset actually
   // matches the CSVs currently in the CMS and rebuild automatically if they
@@ -1176,7 +1209,7 @@ function AdminPageInner() {
             staged.importProgress = { loaded: 0, total: newRows.length, status: 'error', error: 'This data is already on the database' };
           } else {
             staged.importProgress = { loaded: 0, total: newRows.length, status: 'running' };
-            runSqlStaging(id, newRows, actualCategory as any, sessionId);
+            runSqlStaging(id, newRows, actualCategory as any, sessionId, record.year);
           }
         }
 
@@ -1223,11 +1256,12 @@ function AdminPageInner() {
     id: string,
     rows: Record<string, string>[],
     category: any,
-    sessionId: string
+    sessionId: string,
+    defaultYear?: number | null
   ) => {
     try {
       const { csvRowsToSqlPropertyRows } = await import('@/lib/sqlImport');
-      const sqlRows = csvRowsToSqlPropertyRows(rows, category, sessionId);
+      const sqlRows = csvRowsToSqlPropertyRows(rows, category, sessionId, defaultYear);
       await stagePropertyRows(sqlRows, (loaded) => {
         setStagedFiles((prev) =>
           prev.map((s) =>
@@ -1266,7 +1300,7 @@ function AdminPageInner() {
           : s
       )
     );
-    await runSqlStaging(stagedId, staged.record.rows, staged.record.category as any, staged.sessionId);
+    await runSqlStaging(stagedId, staged.record.rows, staged.record.category as any, staged.sessionId, staged.record.year);
   };
 
   const handleConfirmUpload = async (stagedId: string, mode: 'new' | 'replace' = 'new') => {
@@ -2084,11 +2118,13 @@ function AdminPageInner() {
 
   const renderDashboard = () => (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
         {[
           { icon: <FileSpreadsheet className="w-5 h-5 text-blue-500" />, label: 'Uploaded files', value: summary.files },
           { icon: <Database className="w-5 h-5 text-emerald-500" />, label: 'Uploaded rows', value: formatNumber(summary.rows) },
           { icon: <BarChart3 className="w-5 h-5 text-amber-500" />, label: 'Rows in engine', value: getEngine().isLoaded ? formatNumber(getEngine().data.length) : '—' },
+          { icon: <Database className="w-5 h-5 text-cyan-500" />, label: 'SQL committed', value: sqlStatus.loading ? '…' : formatNumber(sqlStatus.committed) },
+          { icon: <AlertTriangle className="w-5 h-5 text-orange-500" />, label: 'SQL pending', value: sqlStatus.loading ? '…' : formatNumber(sqlStatus.pending) },
           { icon: <SlidersHorizontal className="w-5 h-5 text-purple-500" />, label: 'Area overrides', value: summary.overrides },
           { icon: <Pencil className="w-5 h-5 text-pink-500" />, label: 'Property edits', value: summary.propertyOverrides },
         ].map((stat, i) => (
@@ -2101,6 +2137,28 @@ function AdminPageInner() {
           </div>
         ))}
       </div>
+
+      {!sqlStatus.loading && sqlStatus.pending > 0 && (
+        <div className="bg-orange-500/10 border border-orange-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-sm font-semibold text-white">{sqlStatus.pending.toLocaleString()} propiedad(es) están pendientes de confirmación</div>
+              <div className="text-xs text-gray-400 mt-1">
+                Estos datos ya están en la base de datos pero el mapa no puede mostrarlos hasta que se confirmen.
+                Haz clic en “Confirmar todo” o en “Add All” para hacerlos visibles.
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={handleForceCommit}
+            disabled={sqlStatus.loading}
+            className="shrink-0 px-4 py-2 bg-orange-600 hover:bg-orange-500 disabled:bg-gray-600 text-white text-sm font-medium rounded-xl transition-colors"
+          >
+            {sqlStatus.loading ? 'Procesando…' : 'Confirmar todo ahora'}
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {SECTIONS.filter((s) => s.id !== 'dashboard').map((s) => {

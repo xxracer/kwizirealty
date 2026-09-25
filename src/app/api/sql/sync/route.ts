@@ -124,6 +124,7 @@ function toSqlRow(row: ChunkRecord): Record<string, unknown> | null {
     propertyType: String(row.propertyType ?? ''),
     pool: !!row.pool,
     listingType: 'sale',
+    datasetYear: Number(row.closeYear ?? 0) || Number(row.taxYear ?? 0) || 0,
     updatedAt: new Date().toISOString(),
   };
 }

@@ -53,6 +53,9 @@ export interface PropertyData {
 
   /** 'rent' for rental records (actual rental price in closePrice), otherwise treated as a sale. */
   listingType?: string;
+
+  /** Dataset year for this row (closeYear for sales/rent, taxYear for tax). Keeps historical uploads from overwriting each other. */
+  datasetYear?: number;
 }
 
 export type BoundaryKey =
@@ -1121,7 +1124,9 @@ export function buildForecast(ts: TimeSeriesPoint[]): ForecastResult | null {
   const forecast3yr = baseline + annualDelta * 3;
   const forecast5yr = baseline + annualDelta * 60;
 
-  const forecastMonths = 60;
+  // Owner decision (2026-09-24): the chart must show ONLY the uploaded data —
+  // no months invented by extending the trend past the last real sale.
+  const forecastMonths = 0;
   const periods: string[] = [];
   const fitted: number[] = [];
   const forecast: number[] = [];

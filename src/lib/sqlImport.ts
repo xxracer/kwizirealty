@@ -189,7 +189,8 @@ export function isPropertyRowValid(row: Record<string, string>, type: SqlImportT
 export function csvRowsToSqlPropertyRows(
   rows: Record<string, string>[],
   type: SqlImportType,
-  sessionId?: string
+  sessionId?: string,
+  defaultYear?: number | null
 ): Record<string, unknown>[] {
   if (!isSaleType(type) && !isRentType(type) && !isTaxType(type)) {
     // Reserved for future school imports.
@@ -217,6 +218,7 @@ export function csvRowsToSqlPropertyRows(
         taxRate,
         taxYear,
         taxAmount,
+        datasetYear: taxYear || defaultYear || 0,
         uploadSessionId: sessionId ?? null,
         updatedAt: new Date().toISOString(),
       });
@@ -241,6 +243,10 @@ export function csvRowsToSqlPropertyRows(
       cleanNumber(row['Price Sq Ft Sold'] || row['Prc/SF']) ||
       (sqft ? closePrice / sqft : 0);
     const zipRaw = String(row['Zip'] || '').trim();
+
+    const year = rentMode
+      ? close.year
+      : close.year || defaultYear || 0;
 
     sqlRows.push({
       mlsNumber: String(row['MLS Number'] || ''),
@@ -287,6 +293,9 @@ export function csvRowsToSqlPropertyRows(
 
       // Distinguishes rental records from sales records in the SQL table.
       listingType: rentMode ? 'rent' : 'sale',
+
+      // Historical dataset year: sales/rent use closeYear; tax uses taxYear.
+      datasetYear: year,
 
       // Staging session id. Null means committed/visible to the map.
       uploadSessionId: sessionId ?? null,

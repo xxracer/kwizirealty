@@ -105,6 +105,7 @@ function rowToProperty(row: any): PropertyData {
     propertyType: row.property_type ?? '',
     pool: !!row.pool,
     listingType: row.listing_type ?? 'sale',
+    datasetYear: row.dataset_year ?? 0,
   };
 }
 

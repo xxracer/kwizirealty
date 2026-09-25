@@ -285,6 +285,7 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
         r->>'propertyType' AS property_type,
         (r->>'pool')::boolean AS pool,
         r->>'listingType' AS listing_type,
+        NULLIF(r->>'datasetYear', '')::int AS dataset_year,
         r->>'uploadSessionId' AS upload_session_id,
         NULLIF(r->>'updatedAt', '')::timestamptz AS updated_at
       FROM jsonb_array_elements($1::jsonb) AS r
@@ -295,7 +296,7 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
       close_date, close_year, close_date_ts, maint_fee, maint_fee_schedule,
       tax_rate, tax_year, tax_amount, subdivisions, zipcodes, highschools,
       highschool_name, elementary, middle, school_district, market_area, area,
-      lat, lng, property_type, pool, listing_type, upload_session_id, updated_at
+      lat, lng, property_type, pool, listing_type, dataset_year, upload_session_id, updated_at
     )
     SELECT
       mls_number, address, city, state, zip, close_price, list_price,
@@ -303,9 +304,9 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
       close_date, close_year, close_date_ts, maint_fee, maint_fee_schedule,
       tax_rate, tax_year, tax_amount, subdivisions, zipcodes, highschools,
       highschool_name, elementary, middle, school_district, market_area, area,
-      lat, lng, property_type, pool, listing_type, upload_session_id, updated_at
+      lat, lng, property_type, pool, listing_type, dataset_year, upload_session_id, updated_at
     FROM batch
-    ON CONFLICT (mls_number) DO UPDATE SET
+    ON CONFLICT (mls_number, dataset_year) DO UPDATE SET
       address = EXCLUDED.address,
       city = EXCLUDED.city,
       state = EXCLUDED.state,
@@ -378,6 +379,22 @@ query searchProperties($q: String!, $limit: Int!) @auth(level: USER) {
     LIMIT $2
     """,
     params: [$q, $limit]
+  )
+}
+
+# Diagnostic: committed vs pending row counts. Lets the admin see whether
+# uploaded CSVs are stuck in staging and invisible to the map.
+query datasetStatus @auth(level: PUBLIC) {
+  status: _selectFirst(
+    sql: """
+    SELECT
+      count(*) AS total,
+      count(*) FILTER (WHERE upload_session_id IS NULL) AS committed,
+      count(*) FILTER (WHERE upload_session_id IS NOT NULL) AS pending,
+      max(updated_at) AS last_updated
+    FROM properties
+    """,
+    params: []
   )
 }
 

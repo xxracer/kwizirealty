@@ -11,6 +11,7 @@ import { getAdminAuth, getAdminDataConnect } from '@/lib/firebaseAdmin';
 import { guardPublicRead } from '@/lib/server/requestGuard';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { csvRowsToSqlPropertyRows, type SqlImportType } from '@/lib/sqlImport';
+import { detectDatasetYear } from '@/lib/cmsStore';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300; // large uploads need time
@@ -67,9 +68,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Bad request: invalid chunk metadata' }, { status: 400 });
   }
 
+  const defaultYear = body.fileName ? detectDatasetYear(body.fileName, rows) : null;
+
   let sqlRows: Record<string, unknown>[];
   try {
-    sqlRows = csvRowsToSqlPropertyRows(rows, type);
+    sqlRows = csvRowsToSqlPropertyRows(rows, type, undefined, defaultYear);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `Import mapping failed: ${message}` }, { status: 400 });
