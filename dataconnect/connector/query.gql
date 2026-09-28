@@ -201,6 +201,24 @@ mutation clearProperties @auth(level: NO_ACCESS) {
   _execute(sql: "DELETE FROM properties")
 }
 
+# Section-scoped wipe for the admin "Delete all" flow. Types are listing_type
+# buckets ('sale', 'rent', 'tax'); an empty list matches every row. 'sale' also
+# covers rows with a NULL/empty listing_type — the engine treats those as sales.
+# dateMode narrows by close date: 'dated' = historical rows (sold/leased, they
+# always carry a Close Date), 'undated' = active listings (no Close Date),
+# 'any' = no date restriction (tax rows, or the full wipe).
+mutation deletePropertiesByListingTypes($types: [String!]!, $dateMode: String!) @auth(level: NO_ACCESS) {
+  _execute(sql: """
+    DELETE FROM properties
+    WHERE (cardinality($1::text[]) = 0
+           OR listing_type = ANY($1::text[])
+           OR (ARRAY['sale'] && $1::text[] AND COALESCE(listing_type, '') = ''))
+      AND ($2 = 'any'
+           OR ($2 = 'dated' AND close_date_ts > 0)
+           OR ($2 = 'undated' AND close_date_ts = 0))
+  """, params: [$types, $dateMode])
+}
+
 # Ensure every UPDATE on properties refreshes updated_at automatically. This
 # catches manual SQL edits or tools that don't supply the column explicitly.
 mutation createUpdatedAtTrigger @auth(level: NO_ACCESS) {
@@ -241,6 +259,23 @@ mutation deletePendingSession($sessionId: String!) @auth(level: PUBLIC) {
 
 mutation deletePropertyByMls($mlsNumber: String!, $datasetYear: Int!) @auth(level: PUBLIC) {
   _execute(sql: "DELETE FROM properties WHERE mls_number = $1 AND dataset_year = $2", params: [$mlsNumber, $datasetYear])
+}
+
+# Delete exactly the rows a single SQL-import CSV file contributed — used when
+# that file is removed from the CMS. Keys arrive as a JSON array of compact
+# objects {"m": mlsNumber, "y": datasetYear} (the same pairs the import mapper
+# upserts); matching is on the full primary key, so one file's rows can go
+# without touching rows any other file owns.
+mutation deletePropertiesByKeys($keys: String!) @auth(level: NO_ACCESS) {
+  _execute(sql: """
+    DELETE FROM properties p
+    WHERE EXISTS (
+      SELECT 1
+      FROM json_array_elements($1::json) AS r
+      WHERE r->>'m' = p.mls_number
+        AND COALESCE((r->>'y')::int, 0) = p.dataset_year
+    )
+  """, params: [$keys])
 }
 
 # Browser-side bulk upsert for staging property CSV rows. Rows arrive as a JSON

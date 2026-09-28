@@ -439,6 +439,55 @@ function findMlsColumn(headers: string[] | undefined): string | undefined {
   return undefined;
 }
 
+/** Categories whose rows live in the SQL `properties` table (direct import). */
+const SQL_BACKED_CATEGORIES = new Set<string>(['sales', 'rent', 'current-sale', 'current-rent', 'tax']);
+
+/**
+ * Recompute the (mlsNumber, datasetYear) pairs a CSV file staged into SQL,
+ * using the exact mapper used at upload time. Reads the Storage backup
+ * (gzip-sniffed, same trick as fetchJsonAutoGz) so deleting a file deletes
+ * precisely the rows that file owns — never rows other files uploaded.
+ */
+async function collectSqlKeysForFile(file: {
+  storageUrl?: string;
+  category: CMSFileCategory;
+  year?: number | null;
+}): Promise<{ m: string; y: number }[]> {
+  if (!file.storageUrl || !SQL_BACKED_CATEGORIES.has(file.category)) return [];
+  const res = await fetch(file.storageUrl, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Backup fetch failed (${res.status})`);
+  const buf = await res.arrayBuffer();
+  let text: string;
+  const head = new Uint8Array(buf.slice(0, 2));
+  if (head[0] === 0x1f && head[1] === 0x8b) {
+    const ds = (globalThis as any).DecompressionStream as typeof DecompressionStream | undefined;
+    if (!ds) throw new Error('Browser does not support gzip decompression.');
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new Uint8Array(buf));
+        c.close();
+      },
+    });
+    text = await new Response(stream.pipeThrough(new ds('gzip'))).text();
+  } else {
+    text = new TextDecoder().decode(buf);
+  }
+  const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
+  const { csvRowsToSqlPropertyRows } = await import('@/lib/sqlImport');
+  const sqlRows = csvRowsToSqlPropertyRows(parsed.data, file.category as any, undefined, file.year ?? null);
+  const seen = new Set<string>();
+  const keys: { m: string; y: number }[] = [];
+  for (const r of sqlRows) {
+    const m = String(r.mlsNumber || '').trim();
+    const y = Number(r.datasetYear ?? 0);
+    const k = `${m}|${y}`;
+    if (!m || seen.has(k)) continue;
+    seen.add(k);
+    keys.push({ m, y });
+  }
+  return keys;
+}
+
 async function buildDedupeKeySet(
   section: Exclude<AdminSection, 'dashboard' | 'areas' | 'boundaries' | 'ads' | 'users'>,
   eng: ReturnType<typeof getEngine>,
@@ -822,16 +871,13 @@ function AdminPageInner() {
 
   const handleHardReload = async () => {
     try {
-      localStorage.clear();
-      sessionStorage.clear();
-      const dbs = await (window as any).indexedDB?.databases?.();
-      if (Array.isArray(dbs)) {
-        for (const db of dbs) {
-          if (db.name) (window as any).indexedDB.deleteDatabase(db.name);
-        }
-      }
+      // Only the app's DATA caches. The guided-tour marker, the cookie-consent
+      // answer, closed ads and the Firebase Auth session all survive, so the
+      // user never has to redo them.
+      const { clearAppDataCaches } = await import('@/lib/cacheBuster');
+      await clearAppDataCaches();
     } catch {
-      // ignore cleanup errors
+      // ignore cleanup errors — the reload below still busts the HTTP cache
     }
     const url = new URL(window.location.href);
     url.searchParams.set('_cb', Date.now().toString());
@@ -1769,9 +1815,37 @@ function AdminPageInner() {
   };
 
   const handleDelete = async (id: string) => {
+    const file = files.find((f) => f.id === id);
     await cmsStore.removeFile(id);
+
+    // Deleting the CMS doc alone leaves the rows this file upserted into SQL
+    // on the map forever — remove those exact rows too (same primary keys the
+    // import mapper wrote when the file was uploaded).
+    let sqlError: string | null = null;
+    if (file && SQL_BACKED_CATEGORIES.has(file.category)) {
+      try {
+        const keys = await collectSqlKeysForFile(file);
+        if (keys.length > 0) {
+          await fetch('/api/sql/delete-property-keys', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys }),
+          });
+        }
+        const remaining = await countCommittedProperties();
+        await publishSqlDatasetVersion(remaining);
+      } catch (err) {
+        console.error('[admin] SQL row delete failed', err);
+        sqlError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    await loadSqlStatus();
     await reloadEngine();
-    setToast({ type: 'success', message: 'File removed and map updated.' });
+    if (sqlError) {
+      setToast({ type: 'error', message: `${file?.name ?? 'File'}: removed from the CMS, but its SQL rows could not be deleted (${sqlError}).` });
+    } else {
+      setToast({ type: 'success', message: 'File removed and map updated.' });
+    }
   };
 
   /**
@@ -1836,8 +1910,53 @@ function AdminPageInner() {
     if (confirm(`Are you sure you want to delete ALL ${scope} files? This cannot be undone.`)) {
       setProcessing(true);
       await cmsStore.clearFiles(categories.length ? categories : undefined);
+
+      // The CMS files are gone, but their rows were already upserted into SQL
+      // — those must be deleted too or the map keeps showing them forever.
+      // Scope: sales/rent rows always carry a Close Date ('dated'), active
+      // listings never do ('undated'), so deleting one section cannot take the
+      // other with it. Dashboard wipes the whole table.
+      const sqlTypesByCategory: Record<string, { types: string[]; dateMode: 'any' | 'dated' | 'undated' }> = {
+        sales: { types: ['sale'], dateMode: 'dated' },
+        rent: { types: ['rent'], dateMode: 'dated' },
+        'current-sale': { types: ['sale'], dateMode: 'undated' },
+        'current-rent': { types: ['rent'], dateMode: 'undated' },
+        tax: { types: ['tax'], dateMode: 'any' },
+      };
+      const sqlScope = { types: [] as string[], dateMode: 'any' as 'any' | 'dated' | 'undated' };
+      for (const cat of categories) {
+        const mapped = sqlTypesByCategory[cat];
+        if (mapped && !sqlScope.types.includes(mapped.types[0])) {
+          sqlScope.types.push(...mapped.types);
+          if (sqlScope.dateMode === 'any') sqlScope.dateMode = mapped.dateMode;
+        }
+      }
+      if (categories.length === 0) {
+        // Dashboard: delete everything in SQL too.
+        sqlScope.types = [];
+        sqlScope.dateMode = 'any';
+      }
+
+      try {
+        await fetch('/api/sql/clear-listing-types', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ types: sqlScope.types, dateMode: sqlScope.dateMode }),
+        });
+        // Bump the dataset version so the map re-queries SQL and every browser
+        // picks up the deletion immediately (fresh ETag).
+        const remaining = await countCommittedProperties();
+        await publishSqlDatasetVersion(remaining);
+        await loadSqlStatus();
+      } catch (err) {
+        console.error('[admin] SQL delete failed', err);
+        setToast({ type: 'error', message: 'Files deleted, but the SQL rows could not be removed. Check the console.' });
+        setProcessing(false);
+        return;
+      }
+
       await reloadEngine();
-      setToast({ type: 'success', message: `All ${scope} files have been deleted.` });
+      setToast({ type: 'success', message: `All ${scope} files have been deleted, including their SQL rows.` });
       setProcessing(false);
     }
   };

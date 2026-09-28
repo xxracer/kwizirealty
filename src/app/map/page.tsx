@@ -104,7 +104,8 @@ const PERIODS: { key: PropertyFilters['period']; label: string }[] = [
   { key: '5y', label: '5 years' },
 ];
 
-const FIXED_PALETTE = ['#93c5fd', '#60a5fa', '#3b82f6', '#4f46e5', '#7c3aed'];
+// Owner-requested scale: white → yellow → orange → red → wine (vinotinto).
+const FIXED_PALETTE = ['#ffffff', '#facc15', '#f97316', '#e11d1d', '#800020'];
 
 // File names that already map to a fixed metric boundary layer (mirrors
 // BOUNDARY_SOURCES in MapComponent — duplicated here because that module is
@@ -452,6 +453,11 @@ function MapPageInner() {
   const [autoScale, setAutoScale] = useState(true);
   const [customMin, setCustomMin] = useState<number>(0);
   const [customMax, setCustomMax] = useState<number>(0);
+  /** Full data min/max — the fixed frame the draggable scale handles map onto. */
+  const [scaleFullRange, setScaleFullRange] = useState<{ min: number; max: number } | null>(null);
+  /** Which gradient-bar handle is being dragged right now. */
+  const [dragHandle, setDragHandle] = useState<'min' | 'max' | null>(null);
+  const scaleBarRef = useRef<HTMLDivElement | null>(null);
   const [fillOpacity] = useState(0.50);
 
   const [showAccountModal, setShowAccountModal] = useState(false);
@@ -1088,7 +1094,7 @@ function MapPageInner() {
     const reseed = prevAutoScaleRef.current !== autoScale ? true : autoScale;
     prevAutoScaleRef.current = autoScale;
     const vals = Object.values(effectiveMetricValues).filter((v) => isFinite(v));
-    if (!vals.length || !reseed) return;
+    if (!vals.length) return;
     // Linear scan — Math.min(...vals) with ~60k values risks a RangeError.
     let min = Infinity;
     let max = -Infinity;
@@ -1096,9 +1102,24 @@ function MapPageInner() {
       if (v < min) min = v;
       if (v > max) max = v;
     }
-    setCustomMin(min);
-    setCustomMax(max);
-  }, [effectiveMetricValues, autoScale]);
+    // The full data frame is always tracked (the drag handles map onto it),
+    // but Min/Max are only reseeded when auto-scaling or when a toggle just
+    // flipped Auto scale.
+    // Keep the same object identity when unchanged so this effect (which
+    // depends on scaleFullRange) doesn't re-run into an infinite loop.
+    setScaleFullRange((prev) =>
+      prev && prev.min === min && prev.max === max ? prev : { min, max }
+    );
+    if (!reseed && !scaleFullRange) {
+      setCustomMin(min);
+      setCustomMax(max);
+      return;
+    }
+    if (reseed) {
+      setCustomMin(min);
+      setCustomMax(max);
+    }
+  }, [effectiveMetricValues, autoScale, scaleFullRange]);
 
   const colorStops = useMemo(() => {
     return generateColorStops(
@@ -1109,6 +1130,45 @@ function MapPageInner() {
       autoScale ? undefined : customMax
     );
   }, [effectiveMetricValues, metric, reversePalette, autoScale, customMin, customMax]);
+
+  // Dragging a scale handle: grabbing a handle while Auto scale is on freezes
+  // the current range (that's the range the user sees), then the drag expands
+  // or shrinks it. Values outside the drag bounds are clamped to keep Min < Max.
+  const startScaleDrag = (which: 'min' | 'max') => (e: React.PointerEvent) => {
+    e.preventDefault();
+    if (autoScale) {
+      setAutoScale(false);
+      setCustomMin(colorStops[0][0]);
+      setCustomMax(colorStops[colorStops.length - 1][0]);
+    }
+    setDragHandle(which);
+  };
+
+  useEffect(() => {
+    if (!dragHandle) return;
+    const onMove = (e: PointerEvent) => {
+      const bar = scaleBarRef.current;
+      if (!bar || !scaleFullRange || scaleFullRange.max <= scaleFullRange.min) return;
+      const rect = bar.getBoundingClientRect();
+      if (!rect.width) return;
+      const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      const value = scaleFullRange.min + frac * (scaleFullRange.max - scaleFullRange.min);
+      if (dragHandle === 'min') {
+        setCustomMin(Math.min(value, customMax));
+      } else {
+        setCustomMax(Math.max(value, customMin));
+      }
+    };
+    const onUp = () => setDragHandle(null);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [dragHandle, scaleFullRange, customMin, customMax]);
 
   const emptyStats = useMemo(() => ({
     count: 0, avgSale: 0, avgSqft: 0, avgDom: 0, totalVolume: 0, avgList: 0, avgLotSize: 0,
@@ -2528,7 +2588,7 @@ function MapPageInner() {
           <FilterSection icon={<BarChart3 className="w-4 h-4 text-cyan-400" />} title="Scale Range" defaultOpen={false}>
             <div className="space-y-3">
               <p className="text-[10px] text-gray-500 leading-relaxed">
-                Controls the color scale of the map: each area is colored by where its metric value falls between Min and Max. With Auto scale on, Min/Max fit the current data automatically.
+                Controls the color scale of the map: each area is colored by where its metric value falls between Min and Max. With Auto scale on, Min/Max fit the current data automatically. Drag the handles on the bar to shrink or expand the range, or drag them back out to expand it again.
               </p>
               <div className="flex items-center justify-between">
                 <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
@@ -2570,11 +2630,57 @@ function MapPageInner() {
                 </div>
               )}
               <div
-                className="h-3 w-full rounded-full"
+                ref={scaleBarRef}
+                className="relative h-3.5 w-full rounded-full select-none touch-none"
                 style={{
                   background: `linear-gradient(to right, ${colorStops.map((s) => s[1]).join(', ')})`,
                 }}
-              />
+              >
+                {!autoScale && scaleFullRange && scaleFullRange.max > scaleFullRange.min && (
+                  <>
+                    {/* Dim the parts of the scale outside the manual range so the
+                        user can see exactly how far the selection was shrunk. */}
+                    <div
+                      className="absolute inset-y-0 left-0 rounded-l-full bg-black/60"
+                      style={{
+                        width: `${Math.max(0, Math.min(1, (customMin - scaleFullRange.min) / (scaleFullRange.max - scaleFullRange.min))) * 100}%`,
+                      }}
+                    />
+                    <div
+                      className="absolute inset-y-0 right-0 rounded-r-full bg-black/60"
+                      style={{
+                        width: `${Math.max(0, Math.min(1, (scaleFullRange.max - customMax) / (scaleFullRange.max - scaleFullRange.min))) * 100}%`,
+                      }}
+                    />
+                  </>
+                )}
+                {(['min', 'max'] as const).map((which) => {
+                  const frac =
+                    autoScale || !scaleFullRange || scaleFullRange.max <= scaleFullRange.min
+                      ? which === 'min'
+                        ? 0
+                        : 1
+                      : Math.max(
+                          0,
+                          Math.min(
+                            1,
+                            ((which === 'min' ? customMin : customMax) - scaleFullRange.min) /
+                              (scaleFullRange.max - scaleFullRange.min)
+                          )
+                        );
+                  return (
+                    <div
+                      key={which}
+                      onPointerDown={startScaleDrag(which)}
+                      className={`absolute top-1/2 z-10 h-4 w-4 -translate-y-1/2 -translate-x-1/2 rounded-full border-2 bg-white shadow cursor-grab active:cursor-grabbing ${
+                        dragHandle === which ? 'border-cyan-400' : 'border-white/70'
+                      }`}
+                      style={{ left: `${frac * 100}%` }}
+                      title={which === 'min' ? 'Drag to set the range start' : 'Drag to set the range end'}
+                    />
+                  );
+                })}
+              </div>
               <div className="flex justify-between text-xs font-semibold text-gray-300">
                 <span>{formatMetricValue(metric, colorStops[0][0])}</span>
                 <span>{formatMetricValue(metric, colorStops[colorStops.length - 1][0])}</span>

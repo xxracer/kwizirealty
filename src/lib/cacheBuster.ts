@@ -11,6 +11,12 @@
 
 const VERSION_KEY = 'kwizi_app_version';
 
+/** One-time user choices that must survive EVERY cache clear: the guided-tour
+ *  marker, the cookie-consent answer, recently closed ads, and the version
+ *  marker itself. Clearing these would force the user to redo the tour and
+ *  re-accept the cookie banner on every deploy — they are prefs, not data. */
+const PREF_KEYS = ['kwizi-tour-seen', 'kwizi-cookie-consent', 'kwizi_closed_ads', VERSION_KEY];
+
 /** Reads the build version injected by Next.js at build time. */
 function getBuildVersion(): string {
   return process.env.NEXT_PUBLIC_APP_VERSION || process.env.NEXT_PUBLIC_GIT_SHA || 'unknown';
@@ -46,10 +52,19 @@ async function unregisterServiceWorkers(): Promise<void> {
   }
 }
 
-/** Clear local/session storage except the version marker we just wrote. */
+/** Clear local/session storage except the user's one-time choices (tour,
+ *  cookie consent, closed ads) — see PREF_KEYS. */
 function clearWebStorage(): void {
   try {
-    if (typeof localStorage !== 'undefined') localStorage.clear();
+    if (typeof localStorage !== 'undefined') {
+      const saved: Record<string, string | null> = {};
+      for (const k of PREF_KEYS) saved[k] = localStorage.getItem(k);
+      localStorage.clear();
+      for (const k of PREF_KEYS) {
+        const v = saved[k];
+        if (v != null) localStorage.setItem(k, v);
+      }
+    }
     if (typeof sessionStorage !== 'undefined') sessionStorage.clear();
   } catch {
     // ignore
@@ -75,6 +90,16 @@ function readVersionMarker(): string | null {
     // ignore
   }
   return null;
+}
+
+/** Reusable one-stop cache clear for the admin "Clear cache & reload" button:
+ *  wipes only the app's DATA caches (IndexedDB dataset/geojson caches, service
+ *  workers) and non-pref web storage. Firebase Auth's IndexedDB
+ *  (firebaseLocalStorageDb) and the user's one-time choices survive. */
+export async function clearAppDataCaches(): Promise<void> {
+  clearWebStorage();
+  await clearIndexedDbs();
+  await unregisterServiceWorkers();
 }
 
 /**
