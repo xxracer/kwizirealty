@@ -128,6 +128,15 @@ export async function commitPendingProperties(): Promise<void> {
 }
 
 /**
+ * Copy each property's latest tax record (listing_type='tax' bucket) onto its
+ * sale rows so the report panel and the tax map metric see real tax data.
+ * Idempotent — safe to call after every commit that touched tax or sale rows.
+ */
+export async function mergeTaxIntoSaleRows(): Promise<void> {
+  await dataConnectFetch('executeMutation', 'mergeTaxIntoSaleRows', {});
+}
+
+/**
  * Promote one upload session to committed.
  */
 export async function commitPendingSession(sessionId: string): Promise<void> {

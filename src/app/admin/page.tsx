@@ -20,6 +20,7 @@ import {
   commitPendingSession,
   countCommittedProperties,
   deletePendingSession,
+  mergeTaxIntoSaleRows,
   stagePropertyRows,
 } from '@/lib/dataConnectClient';
 import { publishSqlDatasetVersion } from '@/lib/sqlSync';
@@ -442,6 +443,11 @@ function findMlsColumn(headers: string[] | undefined): string | undefined {
 /** Categories whose rows live in the SQL `properties` table (direct import). */
 const SQL_BACKED_CATEGORIES = new Set<string>(['sales', 'rent', 'current-sale', 'current-rent', 'tax']);
 
+// After committing one of these buckets the tax records must be re-merged onto
+// the sale rows: a fresh sale upload brings new rows with empty tax fields, and
+// a tax upload brings the values to copy onto them. (mergeTaxIntoSaleRows.)
+const TAX_MERGE_CATEGORIES = new Set<string>(['sales', 'current-sale', 'tax']);
+
 /**
  * Recompute the (mlsNumber, datasetYear) pairs a CSV file staged into SQL,
  * using the exact mapper used at upload time. Reads the Storage backup
@@ -606,9 +612,13 @@ function detectCategory(fileName: string, section: AdminSection): CMSFileCategor
       if (part.includes('high')) return 'school-high';
       return 'school-elementary';
     }
+    // NOTE: "current".includes("rent") is TRUE ("cur-RENT") — the rent check
+    // MUST run after the sale check and only win when there is no sale
+    // keyword, or every "Current for Sale" folder silently became Rent data.
     if (part.includes('current')) {
-      if (part.includes('rent')) return 'current-rent';
       if (part.includes('sale')) return 'current-sale';
+      if (part.includes('rent')) return 'current-rent';
+      return 'current-sale';
     }
     if (part.includes('rent')) return 'rent';
     if (part.includes('sale')) return 'sales';
@@ -652,6 +662,80 @@ function categorySectionName(category: CMSFileCategory): string {
     case 'property':
       return 'Sales Data';
   }
+}
+
+/** Section each property-like category belongs to — used to point the user at
+ *  the right place when a file is dropped on a different section. */
+const CATEGORY_TARGET_SECTION: Partial<Record<CMSFileCategory, Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>>> = {
+  sales: 'sales',
+  rent: 'rent',
+  'current-sale': 'current',
+  'current-rent': 'current',
+  tax: 'tax',
+};
+
+interface CloseDateSniff {
+  /** Name of the Close-Date-like column, or null when the file has none. */
+  col: string | null;
+  /** How many rows were sampled (capped, folders can hold 100k-row CSVs). */
+  checked: number;
+  /** How many sampled rows actually carry a Close Date value. */
+  withClose: number;
+}
+
+/** Looks for a Close Date column and samples real values from the parsed rows. */
+function sniffCloseDate(fields: string[], rows: Record<string, string>[]): CloseDateSniff {
+  const col =
+    fields.find((f) =>
+      /^(close\s*date|close_date|closedate|closed\s*date|closing\s*date|sold\s*date|sale\s*date)$/i.test(f.trim())
+    ) || null;
+  if (!col) return { col: null, checked: 0, withClose: 0 };
+  let checked = 0;
+  let withClose = 0;
+  for (const row of rows) {
+    if (checked >= 200) break;
+    const v = row[col]?.trim();
+    if (v) withClose++;
+    checked++;
+  }
+  return { col, checked, withClose };
+}
+
+/**
+ * The CONTENT wins over the folder name. detectCategory only reads folder/
+ * file names, so a "Current for Sale Data" folder holding 2025 closings
+ * (rows with real Close Dates) would be misread as active listings — and a
+ * "Sale 2025" folder whose CSVs lack a Close Date column holds listings that
+ * never closed. The sniffed rows settle it either way.
+ */
+function refineCategoryByRows(fields: string[], sniff: CloseDateSniff, category: CMSFileCategory): CMSFileCategory {
+  if (category !== 'sales' && category !== 'rent' && category !== 'current-sale' && category !== 'current-rent') {
+    return category;
+  }
+  if (category === 'current-sale' || category === 'current-rent') {
+    if (sniff.col && sniff.checked > 0 && sniff.withClose / sniff.checked >= 0.3) {
+      return category === 'current-rent' ? 'rent' : 'sales';
+    }
+    return category;
+  }
+  if (!sniff.col) {
+    // No Close Date at all — but a Close/Sold Price column means it IS sold
+    // data that simply doesn't carry dates; keep it where the folder put it.
+    const hasClosePrice = fields.some((f) => /^(close\s*price|close_price|closeprice|sold\s*price|soldprice)$/i.test(f.trim()));
+    if (hasClosePrice) return category;
+    return category === 'rent' ? 'current-rent' : 'current-sale';
+  }
+  return category;
+}
+
+function describeCategoryEvidence(sniff: CloseDateSniff, category: CMSFileCategory): string {
+  if (category === 'tax') return 'The file name marks it as tax data.';
+  if (category !== 'sales' && category !== 'rent' && category !== 'current-sale' && category !== 'current-rent') {
+    return `The file name marks it as ${categorySectionName(category)} data.`;
+  }
+  if (!sniff.col) return 'No Close Date column — that matches active listings.';
+  const pct = sniff.checked > 0 ? Math.round((sniff.withClose / sniff.checked) * 100) : 0;
+  return `Close Date filled in ${pct}% of the first ${sniff.checked || 'a few'} rows — that matches sold records.`;
 }
 
 type TreeNode = {
@@ -788,6 +872,13 @@ function AdminPageInner() {
     skipped: number;
     reasons: Record<string, number>;
   } | null>(null);
+  /** Files whose detected data type doesn't match the section they were
+   *  dropped on — the big centered popup explains and offers one-click fixes. */
+  const [sectionMisfits, setSectionMisfits] = useState<
+    { file: File; relativePath: string; category: CMSFileCategory; evidence: string }[]
+  >([]);
+  /** Section the misfit popup is glowing on the sidebar/dashboard card. */
+  const [highlightSection, setHighlightSection] = useState<AdminSection | null>(null);
 
   const [confirmAll, setConfirmAll] = useState<ConfirmAllState>({
     open: false,
@@ -1022,7 +1113,8 @@ function AdminPageInner() {
 
   const handleFiles = async (
     fileList: FileList | File[] | null,
-    section: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>
+    section: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>,
+    opts?: { ignoreSectionMismatch?: boolean }
   ) => {
     if (!fileList?.length) return;
     setProcessing(true);
@@ -1067,6 +1159,7 @@ function AdminPageInner() {
 
     let skippedCount = 0;
     let skippedReasons: Record<string, number> = {};
+    const misfitFiles: { file: File; relativePath: string; category: CMSFileCategory; evidence: string }[] = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
       const file = inputFiles[i];
@@ -1262,19 +1355,22 @@ function AdminPageInner() {
           continue;
         }
 
-        const category = detectCategory(relativePath, section);
+        // Folder/file-name detection first, then let the CSV's own content
+        // (does it carry Close Date values?) settle current vs sold data.
+        const detected = detectCategory(relativePath, section);
+        const sniff = sniffCloseDate(parsed.meta.fields || [], parsed.data);
+        const category = refineCategoryByRows(parsed.meta.fields || [], sniff, detected);
 
-        // Reject files whose detected category belongs to a different data section.
-        // This prevents a "Sale 2024.csv" from being stored as Rent data just
-        // because the user had the Rent tab open.
-        if (category !== 'property' && !categories.includes(category)) {
+        // Files whose detected category belongs to a different data section
+        // are collected for the misfit popup instead of silently skipped —
+        // the popup explains where they go, with an example, and offers a
+        // one-click fix. This prevents a "Sale 2024.csv" from being stored as
+        // Rent data just because the user had the Rent tab open.
+        if (!opts?.ignoreSectionMismatch && category !== 'property' && !categories.includes(category)) {
+          misfitFiles.push({ file, relativePath, category, evidence: describeCategoryEvidence(sniff, category) });
           skippedCount++;
           skippedReasons['wrong-section'] = (skippedReasons['wrong-section'] || 0) + 1;
-          setToast({
-            type: 'error',
-            message: `${relativePath} looks like ${categorySectionName(category)} data — upload it in the ${categorySectionName(category)} section instead.`,
-          });
-          console.log(`[handleFiles] skipping ${relativePath}: detected category=${category}, not in current section`);
+          console.log(`[handleFiles] misfit ${relativePath}: detected category=${category}, current section=${section}`);
           continue;
         }
 
@@ -1386,6 +1482,13 @@ function AdminPageInner() {
     console.log(`[handleFiles] done. ${inputFiles.length} received, ${newStaged.length} staged, ${skippedCount} skipped. Reasons:`, skippedReasons);
     setUploadSummary({ found: inputFiles.length, staged: newStaged.length, skipped: skippedCount, reasons: skippedReasons });
 
+    // Misfit files get the big centered popup (with the target section
+    // highlighted) instead of a one-line toast that scrolls away.
+    if (misfitFiles.length > 0) {
+      setSectionMisfits(misfitFiles);
+      setHighlightSection(CATEGORY_TARGET_SECTION[misfitFiles[0].category] ?? null);
+    }
+
     if (newStaged.length > 0) {
       setStagedFiles((prev) => [...prev, ...newStaged]);
       const totalNew = newStaged.reduce((sum, s) => sum + s.stats.new, 0);
@@ -1427,6 +1530,36 @@ function AdminPageInner() {
         }))
       );
     }
+  };
+
+  const dismissMisfits = () => {
+    setSectionMisfits([]);
+    setHighlightSection(null);
+  };
+
+  /** Re-run the misfit files through the section they actually belong to. */
+  const sendMisfitsToRightSection = async () => {
+    // Plain object — `Map` is shadowed by the react-icons Map component here.
+    const groups: Partial<Record<Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, File[]>> = {};
+    for (const m of sectionMisfits) {
+      const target = CATEGORY_TARGET_SECTION[m.category] || 'current';
+      (groups[target] = groups[target] || []).push(m.file);
+    }
+    dismissMisfits();
+    for (const [target, files] of Object.entries(groups) as [Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, File[]][]) {
+      setSection(target);
+      await handleFiles(files, target);
+    }
+  };
+
+  /** Keep the misfit files in the section they were dropped on. */
+  const uploadMisfitsHere = async () => {
+    const files = sectionMisfits.map((m) => m.file);
+    const droppedSection = section;
+    dismissMisfits();
+    await handleFiles(files, droppedSection as Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, {
+      ignoreSectionMismatch: true,
+    });
   };
 
   const runSqlStaging = async (
@@ -1660,6 +1793,17 @@ function AdminPageInner() {
         if (staged.sessionId) {
           await commitPendingSession(staged.sessionId);
         }
+        // Tax/sale uploads: merge the tax bucket onto the matching sale rows so
+        // the tax report + tax map metric work. Idempotent; skipped with a
+        // console warning while the mergeTaxIntoSaleRows connector op hasn't
+        // been deployed yet.
+        if (TAX_MERGE_CATEGORIES.has(staged.record.category)) {
+          try {
+            await mergeTaxIntoSaleRows();
+          } catch (err) {
+            console.warn('[admin] mergeTaxIntoSaleRows unavailable yet', err);
+          }
+        }
 
         await cmsStore.saveSqlImportMetadata(recordToSave);
         const totalRows = await countCommittedProperties();
@@ -1762,6 +1906,16 @@ function AdminPageInner() {
     if (readySqlStaged.length > 0) {
       setUploadProgress({ current: 0, total: readySqlStaged.length, fileName: '', phase: 'Committing to SQL…', startedAt: Date.now() });
       await commitPendingProperties();
+      // Merge the tax bucket onto sale rows when the batch touched tax or sale
+      // data (idempotent; skipped with a warning if the op isn't deployed yet).
+      if (readySqlStaged.some((s) => TAX_MERGE_CATEGORIES.has(s.record.category))) {
+        setUploadProgress({ current: 0, total: readySqlStaged.length, fileName: '', phase: 'Merging tax data…', startedAt: Date.now() });
+        try {
+          await mergeTaxIntoSaleRows();
+        } catch (err) {
+          console.warn('[admin] mergeTaxIntoSaleRows unavailable yet', err);
+        }
+      }
       for (let i = 0; i < readySqlStaged.length; i++) {
         const staged = readySqlStaged[i];
         setUploadProgress({ current: i + 1, total: readySqlStaged.length, fileName: staged.record.name, phase: 'Saving metadata…', startedAt: Date.now() });
@@ -2476,7 +2630,11 @@ function AdminPageInner() {
             <button
               key={s.id}
               onClick={() => setSection(s.id)}
-              className="text-left bg-surface border border-border-subtle hover:border-blue-500/50 rounded-2xl p-5 transition-all group"
+              className={`text-left bg-surface border rounded-2xl p-5 transition-all group ${
+                highlightSection === s.id
+                  ? 'border-cyan-400 ring-2 ring-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.55)] animate-pulse'
+                  : 'border-border-subtle hover:border-blue-500/50'
+              }`}
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="w-10 h-10 rounded-xl bg-background group-hover:bg-blue-500/20 flex items-center justify-center text-gray-300 group-hover:text-blue-400 transition-colors">
@@ -3527,11 +3685,18 @@ function AdminPageInner() {
               key={s.id}
               onClick={() => setSection(s.id)}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all text-left ${
-                section === s.id ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:bg-background hover:text-white'
+                section === s.id
+                  ? 'bg-blue-600 text-white shadow'
+                  : highlightSection === s.id
+                  ? 'bg-cyan-500/15 text-white ring-2 ring-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.55)] animate-pulse'
+                  : 'text-gray-400 hover:bg-background hover:text-white'
               }`}
             >
               {s.icon}
               <span className="flex-1">{s.label}</span>
+              {highlightSection === s.id && section !== s.id && (
+                <span className="text-[9px] font-bold uppercase bg-cyan-400 text-black rounded-full px-1.5 py-0.5">Here</span>
+              )}
             </button>
           ))}
         </nav>
@@ -3748,6 +3913,72 @@ function AdminPageInner() {
         >
           {toast.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
           {toast.message}
+        </div>
+      )}
+
+      {/* Big centered misfit popup: files whose content belongs to another
+          section. Highlights the target section on the sidebar while open. */}
+      {sectionMisfits.length > 0 && (
+        <div className="fixed inset-0 z-[10001] bg-[#0b0d13]/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-surface border-2 border-cyan-500/40 rounded-3xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-auto p-6 sm:p-8">
+            <div className="flex items-start gap-4 mb-4">
+              <div className="w-12 h-12 rounded-2xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-6 h-6 text-cyan-400" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-white leading-snug">
+                  {sectionMisfits.length} file{sectionMisfits.length > 1 ? 's' : ''} belong{sectionMisfits.length > 1 ? '' : 's'} in a different section
+                </h2>
+                <p className="text-sm text-gray-400 mt-1">
+                  These files were dropped on <span className="font-semibold text-white">{SECTION_CONFIG[section as keyof typeof SECTION_CONFIG]?.title}</span>, but the data inside says otherwise. Nothing was uploaded yet.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2 mb-4 max-h-56 overflow-auto">
+              {sectionMisfits.map((m) => (
+                <div key={m.relativePath} className="flex items-start gap-3 bg-background border border-border-subtle rounded-xl px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-white truncate">{m.relativePath}</p>
+                    <p className="text-[11px] text-gray-400 mt-0.5">{m.evidence}</p>
+                  </div>
+                  <span className="shrink-0 text-[10px] font-bold uppercase bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 rounded-full px-2.5 py-1">
+                    {categorySectionName(m.category)}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Worked example so the rule is obvious. */}
+            <div className="bg-cyan-500/[0.07] border border-cyan-500/20 rounded-xl px-4 py-3 mb-6">
+              <p className="text-xs text-gray-300 leading-relaxed">
+                <span className="font-bold text-cyan-300">How the system knows:</span> it reads the CSV content, not just the folder name. A file with real <span className="font-semibold">Close Date</span> values is sold data (Sales/Rent) even if the folder says &ldquo;Current for Sale Data&rdquo; — e.g. 2025 closings stored there still go to <span className="font-semibold text-white">Sales Data</span>. A file with no Close Date column is an active listing (Current Listings) even if the folder says &ldquo;Sale&rdquo;.
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={sendMisfitsToRightSection}
+                disabled={processing}
+                className="flex-1 px-4 py-3 rounded-xl text-sm font-bold bg-cyan-500 hover:bg-cyan-400 disabled:bg-gray-600 text-black transition-colors"
+              >
+                Upload in {categorySectionName(sectionMisfits[0].category)} →
+              </button>
+              <button
+                onClick={uploadMisfitsHere}
+                disabled={processing}
+                className="flex-1 px-4 py-3 rounded-xl text-sm font-semibold bg-white/10 hover:bg-white/20 disabled:bg-gray-600 text-white transition-colors"
+              >
+                Upload here anyway
+              </button>
+              <button
+                onClick={dismissMisfits}
+                className="px-4 py-3 rounded-xl text-sm font-medium text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

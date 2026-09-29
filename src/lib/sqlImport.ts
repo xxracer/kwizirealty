@@ -5,9 +5,11 @@
  * Parsed rows are upserted directly into the Data Connect `properties` table
  * from the browser, keyed by mls_number.
  *
- * IMPORTANT: sales-data CSVs may carry extra columns (tax, schools, etc.)
- * but this mapper intentionally ignores them — those categories are imported
- * separately through their own dedicated imports.
+ * IMPORTANT: sales/rent CSVs carry the property's own Tax Year / Tax Amount /
+ * Tax Rate columns and this mapper maps them (the legacy engine did too) —
+ * they are what the tax report and the 'Last Year Tax Rate' metric read. The
+ * dedicated 'tax' uploads (CoreLogic parcel exports) are a different ID
+ * namespace and merge by MLS through mergeTaxIntoSaleRows.
  */
 
 export type SqlImportType =
@@ -182,9 +184,7 @@ export function isPropertyRowValid(row: Record<string, string>, type: SqlImportT
 
 /**
  * Convert raw CSV rows (header keys = original CSV column names) into the
- * SQL `Property` shape. For sales data we deliberately ignore tax/school
- * columns that sometimes appear in the same file — those are imported later
- * through their own dedicated uploads.
+ * SQL `Property` shape.
  */
 export function csvRowsToSqlPropertyRows(
   rows: Record<string, string>[],
@@ -270,9 +270,16 @@ export function csvRowsToSqlPropertyRows(
       maintFee: cleanNumber(row['Maint Fee Amt']),
       maintFeeSchedule: String(row['Maint Fee Pay Schedule'] || '').toLowerCase(),
 
-      // Tax data is intentionally left untouched for property imports.
-      // Tax records are imported separately via type: 'tax' so they never
-      // overwrite tax fields on subsequent sales uploads.
+      // The MLS export carries the property's own tax columns — the legacy
+      // engine read them on every row (engineCore.normalizeRow) and they feed
+      // the tax report + the 'Last Year Tax Rate' map metric. The dedicated
+      // 'tax' uploads use a different ID namespace (CoreLogic parcel MLS #),
+      // so without these columns no sale row ever had tax data in SQL.
+      // The stagePropertyRows upsert preserves any existing value when the
+      // incoming row has none (COALESCE), so empty cells never erase tax data.
+      taxRate: cleanNumber(row['Tax Rate']),
+      taxYear: cleanNumber(row['Tax Year']),
+      taxAmount: cleanNumber(row['Tax Amount']),
 
       // Boundary / area fields that come from the CSV itself.
       subdivisions: cleanBoundaryName(row['Subdivision']),

@@ -32,7 +32,7 @@ import {
 } from '@/lib/sqlData';
 import { readSqlSyncState } from '@/lib/sqlSync';
 import { resolveQueriesToZips } from '@/lib/areaAliases';
-import { formatMetricValue } from '@/lib/legendFormat';
+import { formatMetricInput, formatMetricValue, parseMetricInput } from '@/lib/legendFormat';
 import { useWorkerAggregates } from './useWorkerAggregates';
 import { METRICS } from '@/lib/metrics';
 import { cmsStore, type CMSMetricOverride } from '@/lib/cmsStore';
@@ -457,6 +457,9 @@ function MapPageInner() {
   const [scaleFullRange, setScaleFullRange] = useState<{ min: number; max: number } | null>(null);
   /** Which gradient-bar handle is being dragged right now. */
   const [dragHandle, setDragHandle] = useState<'min' | 'max' | null>(null);
+  /** Which Min/Max input is being edited — while focused it shows raw digits
+   *  so typing isn't mangled by live separator insertion; on blur it formats. */
+  const [scaleEditing, setScaleEditing] = useState<'min' | 'max' | null>(null);
   const scaleBarRef = useRef<HTMLDivElement | null>(null);
   const [fillOpacity] = useState(0.50);
 
@@ -1122,6 +1125,26 @@ function MapPageInner() {
   }, [effectiveMetricValues, autoScale, scaleFullRange]);
 
   const colorStops = useMemo(() => {
+    // Owner spec: with Auto scale ON every area that has data paints the same
+    // blue (the pre-data fallback color) — the white/yellow/orange/red/wine
+    // palette only applies when Auto scale is OFF and the Min/Max are manual.
+    if (autoScale) {
+      const vals = Object.values(effectiveMetricValues).filter(
+        (v) =>
+          isFinite(v) &&
+          (v > 0 || metric === 'Appreciation Rate' || metric === 'Investor Index' || metric === 'Last Year Tax Rate')
+      );
+      // Linear scan — Math.min(...vals) with ~60k values risks a RangeError.
+      let min = Infinity;
+      let max = -Infinity;
+      for (const v of vals) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      if (isFinite(min) && isFinite(max)) {
+        return [[min, '#2c7be5'], [max, '#2c7be5']] as [number, string][];
+      }
+    }
     return generateColorStops(
       effectiveMetricValues,
       metric,
@@ -2612,18 +2635,31 @@ function MapPageInner() {
                   <div>
                     <span className="text-[10px] text-gray-500 uppercase block mb-1">Min</span>
                     <input
-                      type="number"
-                      value={customMin}
-                      onChange={(e) => setCustomMin(Number(e.target.value))}
+                      type="text"
+                      inputMode="numeric"
+                      value={scaleEditing === 'min' ? String(customMin) : formatMetricInput(metric, customMin)}
+                      onFocus={() => setScaleEditing('min')}
+                      onBlur={() => {
+                        setScaleEditing(null);
+                        // Keep the range valid without mangling mid-typing.
+                        if (customMin > customMax) setCustomMin(customMax);
+                      }}
+                      onChange={(e) => setCustomMin(parseMetricInput(e.target.value))}
                       className="w-full bg-white/5 border border-white/[0.06] rounded-lg px-2 py-1.5 text-sm text-white outline-none"
                     />
                   </div>
                   <div>
                     <span className="text-[10px] text-gray-500 uppercase block mb-1">Max</span>
                     <input
-                      type="number"
-                      value={customMax}
-                      onChange={(e) => setCustomMax(Number(e.target.value))}
+                      type="text"
+                      inputMode="numeric"
+                      value={scaleEditing === 'max' ? String(customMax) : formatMetricInput(metric, customMax)}
+                      onFocus={() => setScaleEditing('max')}
+                      onBlur={() => {
+                        setScaleEditing(null);
+                        if (customMax < customMin) setCustomMax(customMin);
+                      }}
+                      onChange={(e) => setCustomMax(parseMetricInput(e.target.value))}
                       className="w-full bg-white/5 border border-white/[0.06] rounded-lg px-2 py-1.5 text-sm text-white outline-none"
                     />
                   </div>

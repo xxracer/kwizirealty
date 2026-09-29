@@ -43,28 +43,26 @@ import {
 } from 'recharts';
 import type { MetricKey, BoundaryKey } from '@/lib/engine';
 
+/** Money in full with thousands separators — "$6,175,000". Raw integers and
+ *  K/M compaction both hide the magnitude the report is supposed to show. */
 function formatMoney(num: number): string {
   if (!num || !isFinite(num)) return '$0';
-  if (num >= 1e6) return '$' + (num / 1e6).toFixed(1) + 'M';
-  if (num >= 1e3) return '$' + (num / 1e3).toFixed(0) + 'K';
-  return '$' + num.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  return '$' + Math.round(num).toLocaleString('en-US');
 }
 
 function formatNumberCompact(num: number): string {
   if (!num || !isFinite(num)) return '0';
-  if (num >= 1e6) return (num / 1e6).toFixed(1) + 'M';
-  if (num >= 1e3) return (num / 1e3).toFixed(0) + 'K';
-  return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  return Math.round(num).toLocaleString('en-US');
 }
 
 function formatMetricValue(metric: MetricKey, value: number): string {
   if (!isFinite(value)) return '-';
-  if (metric === 'Days on Market' || metric === 'Rental Days On Market') return Math.round(value).toLocaleString() + ' d';
+  if (metric === 'Days on Market' || metric === 'Rental Days On Market') return Math.round(value).toLocaleString('en-US') + ' d';
   if (metric === 'List-to-Sale Ratio') return value.toFixed(1) + '%';
   if (metric === 'Appreciation Rate') return value.toFixed(2) + '%';
   if (metric === 'Investor Index') return value.toFixed(0);
   if (metric === 'Rent-to-Sale Ratio') return value.toFixed(3);
-  if (metric === 'Lot Size') return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (metric === 'Lot Size') return value.toLocaleString('en-US', { maximumFractionDigits: 0 });
   if (metric === 'Last Year Tax Rate') return value.toFixed(2) + '%';
   if (metric === 'Elem ETA Score' || metric === 'Middle ETA Score' || metric === 'High ETA Score') return value.toFixed(0);
   return formatMoney(value);

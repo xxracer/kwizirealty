@@ -249,6 +249,38 @@ mutation clearPendingProperties @auth(level: PUBLIC) {
   _execute(sql: "DELETE FROM properties WHERE upload_session_id IS NOT NULL")
 }
 
+# Tax CSVs land in their own listing_type='tax' bucket (they carry no price,
+# coordinates or boundaries, so no read op can serve them directly). This
+# mutation MERGES each property's latest tax record onto its sale rows so the
+# report panel (avg tax / coverage) and the 'Last Year Tax Rate' map metric
+# work off real data. Idempotent: sale rows with an existing tax value keep it
+# unless the incoming tax record is for a NEWER tax year. Called automatically
+# after every commit that touched the tax or sale buckets.
+mutation mergeTaxIntoSaleRows @auth(level: PUBLIC) {
+  _execute(sql: """
+    WITH tax_latest AS (
+      SELECT DISTINCT ON (mls_number)
+        mls_number, tax_amount, tax_rate, tax_year
+      FROM properties
+      WHERE upload_session_id IS NULL
+        AND listing_type = 'tax'
+        AND (COALESCE(tax_amount, 0) > 0 OR COALESCE(tax_rate, 0) > 0)
+      ORDER BY mls_number, COALESCE(tax_year, 0) DESC, updated_at DESC
+    )
+    UPDATE properties p
+    SET tax_amount = t.tax_amount,
+        tax_rate = t.tax_rate,
+        tax_year = t.tax_year
+    FROM tax_latest t
+    WHERE p.mls_number = t.mls_number
+      AND COALESCE(p.listing_type, '') IN ('', 'sale')
+      AND (
+        p.tax_amount IS NULL OR p.tax_amount <= 0
+        OR COALESCE(t.tax_year, 0) > COALESCE(p.tax_year, 0)
+      )
+  """, params: [])
+}
+
 mutation commitPendingSession($sessionId: String!) @auth(level: PUBLIC) {
   _execute(sql: "UPDATE properties SET upload_session_id = NULL WHERE upload_session_id = $1", params: [$sessionId])
 }
@@ -365,9 +397,9 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
       close_date_ts = EXCLUDED.close_date_ts,
       maint_fee = EXCLUDED.maint_fee,
       maint_fee_schedule = EXCLUDED.maint_fee_schedule,
-      tax_rate = EXCLUDED.tax_rate,
-      tax_year = EXCLUDED.tax_year,
-      tax_amount = EXCLUDED.tax_amount,
+      tax_rate = COALESCE(EXCLUDED.tax_rate, properties.tax_rate),
+      tax_year = COALESCE(EXCLUDED.tax_year, properties.tax_year),
+      tax_amount = COALESCE(EXCLUDED.tax_amount, properties.tax_amount),
       subdivisions = EXCLUDED.subdivisions,
       zipcodes = EXCLUDED.zipcodes,
       highschools = EXCLUDED.highschools,
@@ -452,6 +484,45 @@ query distinctValues @auth(level: PUBLIC) {
       array_agg(DISTINCT highschools) FILTER (WHERE highschools <> '' AND upload_session_id IS NULL) AS highschools
     FROM properties
     WHERE upload_session_id IS NULL
+    """,
+    params: []
+  )
+}
+
+# Diagnostic (read-only): committed row counts by listing_type bucket and by
+# dataset_year, so the admin scripts can audit the table mix.
+# Data Connect only supports ONE _select per query op (a multi-_select op
+# fails at runtime with "Invalid SQL statement"), so the mix probe is three
+# separate ops.
+query rowMixByType @auth(level: PUBLIC) {
+  rows: _select(
+    sql: """
+    SELECT COALESCE(listing_type, '(null)') AS t, count(*) AS n
+    FROM properties WHERE upload_session_id IS NULL GROUP BY 1 ORDER BY 2 DESC
+    """,
+    params: []
+  )
+}
+
+query rowMixByYear @auth(level: PUBLIC) {
+  rows: _select(
+    sql: """
+    SELECT dataset_year AS y, count(*) AS n
+    FROM properties WHERE upload_session_id IS NULL GROUP BY 1 ORDER BY 1 DESC LIMIT 30
+    """,
+    params: []
+  )
+}
+
+query rowMixSaleMix @auth(level: PUBLIC) {
+  rows: _select(
+    sql: """
+    SELECT dataset_year AS y,
+           CASE WHEN close_date_ts > 0 THEN 'dated' ELSE 'undated' END AS d,
+           count(*) AS n
+    FROM properties
+    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') = 'sale'
+    GROUP BY 1, 2 ORDER BY 1 DESC LIMIT 40
     """,
     params: []
   )
