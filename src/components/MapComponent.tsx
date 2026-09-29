@@ -1969,33 +1969,10 @@ export default function MapComponent({
         )}
       </div>
 
-      {/* Map legend — client-approved reference style: floating white card
-          with a large bold metric title, the Spectral gradient and plain
-          (no-$) numbers under each end of the scale. */}
-      {colorStops && colorStops.length >= 2 && (
-        <div className="absolute bottom-4 right-4 z-[1000] bg-white rounded-2xl px-6 py-4 shadow-[0_8px_30px_rgba(0,0,0,0.22)] pointer-events-none min-w-[260px] sm:min-w-[360px]">
-          <div className="text-lg sm:text-xl font-extrabold text-gray-900 mb-2.5">{metricLabel}</div>
-          <div
-            className="h-3.5 w-full rounded-full"
-            style={{
-              background: `linear-gradient(to right, ${colorStops.map((s) => s[1]).join(', ')})`,
-            }}
-          />
-          <div className="flex items-center justify-between text-sm sm:text-base font-bold text-gray-900 mt-1.5 tabular-nums">
-            <span>{plainLegendValue(metric, colorStops[0][0])}</span>
-            <span>{plainLegendValue(metric, colorStops[colorStops.length - 1][0])}</span>
-          </div>
-        </div>
-      )}
+      {/* Floating map legend removed at the owner's request (2026-09-29):
+          the Scale Range panel in the sidebar remains the only legend. */}
     </div>
   );
-}
-
-/** Legend end labels: same formatting as the scale, minus the "$" — the
- *  client's reference card shows plain numbers ("72,500", not "$72,500"). */
-function plainLegendValue(metric: MetricKey | undefined, v: number): string {
-  const s = formatMetricValue(metric as MetricKey, v);
-  return s.startsWith('$') ? s.slice(1) : s;
 }
 
 function formatLegendValue(v: number): string {
