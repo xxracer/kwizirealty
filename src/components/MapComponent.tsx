@@ -1969,26 +1969,33 @@ export default function MapComponent({
         )}
       </div>
 
-      {/* Map legend — mirrors the sidebar palette so the colors on the map
-          always match the gradient in the sidebar. */}
+      {/* Map legend — client-approved reference style: floating white card
+          with a large bold metric title, the Spectral gradient and plain
+          (no-$) numbers under each end of the scale. */}
       {colorStops && colorStops.length >= 2 && (
-        <div className="absolute bottom-3 left-3 z-[400] bg-[#121620]/85 backdrop-blur border border-white/[0.08] rounded-lg px-2 py-1.5 sm:px-3 sm:py-2 shadow-lg pointer-events-none max-w-[170px] sm:max-w-[260px]">
-          <div className="text-[9px] uppercase font-bold text-gray-400 mb-1 tracking-wider">{metricLabel}</div>
+        <div className="absolute bottom-4 right-4 z-[1000] bg-white rounded-2xl px-6 py-4 shadow-[0_8px_30px_rgba(0,0,0,0.22)] pointer-events-none min-w-[260px] sm:min-w-[360px]">
+          <div className="text-lg sm:text-xl font-extrabold text-gray-900 mb-2.5">{metricLabel}</div>
           <div
-            className="h-2 w-full rounded-full"
+            className="h-3.5 w-full rounded-full"
             style={{
               background: `linear-gradient(to right, ${colorStops.map((s) => s[1]).join(', ')})`,
             }}
           />
-          <div className="flex items-center justify-between text-[10px] font-semibold text-gray-200 mt-1 tabular-nums">
-            <span>{formatMetricValue(metric, colorStops[0][0])}</span>
-            <span className="text-gray-500">·</span>
-            <span>{formatMetricValue(metric, colorStops[colorStops.length - 1][0])}</span>
+          <div className="flex items-center justify-between text-sm sm:text-base font-bold text-gray-900 mt-1.5 tabular-nums">
+            <span>{plainLegendValue(metric, colorStops[0][0])}</span>
+            <span>{plainLegendValue(metric, colorStops[colorStops.length - 1][0])}</span>
           </div>
         </div>
       )}
     </div>
   );
+}
+
+/** Legend end labels: same formatting as the scale, minus the "$" — the
+ *  client's reference card shows plain numbers ("72,500", not "$72,500"). */
+function plainLegendValue(metric: MetricKey | undefined, v: number): string {
+  const s = formatMetricValue(metric as MetricKey, v);
+  return s.startsWith('$') ? s.slice(1) : s;
 }
 
 function formatLegendValue(v: number): string {

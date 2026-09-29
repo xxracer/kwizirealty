@@ -104,8 +104,21 @@ const PERIODS: { key: PropertyFilters['period']; label: string }[] = [
   { key: '5y', label: '5 years' },
 ];
 
-// Owner-requested scale: white → yellow → orange → red → wine (vinotinto).
-const FIXED_PALETTE = ['#ffffff', '#facc15', '#f97316', '#e11d1d', '#800020'];
+// Owner's client picked the Spectral scale (reference legend photo):
+// dark indigo → blue → teal → green → pale green → yellow → orange → red →
+// dark maroon. Replaces the previous white→yellow→orange→red→wine ramp.
+const FIXED_PALETTE = [
+  '#5e4fa2',
+  '#3288bd',
+  '#66c2a5',
+  '#abdda4',
+  '#e6f598',
+  '#fee08b',
+  '#fdae61',
+  '#f46d43',
+  '#d53e4f',
+  '#9e0142',
+];
 
 // File names that already map to a fixed metric boundary layer (mirrors
 // BOUNDARY_SOURCES in MapComponent — duplicated here because that module is
@@ -1125,9 +1138,9 @@ function MapPageInner() {
   }, [effectiveMetricValues, autoScale, scaleFullRange]);
 
   const colorStops = useMemo(() => {
-    // Owner spec: with Auto scale ON every area that has data paints the same
-    // blue (the pre-data fallback color) — the white/yellow/orange/red/wine
-    // palette only applies when Auto scale is OFF and the Min/Max are manual.
+    // Owner rule: Auto scale ON → every area with data paints the same blue
+    // (the scale is "not applied" yet); turning Auto scale OFF applies the
+    // Spectral ramp (the client's reference photo) over the manual Min/Max.
     if (autoScale) {
       const vals = Object.values(effectiveMetricValues).filter(
         (v) =>
@@ -1149,8 +1162,8 @@ function MapPageInner() {
       effectiveMetricValues,
       metric,
       reversePalette,
-      autoScale ? undefined : customMin,
-      autoScale ? undefined : customMax
+      customMin,
+      customMax
     );
   }, [effectiveMetricValues, metric, reversePalette, autoScale, customMin, customMax]);
 
