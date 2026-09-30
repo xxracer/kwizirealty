@@ -37,6 +37,7 @@ import { AdminAds } from '@/components/admin/AdminAds';
 import { AdminUsers } from '@/components/admin/AdminUsers';
 import { RequireAdmin } from '@/components/RequireAuth';
 import DatasetRebuildBanner from '@/components/admin/DatasetRebuildBanner';
+import { watchFreshDeployments } from '@/lib/cacheBuster';
 import {
   Upload,
   FileSpreadsheet,
@@ -1028,6 +1029,14 @@ function AdminPageInner() {
       clearInterval(interval);
     };
   }, [loadData, loadSqlStatus]);
+
+  // Deployment watchdog (env-free) — a browser parked on /admin must never
+  // keep running an OLD bundle after a new deploy: that is exactly how stale
+  // tabs kept sending uploads without the API-key credential and failed with
+  // "invalid authentication credentials" even after the fix was live.
+  useEffect(() => {
+    return watchFreshDeployments();
+  }, []);
 
   // Self-healing: when the admin opens, verify the published dataset actually
   // matches the CSVs currently in the CMS and rebuild automatically if they

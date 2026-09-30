@@ -102,6 +102,87 @@ export async function clearAppDataCaches(): Promise<void> {
   await unregisterServiceWorkers();
 }
 
+/* ── Env-free deployment watchdog ──────────────────────────────────────────
+ * The deployment-id watchdog in map/page.tsx relies on
+ * NEXT_PUBLIC_VERCEL_DEPLOYMENT_ID, which this Vercel project does NOT have
+ * set — `enforceFreshBuild` is inert too (no NEXT_PUBLIC_APP_VERSION either).
+ * Result: a tab parked on /admin kept running its old bundle forever and
+ * repeatedly failed uploads with "invalid authentication credentials" even
+ * after the fix was deployed.
+ *
+ * This watcher needs NO build-time env: every deploy changes the content-
+ * hashed chunk filenames. A stale tab's loaded scripts reference only OLD
+ * chunk names; the fresh HTML of the same route references the CURRENT ones.
+ * Any chunk name in the fresh HTML that this tab hasn't loaded = new deploy
+ * → hard reload (once per deploy, guarded by sessionStorage).
+ * ────────────────────────────────────────────────────────────────────────── */
+
+function chunkNamesFrom(text: string): string[] {
+  const names: string[] = [];
+  const re = /\/_next\/static\/chunks\/([^"'?#\s]+\.js)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) names.push(m[1]);
+  return names;
+}
+
+function collectLoadedChunkNames(): Set<string> {
+  const names = new Set<string>();
+  try {
+    for (const script of Array.from(document.scripts)) {
+      const src = (script as HTMLScriptElement).src || '';
+      const m = src.match(/\/_next\/static\/chunks\/([^"'?#\s]+\.js)$/);
+      if (m) names.add(m[1]);
+    }
+  } catch {
+    // ignore
+  }
+  return names;
+}
+
+function hashString(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return String(h);
+}
+
+/** Periodically compare this tab's loaded chunks against the fresh HTML of the
+ *  same route; reload once when a new deployment ships chunks this tab has
+ *  never heard of. Returns a React cleanup function. */
+export function watchFreshDeployments(): () => void {
+  if (typeof window === 'undefined') return () => {};
+  let stopped = false;
+  let checking = false;
+  const check = async () => {
+    if (stopped || checking || document.visibilityState !== 'visible') return;
+    checking = true;
+    try {
+      // Dynamic imports keep adding scripts after mount — resnapshot each tick.
+      const loaded = collectLoadedChunkNames();
+      if (!loaded.size) return;
+      const res = await fetch(window.location.pathname, { cache: 'no-store' });
+      if (!res.ok) return;
+      const fresh = chunkNamesFrom(await res.text());
+      const novelty = fresh.find((n) => !loaded.has(n));
+      if (!novelty) return;
+      const key = 'kwizi:reloaded-build';
+      const marker = hashString(fresh.join('|'));
+      if (sessionStorage.getItem(key) === marker) return;
+      sessionStorage.setItem(key, marker);
+      window.location.reload();
+    } catch {
+      /* network hiccup — the next tick retries */
+    } finally {
+      checking = false;
+    }
+  };
+  check();
+  const id = setInterval(check, 60000);
+  return () => {
+    stopped = true;
+    clearInterval(id);
+  };
+}
+
 /**
  * Call once at app boot (before any heavy work). If the deployed build version
  * differs from what this browser last ran, clear caches and reload. Returns true

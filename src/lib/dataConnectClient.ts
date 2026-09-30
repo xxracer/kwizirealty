@@ -45,14 +45,22 @@ async function getIdToken(): Promise<string | null> {
   // staging ops are @auth(level: PUBLIC), so a signed-in user is optional. When
   // a session exists we still attach its token — the day auth is switched back
   // on these ops go to USER again and this code keeps working unchanged.
-  await auth.authStateReady();
-  const user = auth.currentUser;
-  if (!user) {
-    console.log('[dataConnect] no signed-in user — calling PUBLIC ops anonymously');
+  // A session whose stored credential no longer refreshes (e.g. a leftover
+  // login from before the auth-flow changes) must NOT break uploads: it falls
+  // back to the anonymous API-key path instead of throwing.
+  try {
+    await auth.authStateReady();
+    const user = auth.currentUser;
+    if (!user) {
+      console.log('[dataConnect] no signed-in user — calling PUBLIC ops anonymously');
+      return null;
+    }
+    console.log('[dataConnect] auth ok:', user.email);
+    return user.getIdToken(true);
+  } catch (err) {
+    console.warn('[dataConnect] session token unavailable — falling back to API key:', (err as Error)?.message);
     return null;
   }
-  console.log('[dataConnect] auth ok:', user.email);
-  return user.getIdToken(true);
 }
 
 async function dataConnectFetch<T>(
@@ -69,21 +77,42 @@ async function dataConnectFetch<T>(
   // URL, not the body. Variables use the protobuf Struct JSON mapping.
   const body = { operationName, variables: payload };
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  } else if (apiKey) {
-    // Anonymous request to a @auth(level: PUBLIC) op: sign it with the web API
-    // key — same credential the Firebase JS SDK attaches. No key = Google's
-    // "invalid authentication credentials" rejection.
-    headers['x-goog-api-key'] = apiKey;
-  }
+  const send = async (credential: 'token' | 'apiKey'): Promise<Response> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (credential === 'token' && token) {
+      headers.Authorization = `Bearer ${token}`;
+    } else {
+      // Anonymous request to a @auth(level: PUBLIC) op: sign it with the web API
+      // key — same credential the Firebase JS SDK attaches. No key = Google's
+      // "invalid authentication credentials" rejection.
+      headers['x-goog-api-key'] = apiKey;
+    }
+    return fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
+  let res = await send(token ? 'token' : 'apiKey');
+
+  // A stored session Google no longer accepts (stale login from before the
+  // auth-flow changes) is rejected exactly like NO credential at all. Retry
+  // once with the API key — the browser-facing ops are @auth(level: PUBLIC),
+  // so the anonymous retry is always valid.
+  if (!res.ok && token) {
+    let detailMessage = '';
+    try {
+      const detail: any = await res.json();
+      detailMessage = String(detail?.error?.message ?? detail ?? '');
+    } catch {
+      // fall through with an empty message
+    }
+    const retriable =
+      res.status === 401 ||
+      res.status === 403 ||
+      /invalid authentication credentials/i.test(detailMessage);
+    if (retriable) {
+      console.warn('[dataConnect] stored session rejected — retrying anonymously with the API key');
+      res = await send('apiKey');
+    }
+  }
 
   if (!res.ok) {
     let detail: any;

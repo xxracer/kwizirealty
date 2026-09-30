@@ -12,7 +12,7 @@ import HommieChat from '@/components/HommieChat';
 import { RequireAuth } from '@/components/RequireAuth';
 import { useAuth } from '@/lib/authContext';
 import { purgeDatasetCache, readGeoCache, writeGeoCache } from '@/lib/csvCache';
-import { enforceFreshBuild } from '@/lib/cacheBuster';
+import { enforceFreshBuild, watchFreshDeployments } from '@/lib/cacheBuster';
 import {
   PropertyData,
   BoundaryKey,
@@ -899,6 +899,14 @@ function MapPageInner() {
       document.removeEventListener('visibilitychange', onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Env-free deployment watchdog — the deployment-id watchdog above depends on
+  // NEXT_PUBLIC_VERCEL_DEPLOYMENT_ID, which is not set on this project (it is
+  // inert in production). This one detects a newer deploy by comparing this
+  // tab's loaded chunk names against the fresh HTML's chunk list instead.
+  useEffect(() => {
+    return watchFreshDeployments();
   }, []);
 
   // The full filter pipeline (filterProperties + all aggregations + map
