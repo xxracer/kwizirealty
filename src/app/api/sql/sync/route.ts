@@ -23,9 +23,9 @@
  */
 import zlib from 'zlib';
 import { NextResponse } from 'next/server';
-import { getAdminAuth, getAdminDataConnect } from '@/lib/firebaseAdmin';
+import { getAdminAuth, getAdminDataConnect, getAdminFirestore } from '@/lib/firebaseAdmin';
 import { guardPublicRead } from '@/lib/server/requestGuard';
-import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { FieldValue } from 'firebase-admin/firestore';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -157,7 +157,12 @@ export async function POST(req: Request) {
     }
   }
 
-  const db = getFirestore();
+  // getFirestore() with no app throws app/no-app ("The default Firebase app
+  // does not exist") on a fresh serverless instance where nothing else has
+  // initialized the admin app yet — this route previously hit exactly that
+  // 500 once the SQL sync doc flipped to directImport mode (the early return
+  // below meant getAdminDataConnect()/getAdminAuth() never ran first).
+  const db = getAdminFirestore();
   const stateRef = db.collection(STATE_DOC.collection).doc(STATE_DOC.id);
 
   // 1. Manifest = the single source of truth for what SQL must contain.
