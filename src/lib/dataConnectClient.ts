@@ -28,6 +28,14 @@ const projectId =
 
 const CLIENT_BATCH = 500;
 
+/** Web API key of the project — what makes an unsigned (anonymous) request a
+ *  valid one, exactly like the Firebase JS SDK does. Without it Google rejects
+ *  the call with "Expected OAuth 2 access token, login cookie or other valid
+ *  authentication credential" (seen when a fresh browser with no signed-in
+ *  session tries to upload). */
+const apiKey =
+  app.options.apiKey || process.env.NEXT_PUBLIC_FIREBASE_API_KEY || '';
+
 function connectorName(): string {
   return `projects/${projectId}/locations/${connectorConfig.location}/services/${connectorConfig.service}/connectors/${connectorConfig.connector}`;
 }
@@ -62,7 +70,14 @@ async function dataConnectFetch<T>(
   const body = { operationName, variables: payload };
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  } else if (apiKey) {
+    // Anonymous request to a @auth(level: PUBLIC) op: sign it with the web API
+    // key — same credential the Firebase JS SDK attaches. No key = Google's
+    // "invalid authentication credentials" rejection.
+    headers['x-goog-api-key'] = apiKey;
+  }
 
   const res = await fetch(url, {
     method: 'POST',
