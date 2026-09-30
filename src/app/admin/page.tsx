@@ -1592,7 +1592,10 @@ function AdminPageInner() {
           s.id === id ? { ...s, importProgress: { ...s.importProgress!, status: 'error', error: message } } : s
         )
       );
-      setToast({ type: 'error', message: `${stagedFiles.find((s) => s.id === id)?.record.name}: ${message}` });
+      // Look up may miss if the staged list moved mid-flow — never print a
+      // bare "undefined:" prefix to the user.
+      const failedName = stagedFiles.find((s) => s.id === id)?.record.name || 'Uploaded file';
+      setToast({ type: 'error', message: `${failedName}: ${message}` });
     }
   };
 
