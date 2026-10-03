@@ -22,19 +22,90 @@ function getBuildVersion(): string {
   return process.env.NEXT_PUBLIC_APP_VERSION || process.env.NEXT_PUBLIC_GIT_SHA || 'unknown';
 }
 
-/** Clear every IndexedDB database the app uses. */
+/** Wipe the app's IndexedDB data. THE OLD WAY (plain deleteDatabase) was the
+ *  bug behind the "Clear cache & reload" button doing nothing: csvCache keeps
+ *  connections open for the page lifetime, an open connection BLOCKS
+ *  deleteDatabase, onblocked returned immediately and the page reloaded before
+ *  the deletion could happen.
+ *  Now: (1) close the app's own connections, (2) clear every OBJECT STORE of
+ *  each database via a readwrite transaction — clearing stores cannot be
+ *  blocked by other connections, unlike deleting the database — and only then
+ *  (3) best-effort deleteDatabase (harmless when it succeeds, no-op when
+ *  blocked). Firebase Auth's firebaseLocalStorageDb is intentionally NOT
+ *  touched — clearing stores there would sign the user out. */
 async function clearIndexedDbs(): Promise<void> {
   if (typeof indexedDB === 'undefined') return;
-  const databases = ['kwizi-cache-v2', 'kwizi-csv-cache-v1'];
-  for (const name of databases) {
+  try {
+    const { closeAllCacheConnections } = await import('@/lib/csvCache');
+    closeAllCacheConnections();
+  } catch {
+    // cache module unavailable — proceed with the store wipe anyway
+  }
+  const APP_DATA_DBS = ['kwizi-cache-v2', 'kwizi-csv-cache-v1'];
+  const idb = indexedDB as unknown as { databases?: () => Promise<{ name?: string; version?: number }[]> };
+  const existing = new Set<string>();
+  if (typeof idb.databases === 'function') {
     try {
-      await new Promise<void>((resolve) => {
-        const req = indexedDB.deleteDatabase(name);
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
-        req.onblocked = () => resolve();
-        setTimeout(resolve, 1000);
-      });
+      for (const entry of await idb.databases()) {
+        if (entry?.name) existing.add(entry.name);
+      }
+    } catch {
+      // enumeration unsupported/failing — the delete-path below still tries
+    }
+  }
+  for (const name of APP_DATA_DBS) {
+    if (existing.size > 0 && !existing.has(name)) continue; // never created — nothing to wipe
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      try {
+        // `open(name)` with NO version never triggers an upgrade — it cannot
+        // create a store-less skeleton that would break the cache module later.
+        const openReq = indexedDB.open(name);
+        openReq.onupgradeneeded = () => {}; // database never existed — nothing to clear
+        openReq.onerror = done;
+        openReq.onsuccess = () => {
+          const db = openReq.result;
+          try {
+            const stores = Array.from(db.objectStoreNames);
+            const tx = stores.length ? db.transaction(stores, 'readwrite') : null;
+            if (tx) {
+              for (const store of stores) tx.objectStore(store).clear();
+              tx.oncomplete = () => {
+                db.close();
+                done();
+              };
+              tx.onerror = () => {
+                db.close();
+                done();
+              };
+            } else {
+              db.close();
+              done();
+            }
+          } catch {
+            try {
+              db.close();
+            } catch {
+              // ignore
+            }
+            done();
+          }
+        };
+      } catch {
+        done();
+      }
+      setTimeout(done, 3000); // never hang the button
+    });
+    // Best-effort removal of the now-empty database (a parallel tab holding it
+    // open only blocks THIS delete — the stores are already wiped either way).
+    try {
+      indexedDB.deleteDatabase(name);
     } catch {
       // ignore
     }

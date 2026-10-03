@@ -249,6 +249,10 @@ interface StagedFile {
   csvSkipped?: { row: number; reason: string }[];
   /** For SQL-bound property CSVs: warning shown when some MLS numbers already exist in the live DB. */
   duplicateWarning?: { count: number; sampleMlsNumbers: string[]; status: 'pending' | 'confirmed' };
+  /** Zip codes of this file split by whether the row's MLS already existed in
+   *  the live database — powers the "Actualizado/Nuevo" locality list in the
+   *  upload report card. */
+  zipUpdate?: { updated: { name: string; count: number }[]; added: { name: string; count: number }[] };
 }
 
 /** Confirmation modal shown before committing all staged files. */
@@ -665,6 +669,176 @@ function categorySectionName(category: CMSFileCategory): string {
   }
 }
 
+/** ── "What did you actually upload?" report ────────────────────────────────
+ *  The plain staging toasts scroll away and never say WHICH data changed.
+ *  After every upload batch this popup summarizes, per file: what kind of
+ *  data it is, the dataset year, how many rows went in vs. were skipped, and
+ *  the zip codes / cities the file covers — in plain English. */
+interface UploadedFileReport {
+  /** File name — shown ONLY in the expanded "visualizar" detail, not the row. */
+  fileName: string;
+  /** Data kind only (Sales Data / Tax Records / …) — the row header. */
+  categoryLabel: string;
+  datasetYear: number | null;
+  rowsStaged: number;
+  rowsSkipped: number;
+  error?: string;
+  /** Rows whose MLS numbers already existed in the live SQL database. */
+  alreadyInDb: number;
+  /** Zips that UPDATE existing rows (their MLS was already in the database). */
+  updated: { name: string; count: number }[];
+  /** Zips that add NEW rows (MLS numbers not seen before). */
+  added: { name: string; count: number }[];
+  /** Coverage when the new/updated split is unknown (engine not loaded). */
+  fallbackZips: { name: string; count: number }[];
+  /** GeoJSON upload — rowsStaged counts FEATURES (new areas), not CSV rows. */
+  isGeo?: boolean;
+  /** One-sentence explanation of what this upload changes on the map. */
+  effect: string;
+}
+
+function effectSentenceFor(category: CMSFileCategory, year: number | null): string {
+  const yearPart = year ? ` (year ${year})` : '';
+  switch (category) {
+    case 'tax':
+      return 'Tax records: the tax amount/rate/year are attached to the sale and current-listings rows that share the same MLS number. Nothing is deleted — re-uploading just refreshes the values.';
+    case 'sales':
+      return `Sold-property records${yearPart}, keyed by MLS number + year. Re-uploading the same file is safe — it UPDATES the existing rows instead of duplicating them.`;
+    case 'rent':
+      return `Rental records${yearPart}, keyed by MLS number + year. Re-uploading is safe — existing rows are updated in place.`;
+    case 'current-sale':
+    case 'current-rent':
+      return 'Active for-sale/for-rent listings, keyed by MLS number + year. Old records keep their own year entry — history is never deleted.';
+    case 'boundary':
+    case 'custom-area':
+      return 'GeoJSON areas: new features are drawn on the map; areas with the same name are updated.';
+    default:
+      return 'Rows are keyed by MLS number + year.';
+  }
+}
+
+/** Zip-code / city coverage from the file's own rows. Column names vary per
+ *  export (sales CSVs use "Zip"/"City/Location"; CoreLogic tax CSVs use
+ *  "Postal Code"/"City Name") so match loosely. */
+function coverageCounts(rows: Record<string, string>[], headerRe: RegExp, excludeRe: RegExp): { name: string; count: number }[] {
+  const header = (Object.keys(rows[0] ?? {}) || []).find((h) => headerRe.test(h) && !excludeRe.test(h));
+  if (!header) return [];
+  // NOTE: this file shadows the global `Map` with a react-icons component —
+  // count with a plain object instead.
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const raw = String(row[header] ?? '').trim();
+    if (!raw || raw === '0') continue;
+    const name = raw.length > 28 ? `${raw.slice(0, 25)}…` : raw;
+    counts[name] = (counts[name] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/** Classify a CSV's rows against the currently loaded engine MLS set: which
+ *  zip codes the rows UPDATE (MLS already in the database) and which are NEW.
+ *  Shared by the "what you're uploading" card and the per-document preview
+ *  panel so a saved file's Eye shows the same numbers the upload card did.
+ *  When the engine isn't loaded, falls back to plain zip coverage counts. */
+function computeZipEffect(rows: Record<string, string>[]): {
+  updated: { name: string; count: number }[];
+  added: { name: string; count: number }[];
+  fallback: { name: string; count: number }[];
+  classified: boolean;
+  existingCount: number;
+  sampleMlsNumbers: string[];
+} {
+  const headers = Object.keys(rows[0] ?? {});
+  const zipHeader = headers.find((h) => /zip|postal/i.test(h) && !/zipcodes/i.test(h));
+  const mlsHeader = findMlsColumn(headers);
+  const eng = getEngine();
+  const zipUpdatedCounts: Record<string, number> = {};
+  const zipAddedCounts: Record<string, number> = {};
+  let existingCount = 0;
+  const sampleMlsNumbers: string[] = [];
+  let classified = false;
+  if (mlsHeader && eng.isLoaded) {
+    classified = true;
+    const engineMlsSet = new Set(eng.data.map((d) => d.mlsNumber));
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const raw = String(row[mlsHeader] ?? '').trim();
+      if (!raw || seen.has(raw)) continue;
+      seen.add(raw);
+      const zipRaw = zipHeader ? String(row[zipHeader] ?? '').trim().slice(0, 28) : '';
+      if (engineMlsSet.has(raw)) {
+        existingCount++;
+        if (sampleMlsNumbers.length < 5) sampleMlsNumbers.push(raw);
+      }
+      if (!zipRaw || zipRaw === '0') continue;
+      const bucket = engineMlsSet.has(raw) ? zipUpdatedCounts : zipAddedCounts;
+      bucket[zipRaw] = (bucket[zipRaw] || 0) + 1;
+    }
+  }
+  const toCountList = (counts: Record<string, number>) =>
+    Object.entries(counts)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 40);
+  return {
+    updated: toCountList(zipUpdatedCounts),
+    added: toCountList(zipAddedCounts),
+    fallback: classified ? [] : coverageCounts(rows, /zip|postal/i, /zipcodes/).slice(0, 12),
+    classified,
+    existingCount,
+    sampleMlsNumbers,
+  };
+}
+
+function buildUploadReportFor(staged: StagedFile): UploadedFileReport {
+  // GeoJSON (Area Metrics / Boundaries): the "rows" ARE the localities —
+  // duplicates were already on the map ("updated"), newNames are brand new.
+  if (staged.geoJson) {
+    return {
+      fileName: staged.record.name,
+      categoryLabel: categorySectionName(staged.record.category),
+      datasetYear: null,
+      rowsStaged: staged.stats.new,
+      rowsSkipped: staged.stats.duplicate,
+      alreadyInDb: staged.stats.duplicate,
+      updated: (staged.duplicateNames || []).slice(0, 40).map((name) => ({ name, count: 1 })),
+      added: (staged.newNames || []).slice(0, 40).map((name) => ({ name, count: 1 })),
+      fallbackZips: [],
+      isGeo: true,
+      effect:
+        staged.stats.duplicate > 0
+          ? `${staged.stats.new} new area(s) · ${staged.stats.duplicate} already on the map (updated in place)`
+          : `${staged.stats.new} new areas drawn on the map`,
+    };
+  }
+  const rows = staged.record.rows;
+  const progress = staged.importProgress;
+  const stagedRows = progress?.total ?? rows.length;
+  const status = progress?.status;
+  const updated = staged.zipUpdate?.updated ?? [];
+  const added = staged.zipUpdate?.added ?? [];
+  return {
+    fileName: staged.record.name,
+    categoryLabel: categorySectionName(staged.record.category),
+    datasetYear: staged.record.year ?? null,
+    rowsStaged: status === 'done' ? stagedRows : 0,
+    rowsSkipped: Math.max(0, staged.stats.total - stagedRows),
+    error: status === 'error' ? progress?.error : undefined,
+    alreadyInDb: staged.duplicateWarning?.count ?? 0,
+    updated,
+    added,
+    // When the engine could not classify (not loaded / no MLS column), show
+    // plain coverage so the user still sees which localities the file touches.
+    fallbackZips:
+      updated.length || added.length
+        ? []
+        : coverageCounts(rows, /zip|postal/i, /zipcodes/).slice(0, 12),
+    effect: effectSentenceFor(staged.record.category, staged.record.year ?? null),
+  };
+}
+
 /** Section each property-like category belongs to — used to point the user at
  *  the right place when a file is dropped on a different section. */
 const CATEGORY_TARGET_SECTION: Partial<Record<CMSFileCategory, Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>>> = {
@@ -872,6 +1046,10 @@ function AdminPageInner() {
     staged: number;
     skipped: number;
     reasons: Record<string, number>;
+    /** Per-file English messages explaining WHY each file was skipped — a
+     *  GeoJSON in a data section points the user to the right section, any
+     *  other non-CSV document says it cannot be uploaded. */
+    skippedFiles: { name: string; message: string }[];
   } | null>(null);
   /** Files whose detected data type doesn't match the section they were
    *  dropped on — the big centered popup explains and offers one-click fixes. */
@@ -880,6 +1058,11 @@ function AdminPageInner() {
   >([]);
   /** Section the misfit popup is glowing on the sidebar/dashboard card. */
   const [highlightSection, setHighlightSection] = useState<AdminSection | null>(null);
+  /** "What did you actually upload?" popup — per-file breakdown shown right
+   *  after the staging job finishes (see UploadedFileReport). */
+  const [uploadReport, setUploadReport] = useState<UploadedFileReport[] | null>(null);
+  /** Rows of the report card whose detail ("visualizar") is expanded. */
+  const [reportExpanded, setReportExpanded] = useState<Set<number>>(new Set());
 
   const [confirmAll, setConfirmAll] = useState<ConfirmAllState>({
     open: false,
@@ -962,6 +1145,7 @@ function AdminPageInner() {
   }, []);
 
   const handleHardReload = async () => {
+    setToast({ type: 'success', message: 'Cache cleared — reloading the dashboard…' });
     try {
       // Only the app's DATA caches. The guided-tour marker, the cookie-consent
       // answer, closed ads and the Firebase Auth session all survive, so the
@@ -971,6 +1155,9 @@ function AdminPageInner() {
     } catch {
       // ignore cleanup errors — the reload below still busts the HTTP cache
     }
+    // Give the IndexedDB wipe a beat to finish before the unload — the old
+    // version navigated instantly and the deletion never landed.
+    await new Promise((r) => setTimeout(r, 400));
     const url = new URL(window.location.href);
     url.searchParams.set('_cb', Date.now().toString());
     window.location.href = url.toString();
@@ -1168,6 +1355,9 @@ function AdminPageInner() {
 
     let skippedCount = 0;
     let skippedReasons: Record<string, number> = {};
+    /** One English message per skipped file — rendered in the upload summary
+     *  box so the user knows exactly why (wrong section vs. not a CSV). */
+    const skippedFileMessages: { name: string; message: string }[] = [];
     const misfitFiles: { file: File; relativePath: string; category: CMSFileCategory; evidence: string }[] = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -1177,6 +1367,32 @@ function AdminPageInner() {
         skippedCount++;
         skippedReasons['wrong-extension'] = (skippedReasons['wrong-extension'] || 0) + 1;
         console.log(`[handleFiles] skipping ${file.name}: extension ${ext} not in`, acceptedExt);
+        // Say WHY in the summary, per the owner: (1) a geolocation file or a
+        // CSV of another data type dropped here → "it doesn't go in this
+        // section, please place it where it goes"; (2) any other document →
+        // "can't upload it because it is not a CSV".
+        const lowerName = file.name.toLowerCase();
+        const displayName = (file as any).webkitRelativePath || file.name;
+        const sectionTitle = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG]?.title;
+        const isGeoSection = section === 'boundaries' || section === 'areas';
+        if (lowerName.endsWith('.geojson') || lowerName.endsWith('.json')) {
+          // GeoJSON can only land here in a data section (geo sections accept
+          // it) — point the user back to Boundaries/Area Metrics.
+          skippedFileMessages.push({
+            name: displayName,
+            message: `"${displayName}" is a geolocation (GeoJSON) file — I'm skipping it because it does not go in ${sectionTitle}. Please place it where it goes: Boundaries.`,
+          });
+        } else if (isGeoSection) {
+          skippedFileMessages.push({
+            name: displayName,
+            message: `"${displayName}" is not a GeoJSON file — I'm skipping it because ${sectionTitle} only accepts geolocation (GeoJSON) files (they feed the map's polygons). Please place it where it goes.`,
+          });
+        } else {
+          skippedFileMessages.push({
+            name: displayName,
+            message: `"${displayName}" — I can't upload it because it is not a CSV.`,
+          });
+        }
         continue;
       }
 
@@ -1379,6 +1595,10 @@ function AdminPageInner() {
           misfitFiles.push({ file, relativePath, category, evidence: describeCategoryEvidence(sniff, category) });
           skippedCount++;
           skippedReasons['wrong-section'] = (skippedReasons['wrong-section'] || 0) + 1;
+          skippedFileMessages.push({
+            name: relativePath,
+            message: `"${relativePath}" is ${categorySectionName(category)} — I'm skipping it because it does not go in this section. Please place it where it goes: ${categorySectionName(category)}.`,
+          });
           console.log(`[handleFiles] misfit ${relativePath}: detected category=${category}, current section=${section}`);
           continue;
         }
@@ -1440,23 +1660,14 @@ function AdminPageInner() {
           const sessionId = `${id}_${Date.now()}`;
           staged.sessionId = sessionId;
 
-          const mlsColumn = findMlsColumn(parsed.meta.fields || []);
-          const eng = getEngine();
-          let existingCount = 0;
-          const sampleMlsNumbers: string[] = [];
-          if (mlsColumn && eng.isLoaded) {
-            const engineMlsSet = new Set(eng.data.map((d) => d.mlsNumber));
-            const seen = new Set<string>();
-            for (const row of parsed.data) {
-              const raw = row[mlsColumn]?.trim();
-              if (!raw || seen.has(raw)) continue;
-              seen.add(raw);
-              if (engineMlsSet.has(raw)) {
-                if (sampleMlsNumbers.length < 5) sampleMlsNumbers.push(raw);
-                existingCount++;
-              }
-            }
-          }
+          // Zip codes bucketed by whether the row's MLS already lives in the
+          // database ("updated") or not ("added") — the upload report card
+          // lists them as "Updated: …" / "New: …". Shared with the preview
+          // panel so a saved document's Eye reports the same numbers.
+          const zipEffect = computeZipEffect(parsed.data);
+          const existingCount = zipEffect.existingCount;
+          const sampleMlsNumbers = zipEffect.sampleMlsNumbers;
+          staged.zipUpdate = { updated: zipEffect.updated, added: zipEffect.added };
 
           if (existingCount > 0) {
             staged.duplicateWarning = { count: existingCount, sampleMlsNumbers, status: 'pending' };
@@ -1489,7 +1700,13 @@ function AdminPageInner() {
     }
 
     console.log(`[handleFiles] done. ${inputFiles.length} received, ${newStaged.length} staged, ${skippedCount} skipped. Reasons:`, skippedReasons);
-    setUploadSummary({ found: inputFiles.length, staged: newStaged.length, skipped: skippedCount, reasons: skippedReasons });
+    setUploadSummary({
+      found: inputFiles.length,
+      staged: newStaged.length,
+      skipped: skippedCount,
+      reasons: skippedReasons,
+      skippedFiles: skippedFileMessages,
+    });
 
     // Misfit files get the big centered popup (with the target section
     // highlighted) instead of a one-line toast that scrolls away.
@@ -1521,6 +1738,16 @@ function AdminPageInner() {
       });
       await Promise.all(sqlStagingPromises);
       setUploadProgress(null);
+    }
+
+    // Show WHAT was uploaded, per file: data kind, year, row counts and the
+    // zip codes/cities the file covers — the toasts never made that clear.
+    // Fires for SQL CSVs AND GeoJSON uploads alike.
+    if (newStaged.length > 0) {
+      const reportItems = newStaged
+        .filter((s) => s.sessionId || s.geoJson)
+        .map((s) => buildUploadReportFor(s));
+      if (reportItems.length) setUploadReport(reportItems);
     }
 
     setProcessing(false);
@@ -3380,6 +3607,9 @@ function AdminPageInner() {
                       {key === 'boundaries' || key === 'areas'
                         ? 'GeoJSON features will be loaded directly onto the map layers.'
                         : 'Duplicate rows are detected and skipped; only new rows are uploaded.'}
+                      <div className="text-amber-300/90 mt-1">
+                        Remember to clear cache in Dashboard after uploading.
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -3402,6 +3632,23 @@ function AdminPageInner() {
                         return <span key={reason} className="mr-3">{count} {labels[reason] || reason}</span>;
                       })}
                     </div>
+                    {uploadSummary.skippedFiles.length > 0 && (
+                      <ul className="mt-3 space-y-1.5">
+                        {uploadSummary.skippedFiles.slice(0, 15).map((f, i) => (
+                          <li
+                            key={i}
+                            className="text-[11px] leading-snug text-amber-200/90 bg-background/60 border border-amber-500/20 rounded-lg px-3 py-1.5 break-all"
+                          >
+                            {f.message}
+                          </li>
+                        ))}
+                        {uploadSummary.skippedFiles.length > 15 && (
+                          <li className="text-[11px] text-amber-200/70 px-3">
+                            +{uploadSummary.skippedFiles.length - 15} more file(s) skipped for the reasons above.
+                          </li>
+                        )}
+                      </ul>
+                    )}
                   </div>
                 )}
                 {stagedFiles.length > 0 && (
@@ -3823,6 +4070,54 @@ function AdminPageInner() {
                 {previewFile.geometryTypes && <span>{previewFile.geometryTypes}</span>}
               </div>
             )}
+            {/* Upload-effect summary — this is what the file lists' Eye gives
+                the user: what this SAVED document uploaded/updated, mirroring
+                the numbers the upload card showed when it was staged. */}
+            {!previewFile.isGeoJson && (
+              <div className="px-5 py-2.5 border-b border-border-subtle bg-cyan-500/[0.06] text-[11px] leading-relaxed">
+                {(() => {
+                  const zipEffect = computeZipEffect(previewFile.rows);
+                  const zipLine = (list: { name: string; count: number }[]) =>
+                    list.slice(0, 8).map((z) => z.name).join(', ') +
+                    (list.length > 8 ? `, +${list.length - 8} more` : '');
+                  return (
+                    <div className="space-y-0.5">
+                      <p className="font-semibold text-white">
+                        <Eye className="w-3 h-3 inline mr-1 -mt-0.5" />
+                        What this document does to the data:
+                      </p>
+                      <p className="text-gray-300">{effectSentenceFor(previewFile.category, previewFile.year ?? null)}</p>
+                      {zipEffect.classified && zipEffect.updated.length > 0 && (
+                        <p>
+                          <span className="text-amber-300 font-semibold">Updates (MLS already in the database):</span>{' '}
+                          <span className="text-white">{zipLine(zipEffect.updated)}</span>
+                        </p>
+                      )}
+                      {zipEffect.classified && zipEffect.added.length > 0 && (
+                        <p>
+                          <span className="text-emerald-400 font-semibold">Adds brand-new rows in:</span>{' '}
+                          <span className="text-white">{zipLine(zipEffect.added)}</span>
+                        </p>
+                      )}
+                      {!zipEffect.classified && zipEffect.fallback.length > 0 && (
+                        <p>
+                          <span className="text-gray-400">ZIPs covered: </span>
+                          <span className="text-white">{zipLine(zipEffect.fallback)}</span>
+                        </p>
+                      )}
+                      <p className="text-gray-500">
+                        {previewFile.rows.length.toLocaleString()} rows · Nothing is ever deleted — re-uploading the same file updates its rows in place.
+                      </p>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+            {previewFile.isGeoJson && previewFile.category && (
+              <div className="px-5 py-2.5 border-b border-border-subtle bg-cyan-500/[0.06] text-[11px] leading-relaxed">
+                <p>{effectSentenceFor(previewFile.category, previewFile.year ?? null)}</p>
+              </div>
+            )}
             <div className="overflow-auto p-0 flex-1">
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#0e1118] sticky top-0 z-10">
@@ -3990,6 +4285,169 @@ function AdminPageInner() {
                 Cancel
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* "What did you actually upload?" — small corner card, one row per
+          document (name + year + rows) with Updated/New zip lines and an eye
+          toggle that expands the per-document detail. */}
+      {uploadReport && uploadReport.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-[1000] w-[23rem] max-w-[calc(100vw-2rem)] bg-surface border border-emerald-500/40 rounded-2xl shadow-2xl p-4">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-white leading-tight">What you&apos;re uploading</p>
+                <p className="text-[10px] text-gray-400">
+                  Staged — visible on the map after &ldquo;Add All&rdquo;.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setUploadReport(null)}
+              className="text-gray-400 hover:text-white shrink-0"
+              aria-label="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="space-y-2 max-h-72 overflow-auto pr-1">
+            {uploadReport.map((r, idx) => {
+              const expanded = reportExpanded.has(idx);
+              const shortName = r.fileName.split('/').pop() || r.fileName;
+              const zipsLine = (list: { name: string; count: number }[]) =>
+                list.slice(0, 6).map((z) => z.name).join(', ') + (list.length > 6 ? `, +${list.length - 6} more` : '');
+              return (
+                <div key={idx} className="bg-background border border-border-subtle rounded-lg px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold text-white truncate" title={r.fileName}>
+                        {shortName}
+                      </p>
+                      <p className="text-[10px] text-gray-400">
+                        {r.categoryLabel}
+                        {r.datasetYear ? ` · ${r.datasetYear}` : ''}
+                        {r.rowsStaged > 0 &&
+                          ` · ${r.rowsStaged.toLocaleString()} ${r.isGeo ? 'areas' : 'rows'}`}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() =>
+                        setReportExpanded((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(idx)) next.delete(idx);
+                          else next.add(idx);
+                          return next;
+                        })
+                      }
+                      className="text-gray-400 hover:text-white shrink-0"
+                      aria-label="View details"
+                      title="View details"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="mt-1.5 text-[11px] leading-relaxed space-y-0.5">
+                    {r.error ? (
+                      r.alreadyInDb > 0 ? (
+                        <p className="text-amber-300">
+                          Already in the database — nothing changed.
+                        </p>
+                      ) : (
+                        <p className="text-red-300">Failed: {r.error}</p>
+                      )
+                    ) : (
+                      <>
+                        {r.updated.length > 0 && (
+                          <p>
+                            <span className="text-amber-300 font-semibold">Updated:</span>{' '}
+                            <span className="text-white">{zipsLine(r.updated)}</span>
+                            <span className="text-gray-500"> ({r.updated.length} ZIPs)</span>
+                          </p>
+                        )}
+                        {r.added.length > 0 && (
+                          <p>
+                            <span className="text-emerald-400 font-semibold">New:</span>{' '}
+                            <span className="text-white">{zipsLine(r.added)}</span>
+                            <span className="text-gray-500"> ({r.added.length} ZIPs)</span>
+                          </p>
+                        )}
+                        {r.updated.length === 0 && r.added.length === 0 && r.fallbackZips.length > 0 && (
+                          <p>
+                            <span className="text-gray-400">ZIPs covered: </span>
+                            <span className="text-white">{zipsLine(r.fallbackZips)}</span>
+                          </p>
+                        )}
+                        {r.updated.length === 0 && r.added.length === 0 && r.fallbackZips.length === 0 && (
+                          <p className="text-gray-400">
+                            {r.isGeo
+                              ? `${r.rowsStaged.toLocaleString()} new areas`
+                              : `${r.rowsStaged.toLocaleString()} rows uploaded`}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  {/* Expanded detail — what this document uploaded. */}
+                  {expanded && (
+                    <div className="mt-2 border-t border-border-subtle pt-2 text-[11px] text-gray-300 space-y-1 leading-relaxed">
+                      <p className="font-semibold text-white">What this document uploaded:</p>
+                      <p className="text-gray-400 truncate">{r.fileName}</p>
+                      <p>
+                        {r.datasetYear ? `Year ${r.datasetYear} · ` : ''}
+                        {r.isGeo
+                          ? `${r.rowsStaged.toLocaleString()} new areas on the map`
+                          : `${r.rowsStaged.toLocaleString()} rows uploaded`}
+                        {r.rowsSkipped > 0 ? ` · ${r.rowsSkipped.toLocaleString()} skipped` : ''}
+                      </p>
+                      <p>{r.effect}</p>
+                      {r.updated.length > 0 && (
+                        <p>
+                          <span className="text-amber-300 font-semibold">Updated existing ZIPs:</span>{' '}
+                          <span className="text-white">
+                            {r.updated.map((z) => z.name + (z.count > 1 ? ` (${z.count})` : '')).join(', ')}
+                          </span>
+                        </p>
+                      )}
+                      {r.added.length > 0 && (
+                        <p>
+                          <span className="text-emerald-400 font-semibold">Added new ZIPs:</span>{' '}
+                          <span className="text-white">
+                            {r.added.map((z) => z.name + (z.count > 1 ? ` (${z.count})` : '')).join(', ')}
+                          </span>
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="text-[10px] text-amber-300/80 mt-2">
+            Remember to clear cache in Dashboard if the map looks stale.
+          </p>
+
+          <div className="flex gap-2 mt-3">
+            <button
+              onClick={() => {
+                setUploadReport(null);
+                window.location.href = '/map';
+              }}
+              className="flex-1 px-3 py-2 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-colors"
+            >
+              View on map →
+            </button>
+            <button
+              onClick={() => setUploadReport(null)}
+              className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-black transition-colors"
+            >
+              Got it
+            </button>
           </div>
         </div>
       )}

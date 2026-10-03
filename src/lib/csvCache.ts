@@ -25,9 +25,30 @@ function openDb(): Promise<IDBDatabase> {
       req.result.createObjectStore(DATASET_STORE);
       req.result.createObjectStore(GEO_STORE);
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      // Track every connection: open connections BLOCK indexedDB.deleteDatabase,
+      // which is why "Clear cache & reload" used to silently do nothing. The
+      // cache-clear code closes these before deleting.
+      openConnections.add(req.result);
+      resolve(req.result);
+    };
     req.onerror = () => reject(req.error);
   });
+}
+
+const openConnections = new Set<IDBDatabase>();
+
+/** Close every IndexedDB connection this module opened so cache-clear code can
+ *  actually delete the databases (an open connection blocks deletion). */
+export function closeAllCacheConnections(): void {
+  for (const db of Array.from(openConnections)) {
+    try {
+      db.close();
+    } catch {
+      // closing is best-effort — connection teardown cannot fail meaningfully
+    }
+    openConnections.delete(db);
+  }
 }
 
 function promisify<T>(request: IDBRequest<T>): Promise<T> {

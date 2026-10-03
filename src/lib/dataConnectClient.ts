@@ -40,6 +40,19 @@ function connectorName(): string {
   return `projects/${projectId}/locations/${connectorConfig.location}/services/${connectorConfig.service}/connectors/${connectorConfig.connector}`;
 }
 
+/** Token cache — `getIdToken(true)` FORCES a network refresh, and the staging
+ *  loop calls dataConnectFetch once per 500-row batch. Forcing a refresh per
+ *  batch hammered Google's token endpoint until it answered with
+ *  `auth/quota-exceeded` (daily/rolling STS quota). Cache the token per signed-in
+ *  user for ~45 min; the SDK itself keeps it current without forcing. */
+let cachedToken: string | null = null;
+let cachedTokenUid = '';
+let cachedTokenAt = 0;
+const TOKEN_TTL_MS = 45 * 60 * 1000;
+/** Flipped when Google rejects the stored session — later calls go straight to
+ *  the anonymous API-key path instead of paying a rejected request first. */
+let sessionRejected = false;
+
 async function getIdToken(): Promise<string | null> {
   // Auth is currently OFF in this app (anyone can use the admin page), and the
   // staging ops are @auth(level: PUBLIC), so a signed-in user is optional. When
@@ -52,13 +65,25 @@ async function getIdToken(): Promise<string | null> {
     await auth.authStateReady();
     const user = auth.currentUser;
     if (!user) {
-      console.log('[dataConnect] no signed-in user — calling PUBLIC ops anonymously');
+      if (!sessionRejected) console.log('[dataConnect] no signed-in user — calling PUBLIC ops anonymously');
       return null;
     }
+    if (sessionRejected) {
+      console.log('[dataConnect] stored session already rejected by Google — calling PUBLIC ops anonymously');
+      return null;
+    }
+    if (cachedToken && cachedTokenUid === user.uid && Date.now() - cachedTokenAt < TOKEN_TTL_MS) {
+      return cachedToken;
+    }
+    const token = await user.getIdToken(false);
+    cachedToken = token;
+    cachedTokenUid = user.uid;
+    cachedTokenAt = Date.now();
     console.log('[dataConnect] auth ok:', user.email);
-    return user.getIdToken(true);
+    return token;
   } catch (err) {
     console.warn('[dataConnect] session token unavailable — falling back to API key:', (err as Error)?.message);
+    cachedToken = null;
     return null;
   }
 }
@@ -110,6 +135,8 @@ async function dataConnectFetch<T>(
       /invalid authentication credentials/i.test(detailMessage);
     if (retriable) {
       console.warn('[dataConnect] stored session rejected — retrying anonymously with the API key');
+      sessionRejected = true; // skip the dead token from the next batches on
+      cachedToken = null;
       res = await send('apiKey');
     }
   }
