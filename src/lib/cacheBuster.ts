@@ -7,15 +7,20 @@
  * state until they manually clear cache. This module detects a build version
  * change and forces a hard reload after clearing every browser cache layer the
  * app controls.
+ *
+ * It also implements the GLOBAL cache clear: the owner's "Clear cache & reload"
+ * bumps `cms_config/cache-clear` in Firestore, and every visitor's tab watches
+ * that doc and wipes + reloads at its next tick.
  */
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { db } from './firebase';
 
 const VERSION_KEY = 'kwizi_app_version';
-
-/** One-time user choices that must survive EVERY cache clear: the guided-tour
- *  marker, the cookie-consent answer, recently closed ads, and the version
- *  marker itself. Clearing these would force the user to redo the tour and
- *  re-accept the cookie banner on every deploy — they are prefs, not data. */
-const PREF_KEYS = ['kwizi-tour-seen', 'kwizi-cookie-consent', 'kwizi_closed_ads', VERSION_KEY];
+/** Global cache-clear epoch — the OWNER's "Clear cache & reload" bumps a
+ *  Firestore doc (cms_config/cache-clear); every visitor's tab watches it and
+ *  wipes + reloads at the next tick. The locally-seen epoch lives in
+ *  localStorage and is re-set AFTER the wipe (a wipe erases everything). */
+const GLOBAL_EPOCH_KEY = 'kwizi_global_cache_clear';
 
 /** Reads the build version injected by Next.js at build time. */
 function getBuildVersion(): string {
@@ -123,19 +128,14 @@ async function unregisterServiceWorkers(): Promise<void> {
   }
 }
 
-/** Clear local/session storage except the user's one-time choices (tour,
- *  cookie consent, closed ads) — see PREF_KEYS. */
+/** Clear local/session storage COMPLETELY. The one-time-choice preservation
+ *  (tour, cookie consent) was removed per the owner: stale entries kept
+ *  "reappearing" after a cache clear, so every clear now is a full reset. The
+ *  Firebase Auth IndexedDB (the actual sign-in) is still owned elsewhere and
+ *  is not touched by this function. */
 function clearWebStorage(): void {
   try {
-    if (typeof localStorage !== 'undefined') {
-      const saved: Record<string, string | null> = {};
-      for (const k of PREF_KEYS) saved[k] = localStorage.getItem(k);
-      localStorage.clear();
-      for (const k of PREF_KEYS) {
-        const v = saved[k];
-        if (v != null) localStorage.setItem(k, v);
-      }
-    }
+    if (typeof localStorage !== 'undefined') localStorage.clear();
     if (typeof sessionStorage !== 'undefined') sessionStorage.clear();
   } catch {
     // ignore
@@ -163,14 +163,109 @@ function readVersionMarker(): string | null {
   return null;
 }
 
-/** Reusable one-stop cache clear for the admin "Clear cache & reload" button:
- *  wipes only the app's DATA caches (IndexedDB dataset/geojson caches, service
- *  workers) and non-pref web storage. Firebase Auth's IndexedDB
- *  (firebaseLocalStorageDb) and the user's one-time choices survive. */
+/** Reusable one-stop cache clear used by the admin "Clear cache & reload"
+ *  button AND the global cache-clear watcher: wipes web storage (fully), data
+ *  IndexedDBs, the HTTP Cache API and all service workers. Firebase Auth's
+ *  IndexedDB (the sign-in session) survives so nobody gets logged out. */
 export async function clearAppDataCaches(): Promise<void> {
   clearWebStorage();
   await clearIndexedDbs();
+  await clearHttpCacheApi();
   await unregisterServiceWorkers();
+}
+
+/** Delete every entry of the browser's HTTP Cache API (caches.*). Service
+ *  workers were already unregistered; this catches precached responses they
+ *  may have left behind. */
+async function clearHttpCacheApi(): Promise<void> {
+  if (typeof caches === 'undefined') return;
+  try {
+    const keys = await caches.keys();
+    for (const key of keys) await caches.delete(key);
+  } catch {
+    // ignore
+  }
+}
+
+/* ── Global cache clear (owner → every visitor) ──────────────────────────── */
+
+async function readGlobalCacheEpoch(): Promise<number> {
+  try {
+    const snap = await getDoc(doc(db, 'cms_config', 'cache-clear'));
+    return snap.exists() ? Number((snap.data() as { epoch?: number }).epoch ?? 0) : 0;
+  } catch {
+    // Rules/offline — 0 means "no global clear available"
+    return 0;
+  }
+}
+
+function seenGlobalCacheEpoch(): number {
+  try {
+    return Number(localStorage.getItem(GLOBAL_EPOCH_KEY) ?? '0');
+  } catch {
+    return 0;
+  }
+}
+
+function markGlobalCacheEpochSeen(epoch: number): void {
+  try {
+    localStorage.setItem(GLOBAL_EPOCH_KEY, String(epoch));
+  } catch {
+    // ignore
+  }
+}
+
+/** Owner action: bump the epoch in Firestore so EVERY user's tab clears and
+ *  reloads at its next watch tick. Returns the new epoch (0 on failure). */
+export async function bumpGlobalCacheClear(): Promise<number> {
+  try {
+    const ref = doc(db, 'cms_config', 'cache-clear');
+    const snap = await getDoc(ref);
+    const epoch = (snap.exists() ? Number((snap.data() as { epoch?: number }).epoch ?? 0) : 0) + 1;
+    await setDoc(ref, { epoch, at: Date.now() });
+    return epoch;
+  } catch {
+    return 0;
+  }
+}
+
+/** The owner's "Clear cache & reload": bump the GLOBAL epoch first (so every
+ *  visitor's tab wipes at its next watch tick), then wipe THIS browser, then
+ *  re-mark the epoch (the wipe erases the marker — must be re-set after). */
+export async function clearCacheForEveryone(): Promise<void> {
+  const epoch = await bumpGlobalCacheClear();
+  await clearAppDataCaches();
+  if (epoch > 0) markGlobalCacheEpochSeen(epoch);
+}
+
+/** Every visitor's tab polls the global epoch every 60 s (visibility-gated):
+ *  when the owner bumps it, this tab wipes its caches/cookies/storage and
+ *  reloads once. Markers are set AFTER the wipe, which erases everything. */
+export function watchGlobalCacheClear(): () => void {
+  if (typeof window === 'undefined') return () => {};
+  let stopped = false;
+  let running = false;
+  const check = async () => {
+    if (stopped || running || document.visibilityState !== 'visible') return;
+    const epoch = await readGlobalCacheEpoch();
+    if (stopped || epoch === 0 || epoch <= seenGlobalCacheEpoch()) return;
+    running = true;
+    try {
+      await clearAppDataCaches();
+      markGlobalCacheEpochSeen(epoch);
+      // sessionStorage was just wiped — this flag lives only until reload.
+      sessionStorage.setItem('kwizi:global-clear-done', String(epoch));
+      window.location.reload();
+    } catch {
+      running = false;
+    }
+  };
+  check();
+  const id = setInterval(check, 60000);
+  return () => {
+    stopped = true;
+    clearInterval(id);
+  };
 }
 
 /* ── Env-free deployment watchdog ──────────────────────────────────────────

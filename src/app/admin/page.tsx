@@ -37,7 +37,7 @@ import { AdminAds } from '@/components/admin/AdminAds';
 import { AdminUsers } from '@/components/admin/AdminUsers';
 import { RequireAdmin } from '@/components/RequireAuth';
 import DatasetRebuildBanner from '@/components/admin/DatasetRebuildBanner';
-import { watchFreshDeployments } from '@/lib/cacheBuster';
+import { watchFreshDeployments, watchGlobalCacheClear } from '@/lib/cacheBuster';
 import {
   Upload,
   FileSpreadsheet,
@@ -1234,13 +1234,13 @@ function AdminPageInner() {
   }, []);
 
   const handleHardReload = async () => {
-    setToast({ type: 'success', message: 'Cache cleared — reloading the dashboard…' });
+    setToast({ type: 'success', message: 'Cache cleared for everyone — reloading the dashboard…' });
     try {
-      // Only the app's DATA caches. The guided-tour marker, the cookie-consent
-      // answer, closed ads and the Firebase Auth session all survive, so the
-      // user never has to redo them.
-      const { clearAppDataCaches } = await import('@/lib/cacheBuster');
-      await clearAppDataCaches();
+      // The owner's clear is GLOBAL: it bumps the Firestore epoch so EVERY
+      // user's tab wipes its caches/cookies/storage and reloads at the next
+      // watch tick. This browser is wiped right away in the same call.
+      const { clearCacheForEveryone } = await import('@/lib/cacheBuster');
+      await clearCacheForEveryone();
     } catch {
       // ignore cleanup errors — the reload below still busts the HTTP cache
     }
@@ -1312,6 +1312,12 @@ function AdminPageInner() {
   // "invalid authentication credentials" even after the fix was live.
   useEffect(() => {
     return watchFreshDeployments();
+  }, []);
+
+  // Global cache clear — when the owner bumps cms_config/cache-clear from any
+  // admin tab, every open tab (including other admins) wipes and reloads.
+  useEffect(() => {
+    return watchGlobalCacheClear();
   }, []);
 
   // Self-healing: when the admin opens, verify the published dataset actually

@@ -12,7 +12,7 @@ import HommieChat from '@/components/HommieChat';
 import { RequireAuth } from '@/components/RequireAuth';
 import { useAuth } from '@/lib/authContext';
 import { purgeDatasetCache, readGeoCache, writeGeoCache } from '@/lib/csvCache';
-import { enforceFreshBuild, watchFreshDeployments } from '@/lib/cacheBuster';
+import { enforceFreshBuild, watchFreshDeployments, watchGlobalCacheClear } from '@/lib/cacheBuster';
 import {
   PropertyData,
   BoundaryKey,
@@ -907,6 +907,13 @@ function MapPageInner() {
   // tab's loaded chunk names against the fresh HTML's chunk list instead.
   useEffect(() => {
     return watchFreshDeployments();
+  }, []);
+
+  // Global cache clear — when the owner clicks "Clear cache & reload" in the
+  // CMS, a Firestore epoch bumps and every open map tab wipes its
+  // caches/cookies/storage and reloads at the next tick.
+  useEffect(() => {
+    return watchGlobalCacheClear();
   }, []);
 
   // The full filter pipeline (filterProperties + all aggregations + map
