@@ -839,6 +839,95 @@ function buildUploadReportFor(staged: StagedFile): UploadedFileReport {
   };
 }
 
+/** Zip chips for the upload-report modal — the COMPLETE list is shown (no
+ *  truncation), each chip carrying its row count. */
+function ZipChips({ list, tone }: { list: { name: string; count: number }[]; tone: 'amber' | 'emerald' | 'plain' }) {
+  const toneCls =
+    tone === 'amber'
+      ? 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+      : tone === 'emerald'
+        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+        : 'bg-white/5 border-border-subtle text-gray-300';
+  if (!list.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {list.map((z) => (
+        <span key={z.name} className={`text-[11px] font-medium border rounded-md px-2 py-0.5 ${toneCls}`}>
+          {z.name}
+          {z.count > 1 ? ` · ${z.count}` : ''}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Full, NEVER-empty detail content for an upload-report row. When a bucket
+ *  is empty it says explicitly what that means ("all brand-new" / "all
+ *  updated in place") instead of showing an empty panel. */
+function UploadDetailContent({ r }: { r: UploadedFileReport }) {
+  return (
+    <div className="mt-2 border-t border-border-subtle pt-3 space-y-2">
+      <p className="text-xs font-semibold text-white">What this document uploaded</p>
+      <p className="text-[11px] text-gray-400 break-all">{r.fileName}</p>
+      <p className="text-[11px] text-gray-300">
+        {r.datasetYear ? `Year ${r.datasetYear} · ` : ''}
+        {r.isGeo
+          ? `${r.rowsStaged.toLocaleString()} areas on the map`
+          : `${r.rowsStaged.toLocaleString()} rows in the database`}
+        {r.rowsSkipped > 0 ? ` · ${r.rowsSkipped.toLocaleString()} skipped` : ''}
+        {!r.isGeo && r.alreadyInDb > 0
+          ? ` · ${r.alreadyInDb.toLocaleString()} already in the database before this upload`
+          : ''}
+      </p>
+      <p className="text-[11px] text-gray-300">{r.effect}</p>
+      {r.error && <p className="text-[11px] text-red-300">Error: {r.error}</p>}
+      {r.updated.length > 0 && (
+        <>
+          <p className="text-[11px] font-semibold text-amber-300">
+            Updated — these ZIPs already had rows with these MLS numbers; the existing rows were refreshed in place:
+          </p>
+          <ZipChips list={r.updated} tone="amber" />
+        </>
+      )}
+      {r.added.length > 0 && (
+        <>
+          <p className="text-[11px] font-semibold text-emerald-400">
+            New — rows for these ZIPs did not exist in the database yet and were added:
+          </p>
+          <ZipChips list={r.added} tone="emerald" />
+        </>
+      )}
+      {r.updated.length > 0 && r.added.length === 0 && (
+        <p className="text-[11px] text-gray-400">
+          Every MLS number in this document already existed in the database — nothing new was added; the rows were updated in place.
+        </p>
+      )}
+      {r.updated.length === 0 && r.added.length > 0 && (
+        <p className="text-[11px] text-gray-400">
+          Every row in this document is brand-new — no row with these MLS numbers existed yet.
+        </p>
+      )}
+      {r.updated.length === 0 && r.added.length === 0 && (
+        r.fallbackZips.length > 0 ? (
+          <>
+            <p className="text-[11px] font-semibold text-gray-300">ZIPs covered in this document:</p>
+            <ZipChips list={r.fallbackZips} tone="plain" />
+            <p className="text-[11px] text-gray-500">
+              The updated/new split is computed against the loaded dataset; it was not available at upload time.
+            </p>
+          </>
+        ) : (
+          <p className="text-[11px] text-gray-400">
+            {r.rowsStaged > 0
+              ? 'This document was uploaded into the database (keyed by MLS number + year). The updated/new split was not available at upload time — it is visible in the per-document preview once the dataset engine is loaded.'
+              : 'No rows landed in the database for this document.'}
+          </p>
+        )
+      )}
+    </div>
+  );
+}
+
 /** Section each property-like category belongs to — used to point the user at
  *  the right place when a file is dropped on a different section. */
 const CATEGORY_TARGET_SECTION: Partial<Record<CMSFileCategory, Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>>> = {
@@ -1742,12 +1831,17 @@ function AdminPageInner() {
 
     // Show WHAT was uploaded, per file: data kind, year, row counts and the
     // zip codes/cities the file covers — the toasts never made that clear.
-    // Fires for SQL CSVs AND GeoJSON uploads alike.
+    // Fires for SQL CSVs AND GeoJSON uploads alike. Every document opens
+    // EXPANDED — the popup is the "what did I upload" report, so hiding it
+    // behind a collapsed eye made it look empty.
     if (newStaged.length > 0) {
       const reportItems = newStaged
         .filter((s) => s.sessionId || s.geoJson)
         .map((s) => buildUploadReportFor(s));
-      if (reportItems.length) setUploadReport(reportItems);
+      if (reportItems.length) {
+        setUploadReport(reportItems);
+        setReportExpanded(new Set(reportItems.map((_, i) => i)));
+      }
     }
 
     setProcessing(false);
@@ -2281,10 +2375,39 @@ function AdminPageInner() {
             .join(' · '),
         });
       } else {
-        const response = await fetch(file.storageUrl || '');
-        const text = await response.text();
+        // Read the stored CSV the same robust way the SQL-delete path does
+        // (no-store, gzip-sniffed) — a stale cached copy or a gzipped backup
+        // would parse into garbage and blank the preview.
+        const response = await fetch(file.storageUrl || '', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Preview fetch failed: ${response.status}`);
+        const buf = await response.arrayBuffer();
+        const head = new Uint8Array(buf.slice(0, 2));
+        let text: string;
+        if (head[0] === 0x1f && head[1] === 0x8b) {
+          const ds = (globalThis as any).DecompressionStream as typeof DecompressionStream | undefined;
+          if (!ds) throw new Error('Browser does not support gzip decompression.');
+          const stream = new ReadableStream({
+            start(c) {
+              c.enqueue(new Uint8Array(buf));
+              c.close();
+            },
+          });
+          text = await new Response(stream.pipeThrough(new ds('gzip'))).text();
+        } else {
+          text = new TextDecoder().decode(buf);
+        }
+        // Some exports carry a UTF-8 BOM — it must never become a header key.
+        if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
         const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
-        setPreviewFile({ ...file, rows: parsed.data as Record<string, string>[] });
+        // Prefer the FRESH headers from the stored content: the metadata's
+        // headers could describe an older version of this file (a same-name
+        // re-upload overwrote the Storage object), and stale headers would
+        // look up the wrong keys and blank every cell.
+        setPreviewFile({
+          ...file,
+          headers: parsed.meta.fields ?? file.headers,
+          rows: parsed.data as Record<string, string>[],
+        });
       }
     } catch (err) {
       console.error(err);
@@ -4071,46 +4194,70 @@ function AdminPageInner() {
               </div>
             )}
             {/* Upload-effect summary — this is what the file lists' Eye gives
-                the user: what this SAVED document uploaded/updated, mirroring
-                the numbers the upload card showed when it was staged. */}
+                the user. For an ALREADY-UPLOADED document the committed status
+                is shown FIRST and unconditionally (the file is in the CMS, so
+                its rows are in the database) — the zip split then ADDS detail
+                whenever the engine can compute it. It must never be empty. */}
             {!previewFile.isGeoJson && (
               <div className="px-5 py-2.5 border-b border-border-subtle bg-cyan-500/[0.06] text-[11px] leading-relaxed">
-                {(() => {
-                  const zipEffect = computeZipEffect(previewFile.rows);
-                  const zipLine = (list: { name: string; count: number }[]) =>
-                    list.slice(0, 8).map((z) => z.name).join(', ') +
-                    (list.length > 8 ? `, +${list.length - 8} more` : '');
-                  return (
-                    <div className="space-y-0.5">
-                      <p className="font-semibold text-white">
-                        <Eye className="w-3 h-3 inline mr-1 -mt-0.5" />
-                        What this document does to the data:
-                      </p>
-                      <p className="text-gray-300">{effectSentenceFor(previewFile.category, previewFile.year ?? null)}</p>
-                      {zipEffect.classified && zipEffect.updated.length > 0 && (
-                        <p>
-                          <span className="text-amber-300 font-semibold">Updates (MLS already in the database):</span>{' '}
-                          <span className="text-white">{zipLine(zipEffect.updated)}</span>
-                        </p>
-                      )}
-                      {zipEffect.classified && zipEffect.added.length > 0 && (
-                        <p>
-                          <span className="text-emerald-400 font-semibold">Adds brand-new rows in:</span>{' '}
-                          <span className="text-white">{zipLine(zipEffect.added)}</span>
-                        </p>
-                      )}
-                      {!zipEffect.classified && zipEffect.fallback.length > 0 && (
-                        <p>
-                          <span className="text-gray-400">ZIPs covered: </span>
-                          <span className="text-white">{zipLine(zipEffect.fallback)}</span>
-                        </p>
-                      )}
-                      <p className="text-gray-500">
-                        {previewFile.rows.length.toLocaleString()} rows · Nothing is ever deleted — re-uploading the same file updates its rows in place.
-                      </p>
-                    </div>
-                  );
-                })()}
+                <div className="space-y-1">
+                  <p className="font-semibold text-white">
+                    <Eye className="w-3 h-3 inline mr-1 -mt-0.5" />
+                    What this document does to the data:
+                  </p>
+                  <p className="text-white">
+                    📦 Already uploaded — {(() => {
+                      const n = previewFile.rows.length > 0 ? previewFile.rows.length : previewFile.rowCount ?? 0;
+                      return `${n.toLocaleString()} rows committed in the database`;
+                    })()}
+                    {previewFile.year ? ` for year ${previewFile.year}` : ''} — this data is live on the map.
+                  </p>
+                  {(() => {
+                    const zipEffect = computeZipEffect(previewFile.rows);
+                    return (
+                      <>
+                        {zipEffect.classified ? (
+                          <>
+                            {zipEffect.updated.length > 0 && (
+                              <p>
+                                <span className="text-amber-300 font-semibold">Updates existing rows in:</span>{' '}
+                                <span className="text-white">
+                                  {zipEffect.updated.slice(0, 12).map((z) => z.name).join(', ')}
+                                  {zipEffect.updated.length > 12 ? `, +${zipEffect.updated.length - 12} more` : ''}
+                                </span>
+                              </p>
+                            )}
+                            {zipEffect.added.length > 0 && (
+                              <p>
+                                <span className="text-emerald-400 font-semibold">Adds brand-new rows in:</span>{' '}
+                                <span className="text-white">
+                                  {zipEffect.added.slice(0, 12).map((z) => z.name).join(', ')}
+                                  {zipEffect.added.length > 12 ? `, +${zipEffect.added.length - 12} more` : ''}
+                                </span>
+                              </p>
+                            )}
+                            <p className="text-gray-500">
+                              {zipEffect.existingCount.toLocaleString()} of {previewFile.rows.length.toLocaleString()} rows{" "}
+                              {zipEffect.existingCount > 0 ? 'were already in the database when this preview opened' : 'are brand-new additions'}.
+                            </p>
+                          </>
+                        ) : null}
+                        {!zipEffect.classified && zipEffect.fallback.length > 0 && (
+                          <p>
+                            <span className="text-gray-400">ZIPs covered in this document: </span>
+                            <span className="text-white">
+                              {zipEffect.fallback.slice(0, 12).map((z) => z.name).join(', ')}
+                              {zipEffect.fallback.length > 12 ? `, +${zipEffect.fallback.length - 12} more` : ''}
+                            </span>
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
+                  <p className="text-gray-500">
+                    Nothing is ever deleted — re-uploading this file updates its rows in place.
+                  </p>
+                </div>
               </div>
             )}
             {previewFile.isGeoJson && previewFile.category && (
@@ -4289,165 +4436,161 @@ function AdminPageInner() {
         </div>
       )}
 
-      {/* "What did you actually upload?" — small corner card, one row per
-          document (name + year + rows) with Updated/New zip lines and an eye
-          toggle that expands the per-document detail. */}
+      {/* "What did you actually upload?" — CENTERED modal (the old corner card
+          was too small to read), one full block per document: name, year,
+          rows, complete Updated/New zip chips and skip/error explanations. */}
       {uploadReport && uploadReport.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-[1000] w-[23rem] max-w-[calc(100vw-2rem)] bg-surface border border-emerald-500/40 rounded-2xl shadow-2xl p-4">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
-              <div className="min-w-0">
-                <p className="text-sm font-bold text-white leading-tight">What you&apos;re uploading</p>
-                <p className="text-[10px] text-gray-400">
-                  Staged — visible on the map after &ldquo;Add All&rdquo;.
-                </p>
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/70">
+          <div className="bg-surface border border-emerald-500/40 rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-border-subtle shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-base font-bold text-white leading-tight">What you&apos;re uploading</p>
+                  <p className="text-[11px] text-gray-400">
+                    Staged — visible on the map after &ldquo;Add All&rdquo;.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setUploadReport(null)}
+                className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white shrink-0"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto p-5 space-y-3">
+              {/* Skipped files — same place as the uploaded ones so the user
+                  sees everything that happened to the folder in one glance. */}
+              {uploadSummary && uploadSummary.skippedFiles.length > 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+                  <p className="text-xs font-semibold text-amber-200 mb-1.5">
+                    Skipped files ({uploadSummary.skippedFiles.length})
+                  </p>
+                  <ul className="space-y-1">
+                    {uploadSummary.skippedFiles.slice(0, 20).map((f, i) => (
+                      <li key={i} className="text-[11px] leading-snug text-amber-200/90 break-all">
+                        {f.message}
+                      </li>
+                    ))}
+                    {uploadSummary.skippedFiles.length > 20 && (
+                      <li className="text-[11px] text-amber-200/70">
+                        +{uploadSummary.skippedFiles.length - 20} more file(s) skipped.
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              )}
+              {uploadReport.map((r, idx) => {
+                const expanded = reportExpanded.has(idx);
+                return (
+                  <div key={idx} className="bg-background border border-border-subtle rounded-xl px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-white break-all">{r.fileName}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {r.categoryLabel}
+                          {r.datasetYear ? ` · ${r.datasetYear}` : ''}
+                          {r.rowsStaged > 0 &&
+                            ` · ${r.rowsStaged.toLocaleString()} ${r.isGeo ? 'areas' : 'rows'}`}
+                          {r.rowsSkipped > 0 && ` · ${r.rowsSkipped.toLocaleString()} skipped`}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() =>
+                          setReportExpanded((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(idx)) next.delete(idx);
+                            else next.add(idx);
+                            return next;
+                          })
+                        }
+                        className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white shrink-0"
+                        aria-label={expanded ? 'Hide details' : 'View details'}
+                        title={expanded ? 'Hide details' : 'View details'}
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="mt-2 text-xs leading-relaxed space-y-1">
+                      {r.error ? (
+                        r.alreadyInDb > 0 ? (
+                          <p className="text-amber-300">
+                            Already in the database — nothing changed.
+                          </p>
+                        ) : (
+                          <p className="text-red-300">Failed: {r.error}</p>
+                        )
+                      ) : (
+                        <>
+                          {r.updated.length > 0 && (
+                            <p>
+                              <span className="text-amber-300 font-semibold">Updated:</span>{' '}
+                              <span className="text-white">
+                                {r.updated.slice(0, 12).map((z) => z.name).join(', ')}
+                                {r.updated.length > 12 ? `, +${r.updated.length - 12} more` : ''}
+                              </span>
+                              <span className="text-gray-500"> ({r.updated.length} ZIPs)</span>
+                            </p>
+                          )}
+                          {r.added.length > 0 && (
+                            <p>
+                              <span className="text-emerald-400 font-semibold">New:</span>{' '}
+                              <span className="text-white">
+                                {r.added.slice(0, 12).map((z) => z.name).join(', ')}
+                                {r.added.length > 12 ? `, +${r.added.length - 12} more` : ''}
+                              </span>
+                              <span className="text-gray-500"> ({r.added.length} ZIPs)</span>
+                            </p>
+                          )}
+                          {r.updated.length === 0 && r.added.length === 0 && r.fallbackZips.length > 0 && (
+                            <p>
+                              <span className="text-gray-400">ZIPs covered: </span>
+                              <span className="text-white">{r.fallbackZips.slice(0, 12).map((z) => z.name).join(', ')}</span>
+                            </p>
+                          )}
+                          {r.updated.length === 0 && r.added.length === 0 && r.fallbackZips.length === 0 && (
+                            <p className="text-gray-400">
+                              {r.isGeo
+                                ? `${r.rowsStaged.toLocaleString()} new areas`
+                                : `${r.rowsStaged.toLocaleString()} rows uploaded`}
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+
+                    {expanded && <UploadDetailContent r={r} />}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-border-subtle shrink-0">
+              <p className="text-[11px] text-amber-300/80">
+                Remember to clear cache in Dashboard if the map looks stale.
+              </p>
+              <div className="flex gap-2 mt-2.5">
+                <button
+                  onClick={() => {
+                    setUploadReport(null);
+                    window.location.href = '/map';
+                  }}
+                  className="flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold bg-white/10 hover:bg-white/20 text-white transition-colors"
+                >
+                  View on map →
+                </button>
+                <button
+                  onClick={() => setUploadReport(null)}
+                  className="flex-1 px-4 py-2.5 rounded-xl text-sm font-bold bg-emerald-500 hover:bg-emerald-400 text-black transition-colors"
+                >
+                  Got it
+                </button>
               </div>
             </div>
-            <button
-              onClick={() => setUploadReport(null)}
-              className="text-gray-400 hover:text-white shrink-0"
-              aria-label="Close"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          <div className="space-y-2 max-h-72 overflow-auto pr-1">
-            {uploadReport.map((r, idx) => {
-              const expanded = reportExpanded.has(idx);
-              const shortName = r.fileName.split('/').pop() || r.fileName;
-              const zipsLine = (list: { name: string; count: number }[]) =>
-                list.slice(0, 6).map((z) => z.name).join(', ') + (list.length > 6 ? `, +${list.length - 6} more` : '');
-              return (
-                <div key={idx} className="bg-background border border-border-subtle rounded-lg px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-[11px] font-semibold text-white truncate" title={r.fileName}>
-                        {shortName}
-                      </p>
-                      <p className="text-[10px] text-gray-400">
-                        {r.categoryLabel}
-                        {r.datasetYear ? ` · ${r.datasetYear}` : ''}
-                        {r.rowsStaged > 0 &&
-                          ` · ${r.rowsStaged.toLocaleString()} ${r.isGeo ? 'areas' : 'rows'}`}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() =>
-                        setReportExpanded((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(idx)) next.delete(idx);
-                          else next.add(idx);
-                          return next;
-                        })
-                      }
-                      className="text-gray-400 hover:text-white shrink-0"
-                      aria-label="View details"
-                      title="View details"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-
-                  <div className="mt-1.5 text-[11px] leading-relaxed space-y-0.5">
-                    {r.error ? (
-                      r.alreadyInDb > 0 ? (
-                        <p className="text-amber-300">
-                          Already in the database — nothing changed.
-                        </p>
-                      ) : (
-                        <p className="text-red-300">Failed: {r.error}</p>
-                      )
-                    ) : (
-                      <>
-                        {r.updated.length > 0 && (
-                          <p>
-                            <span className="text-amber-300 font-semibold">Updated:</span>{' '}
-                            <span className="text-white">{zipsLine(r.updated)}</span>
-                            <span className="text-gray-500"> ({r.updated.length} ZIPs)</span>
-                          </p>
-                        )}
-                        {r.added.length > 0 && (
-                          <p>
-                            <span className="text-emerald-400 font-semibold">New:</span>{' '}
-                            <span className="text-white">{zipsLine(r.added)}</span>
-                            <span className="text-gray-500"> ({r.added.length} ZIPs)</span>
-                          </p>
-                        )}
-                        {r.updated.length === 0 && r.added.length === 0 && r.fallbackZips.length > 0 && (
-                          <p>
-                            <span className="text-gray-400">ZIPs covered: </span>
-                            <span className="text-white">{zipsLine(r.fallbackZips)}</span>
-                          </p>
-                        )}
-                        {r.updated.length === 0 && r.added.length === 0 && r.fallbackZips.length === 0 && (
-                          <p className="text-gray-400">
-                            {r.isGeo
-                              ? `${r.rowsStaged.toLocaleString()} new areas`
-                              : `${r.rowsStaged.toLocaleString()} rows uploaded`}
-                          </p>
-                        )}
-                      </>
-                    )}
-                  </div>
-
-                  {/* Expanded detail — what this document uploaded. */}
-                  {expanded && (
-                    <div className="mt-2 border-t border-border-subtle pt-2 text-[11px] text-gray-300 space-y-1 leading-relaxed">
-                      <p className="font-semibold text-white">What this document uploaded:</p>
-                      <p className="text-gray-400 truncate">{r.fileName}</p>
-                      <p>
-                        {r.datasetYear ? `Year ${r.datasetYear} · ` : ''}
-                        {r.isGeo
-                          ? `${r.rowsStaged.toLocaleString()} new areas on the map`
-                          : `${r.rowsStaged.toLocaleString()} rows uploaded`}
-                        {r.rowsSkipped > 0 ? ` · ${r.rowsSkipped.toLocaleString()} skipped` : ''}
-                      </p>
-                      <p>{r.effect}</p>
-                      {r.updated.length > 0 && (
-                        <p>
-                          <span className="text-amber-300 font-semibold">Updated existing ZIPs:</span>{' '}
-                          <span className="text-white">
-                            {r.updated.map((z) => z.name + (z.count > 1 ? ` (${z.count})` : '')).join(', ')}
-                          </span>
-                        </p>
-                      )}
-                      {r.added.length > 0 && (
-                        <p>
-                          <span className="text-emerald-400 font-semibold">Added new ZIPs:</span>{' '}
-                          <span className="text-white">
-                            {r.added.map((z) => z.name + (z.count > 1 ? ` (${z.count})` : '')).join(', ')}
-                          </span>
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          <p className="text-[10px] text-amber-300/80 mt-2">
-            Remember to clear cache in Dashboard if the map looks stale.
-          </p>
-
-          <div className="flex gap-2 mt-3">
-            <button
-              onClick={() => {
-                setUploadReport(null);
-                window.location.href = '/map';
-              }}
-              className="flex-1 px-3 py-2 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-colors"
-            >
-              View on map →
-            </button>
-            <button
-              onClick={() => setUploadReport(null)}
-              className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-black transition-colors"
-            >
-              Got it
-            </button>
           </div>
         </div>
       )}
