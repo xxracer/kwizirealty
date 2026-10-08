@@ -19,32 +19,31 @@ interface Props {
 export function RequireAuth({ children, loginPath = '/login', redirectTo }: Props) {
   const router = useRouter();
   const { user, profile, loading, isAuthorized, signOut } = useAuth();
-  const { config: gate, loading: gateLoading } = useAuthGate();
+  const { config: gate } = useAuthGate();
   const [requestSent, setRequestSent] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
-  // Admin switch: with map login off, anyone opens the map — no redirect,
-  // no "access pending" screen. While the gate config loads, the previous
-  // (protected) behavior applies.
-  const gateOpen = !gateLoading && !gate.mapLoginRequired;
+  // OWNER POLICY: the map must NEVER require login. authGate forces
+  // mapLoginRequired to false (default included), so this renders children
+  // immediately — no redirect, no "access pending" screen, ever.
+  const gateOpen = !gate.mapLoginRequired;
 
   useEffect(() => {
-    // Wait for BOTH auth and the remote gate config: deciding before the
-    // gate snapshot arrives would redirect users on a switch that is
-    // actually OFF. And when the gate is open, never redirect at all.
-    if (loading || gateLoading || gateOpen) return;
+    // The gate is always open for the map (map never requires login) —
+    // this only remains as a guard for unexpected states. Never redirect.
+    if (loading || gateOpen) return;
     if (!user) {
       const target = redirectTo
         ? `${loginPath}?next=${encodeURIComponent(redirectTo)}`
         : loginPath;
       router.replace(target);
     }
-  }, [loading, gateLoading, gateOpen, user, redirectTo, loginPath, router]);
+  }, [loading, gateOpen, user, redirectTo, loginPath, router]);
 
   if (gateOpen) return <>{children}</>;
 
-  if (loading || gateLoading) {
+  if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0a0c10] text-white">
         <div className="flex items-center gap-3 text-gray-300">

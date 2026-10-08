@@ -22,8 +22,8 @@ const SALE_ROOT =
   'C:/Users/VICTUS/Documents/houston-realestate-main/csv/Sales Data-20260801T175930Z-1-001/Sales Data';
 
 const PROJECT_ID = 'myreatstat';
-const LOCATION = 'us-central1';
-const SERVICE = 'kwizi-sql';
+const LOCATION = 'us-east4';
+const SERVICE = 'resdogs-4c0ff-service';
 const CONNECTOR = 'default';
 
 const SESSION_ID = `upload-test-${Date.now()}`;

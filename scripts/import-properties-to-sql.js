@@ -222,8 +222,8 @@ async function main() {
   const { initializeApp, cert, applicationDefault } = require('firebase-admin/app');
   const { getDataConnect } = require('firebase-admin/data-connect');
 
-  const location = process.env.DATACONNECT_LOCATION || 'us-central1';
-  const serviceId = process.env.DATACONNECT_SERVICE_ID || 'kwizi-sql';
+  const location = process.env.DATACONNECT_LOCATION || 'us-east4';
+  const serviceId = process.env.DATACONNECT_SERVICE_ID || 'resdogs-4c0ff-service';
   const connector = process.env.DATACONNECT_CONNECTOR || 'default';
 
   let app;

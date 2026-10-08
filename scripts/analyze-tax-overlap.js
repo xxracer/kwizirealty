@@ -14,7 +14,7 @@ const Papa = require('papaparse');
 
 const app = initializeApp({});
 const db = getFirestore(app);
-const dc = getDataConnect({ location: 'us-central1', serviceId: 'kwizi-sql', connector: 'default' }, app);
+const dc = getDataConnect({ location: 'us-east4', serviceId: 'resdogs-4c0ff-service', connector: 'default' }, app);
 
 function num(v) {
   if (v == null || v === '') return 0;

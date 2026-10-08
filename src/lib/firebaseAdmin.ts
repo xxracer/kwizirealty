@@ -57,8 +57,8 @@ export function getAdminDataConnect(): DataConnect {
   if (dc) return dc;
   dc = getDataConnect(
     {
-      location: process.env.DATACONNECT_LOCATION || 'us-central1',
-      serviceId: process.env.DATACONNECT_SERVICE_ID || 'kwizi-sql',
+      location: process.env.DATACONNECT_LOCATION || 'us-east4',
+      serviceId: process.env.DATACONNECT_SERVICE_ID || 'resdogs-4c0ff-service',
       connector: process.env.DATACONNECT_CONNECTOR || 'default',
     },
     getAdminApp()

@@ -8,7 +8,7 @@ const { getDataConnect } = require('firebase-admin/data-connect');
 
 const app = initializeApp({});
 const dc = getDataConnect(
-  { location: 'us-central1', serviceId: 'kwizi-sql', connector: 'default' },
+  { location: 'us-east4', serviceId: 'resdogs-4c0ff-service', connector: 'default' },
   app
 );
 

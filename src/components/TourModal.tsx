@@ -256,8 +256,12 @@ export default function TourModal({ open, onClose }: TourModalProps) {
   return (
     <AnimatePresence>
       <div className="fixed inset-0 z-[3000]">
-        {/* Dark overlay with cutout spotlight */}
-        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={finish} />
+        {/* Click-catcher: closes the tour; NO backdrop-blur or tint — the
+            spotlight's box-shadow paints the darkness instead, so the
+            targeted element stays fully visible and crisp. */}
+        <div className="absolute inset-0 cursor-pointer" onClick={finish} />
+        {/* Centered steps have no target — dim the page behind the card */}
+        {!hasTarget && <div className="absolute inset-0 bg-black/70 pointer-events-none" />}
         {hasTarget && rect && (
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}

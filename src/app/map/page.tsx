@@ -2176,7 +2176,7 @@ function MapPageInner() {
             <span className="text-white font-bold text-lg">K</span>
           </div>
           <div>
-            <h1 className="text-sm sm:text-base font-bold text-white leading-tight">Houston Metro Real-Estate Analytics</h1>
+            <h1 className="text-sm sm:text-base font-bold text-white leading-tight">Real-Estate Analytics</h1>
           </div>
         </div>
         <div className="flex items-center gap-2">

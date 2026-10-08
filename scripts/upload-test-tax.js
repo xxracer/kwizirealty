@@ -30,7 +30,7 @@ function loadSqlImportModule() {
 }
 
 async function dcCall(operationName, variables) {
-  const url = 'https://firebasedataconnect.googleapis.com/v1beta/projects/myreatstat/locations/us-central1/services/kwizi-sql/connectors/default:executeMutation';
+  const url = 'https://firebasedataconnect.googleapis.com/v1beta/projects/myreatstat/locations/us-east4/services/resdogs-4c0ff-service/connectors/default:executeMutation';
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': API_KEY },

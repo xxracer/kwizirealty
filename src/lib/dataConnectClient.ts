@@ -17,9 +17,9 @@
 import { app, auth } from './firebase';
 
 const connectorConfig = {
-  location: process.env.NEXT_PUBLIC_DATACONNECT_LOCATION || 'us-central1',
+  location: process.env.NEXT_PUBLIC_DATACONNECT_LOCATION || 'us-east4',
   connector: process.env.NEXT_PUBLIC_DATACONNECT_CONNECTOR || 'default',
-  service: process.env.NEXT_PUBLIC_DATACONNECT_SERVICE_ID || 'kwizi-sql',
+  service: process.env.NEXT_PUBLIC_DATACONNECT_SERVICE_ID || 'resdogs-4c0ff-service',
 };
 
 const projectId =

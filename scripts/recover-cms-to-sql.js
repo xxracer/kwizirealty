@@ -19,6 +19,7 @@ process.env.GOOGLE_APPLICATION_CREDENTIALS =
 
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
+const zlib = require('zlib');
 const { getDataConnect } = require('firebase-admin/data-connect');
 const Papa = require('papaparse');
 
@@ -38,7 +39,7 @@ const STORAGE_BUCKET = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'myrea
 const app = initializeApp({});
 const db = getFirestore(app);
 const dc = getDataConnect(
-  { location: 'us-central1', serviceId: 'kwizi-sql', connector: 'default' },
+  { location: 'us-east4', serviceId: 'resdogs-4c0ff-service', connector: 'default' },
   app
 );
 
@@ -59,7 +60,13 @@ async function fetchCsvText(file) {
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} for ${url}`);
   }
-  return res.text();
+  const buf = Buffer.from(await res.arrayBuffer());
+  // sql_imports backups are gzipped by the upload pipeline — detect the gzip
+  // magic (1f 8b) instead of trusting the extension.
+  if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+    return zlib.gunzipSync(buf).toString('utf-8');
+  }
+  return buf.toString('utf-8');
 }
 
 function cleanNumber(val) {

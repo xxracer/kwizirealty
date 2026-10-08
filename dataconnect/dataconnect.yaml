@@ -1,12 +1,12 @@
 specVersion: "v1"
-serviceId: "kwizi-sql"
-location: "us-central1"
+serviceId: "resdogs-4c0ff-service"
+location: "us-east4"
 schema:
   source: "./schema"
   datasource:
     postgresql:
-      database: "kwizi"
+      database: "resdogs-4c0ff-database"
       cloudSql:
-        instanceId: "kwizi-sql-instance"
+        instanceId: "resdogs-4c0ff-instance"
 schemaValidation: "COMPATIBLE"
 connectorDirs: ["./connector"]

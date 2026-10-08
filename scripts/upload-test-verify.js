@@ -8,7 +8,7 @@ const KEY = fs
   .replace(/"/g, '')
   .trim();
 const url =
-  'https://firebasedataconnect.googleapis.com/v1beta/projects/myreatstat/locations/us-central1/services/kwizi-sql/connectors/default:executeQuery';
+  'https://firebasedataconnect.googleapis.com/v1beta/projects/myreatstat/locations/us-east4/services/resdogs-4c0ff-service/connectors/default:executeQuery';
 async function q(op) {
   const res = await fetch(url, {
     method: 'POST',

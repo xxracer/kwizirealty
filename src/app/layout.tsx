@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Kwizi Realty — Market Explorer",
+  title: "Red Dogs — Market Explorer",
   description: "Houston metro real-estate analytics",
 };
 

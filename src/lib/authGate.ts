@@ -5,22 +5,30 @@ import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
 
 /**
- * Remote access-control switches, managed from the admin panel (Users →
- * Access control) and stored in Firestore so they apply to every visitor
- * live (onSnapshot pushes the change to all open tabs immediately).
+ * Remote admin-login switch, managed from the admin panel (Users →
+ * Access control) and stored in Firestore (cms_config/auth) so it applies
+ * live to every tab (onSnapshot).
  *
- * Defaults are BOTH REQUIRED: if the config doc can't be read (rules,
- * offline, first run), the app behaves exactly as before — never wider.
+ * POLICY (owner directive, 2026-10-08):
+ *  - /map NEVER requires login. mapLoginRequired is kept in the interface
+ *    and in the Firestore doc for history/compat, but it is FORCED to false
+ *    in readAuthGate — no switch value can ever close the map.
+ *  - /admin ALWAYS requires admin sign-in by default. The owner can turn
+ *    this off from the admin panel at any time; if they do, /admin opens
+ *    for everyone — that is their explicit decision, not a default.
+ *
+ * Default when the config doc can't be read (rules, offline, first run):
+ * admin login REQUIRED, map open — never wider than the policy above.
  */
 export interface AuthGateConfig {
-  /** Require sign-in (and account approval) to open /map. */
+  /** Legacy: forced to false — the map never requires login. */
   mapLoginRequired: boolean;
   /** Require admin sign-in to open /admin. */
   adminLoginRequired: boolean;
 }
 
 export const DEFAULT_AUTH_GATE: AuthGateConfig = {
-  mapLoginRequired: true,
+  mapLoginRequired: false,
   adminLoginRequired: true,
 };
 
@@ -35,9 +43,11 @@ export function useAuthGate(): { config: AuthGateConfig; loading: boolean } {
       doc(db, AUTH_GATE_PATH),
       (snap) => {
         const data = (snap.data() || {}) as Partial<AuthGateConfig>;
-        // A missing field falls back to "required" rather than open.
+        // OWNER POLICY: the map is ALWAYS open — any stored/stale/missing
+        // mapLoginRequired value is coerced to false. Only adminLoginRequired
+        // is actually switch-controlled.
         setConfig({
-          mapLoginRequired: data.mapLoginRequired ?? DEFAULT_AUTH_GATE.mapLoginRequired,
+          mapLoginRequired: false,
           adminLoginRequired: data.adminLoginRequired ?? DEFAULT_AUTH_GATE.adminLoginRequired,
         });
         setLoading(false);

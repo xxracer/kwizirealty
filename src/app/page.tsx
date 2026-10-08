@@ -66,10 +66,9 @@ export default function Home() {
           
           <div className="flex items-center gap-10">
             <Link href="/" className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded bg-[#111] flex items-center justify-center">
-                <span className="text-white font-bold text-lg">K</span>
-              </div>
-              <span className="text-xl font-bold text-[#111] tracking-tight">Kwizi</span>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/red-dogs-logo.png" alt="Red Dogs logo" className="w-8 h-8 rounded object-cover" />
+              <span className="text-xl font-bold text-[#111] tracking-tight">ResDogs</span>
             </Link>
 
             <nav className="hidden md:flex items-center gap-8 text-[15px] font-medium text-[#4a5568]">
@@ -211,12 +210,12 @@ export default function Home() {
                 <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white leading-[1.1]">
                   Over <span className="text-[#7ef29d]">$40 Billion</span> in <br />
                   Land Decisions Made <br />
-                  Annually With Kwizi
+                  Annually With Red Dogs
                 </h2>
               </div>
               <div>
                 <p className="text-lg text-gray-300 leading-relaxed font-medium mb-8 max-w-lg">
-                  The nation's best real estate teams rely on Kwizi Intelligence to move faster, catch risks earlier, and close more of the right deals.
+                  The nation's best real estate teams rely on Red Dogs Intelligence to move faster, catch risks earlier, and close more of the right deals.
                 </p>
                 <div className="flex items-center gap-8 opacity-60 grayscale">
                   <div className="text-xl font-bold font-serif tracking-widest">CBRE</div>
@@ -264,7 +263,7 @@ export default function Home() {
                 </div>
                 <h3 className="text-3xl sm:text-4xl font-extrabold mb-6 leading-tight">Uncover off-market opportunities with precision.</h3>
                 <p className="text-gray-400 text-lg leading-relaxed mb-8">
-                  Stop relying on outdated county records. Kwizi aggregates millions of data points—from zoning and floodplains to historical sales and school ratings—so you can identify high-value parcels before they hit the market.
+                  Stop relying on outdated county records. Red Dogs aggregates millions of data points—from zoning and floodplains to historical sales and school ratings—so you can identify high-value parcels before they hit the market.
                 </p>
                 <ul className="space-y-4">
                   {[
@@ -432,7 +431,7 @@ export default function Home() {
         <section className="py-24 bg-gradient-to-b from-black to-[#021008] border-t border-white/5 text-center">
            <div className="max-w-3xl mx-auto px-4">
               <h2 className="text-4xl sm:text-5xl font-extrabold mb-6">Ready to see the full picture?</h2>
-              <p className="text-xl text-gray-400 mb-10">Join the top land teams using Kwizi to source and evaluate property in seconds.</p>
+              <p className="text-xl text-gray-400 mb-10">Join the top land teams using Red Dogs to source and evaluate property in seconds.</p>
               <Link
                 href="/map"
                 className="inline-flex justify-center items-center gap-2 bg-[#7ef29d] hover:bg-[#68e08a] text-black px-10 py-4 rounded text-lg font-bold transition-colors"
@@ -450,10 +449,9 @@ export default function Home() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-12 mb-20">
             <div className="col-span-2 pr-0 sm:pr-12">
               <Link href="/" className="flex items-center gap-3 mb-8">
-                <div className="w-10 h-10 bg-[#7ef29d] rounded flex items-center justify-center">
-                  <span className="text-black font-extrabold text-xl">K</span>
-                </div>
-                <span className="font-extrabold text-2xl text-white tracking-tight">Kwizi</span>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/red-dogs-logo.png" alt="Red Dogs logo" className="w-10 h-10 rounded object-cover" />
+                <span className="font-extrabold text-2xl text-white tracking-tight">Red Dogs</span>
               </Link>
               <p className="text-gray-400 text-lg max-w-sm leading-relaxed">
                 The ultimate Houston real estate analytics platform. Make smarter decisions with live data, interactive maps, and AI insights.
@@ -480,7 +478,7 @@ export default function Home() {
           </div>
           
           <div className="pt-8 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-gray-500 font-medium">
-            <div>© {new Date().getFullYear()} Kwizi Realty. All rights reserved.</div>
+            <div>© {new Date().getFullYear()} Red Dogs Realty. All rights reserved.</div>
             <div className="flex gap-6">
               <a href="#" className="hover:text-white transition-colors">Twitter</a>
               <a href="#" className="hover:text-white transition-colors">LinkedIn</a>

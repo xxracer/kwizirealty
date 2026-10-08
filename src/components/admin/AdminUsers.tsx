@@ -208,18 +208,14 @@ function AccessControlCard() {
     }
   };
 
+  // OWNER POLICY: the map is always open (no login, ever — forced in
+  // authGate). Only the /admin switch exists here.
   const rows = [
-    {
-      key: 'mapLoginRequired' as const,
-      savingKey: 'map' as const,
-      title: 'Map login',
-      desc: 'Require sign-in (email + password) to open /map.',
-    },
     {
       key: 'adminLoginRequired' as const,
       savingKey: 'admin' as const,
       title: 'Admin login',
-      desc: 'Require admin sign-in to open the CMS (/admin).',
+      desc: 'Require admin sign-in to open the CMS (/admin). The map is always open — no login, by design.',
     },
   ];
 
@@ -229,10 +225,12 @@ function AccessControlCard() {
         <Shield className="w-4 h-4 text-emerald-400" /> Access Control
       </h4>
       <p className="text-xs text-gray-400 mt-1">
-        Login switches apply to every visitor instantly and stay in sync live.
-        If the setting is unavailable, the default is protected (login required).
+        The map (/map) is ALWAYS open — it never asks for a login. This switch
+        controls the CMS (/admin) and applies to every visitor instantly,
+        live. If the setting is unavailable, the CMS defaults to
+        protected (admin login required).
       </p>
-      <div className="mt-4 grid sm:grid-cols-2 gap-4">
+      <div className="mt-4 grid sm:grid-cols-1 gap-4">
         {rows.map((row) => (
           <div key={row.key} className="border border-border-subtle rounded-xl p-4 flex items-start justify-between gap-4">
             <div>

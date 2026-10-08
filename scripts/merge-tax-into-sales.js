@@ -21,7 +21,7 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { getDataConnect } = require('firebase-admin/data-connect');
 
 const app = initializeApp({});
-const dc = getDataConnect({ location: 'us-central1', serviceId: 'kwizi-sql', connector: 'default' }, app);
+const dc = getDataConnect({ location: 'us-east4', serviceId: 'resdogs-4c0ff-service', connector: 'default' }, app);
 const db = getFirestore(app);
 
 /** Default filter frame, identical to buildVariables() in /api/query. */

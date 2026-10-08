@@ -27,7 +27,7 @@ you:
 
   CSV data (sales, prices, schools, etc.)
       -> SQL: Firebase Data Connect / PostgreSQL
-         (service "kwizi-sql", region us-central1)
+         (service "resdogs", region us-east4)
          This is the SINGLE SOURCE OF TRUTH for all rows.
 
   Polygons (GeoJSON)

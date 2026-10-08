@@ -7,7 +7,7 @@ selected areas' rows.
 
 ## Done (2026-09-10) — SQL mirror is LIVE
 
-- Service `kwizi-sql` deployed in `us-central1` (schema + connector `default`).
+- Service `resdogs` deployed in `us-east4` (schema + connector `default`).
 - Postgres `properties` table created with correct Float columns
   (`pricePerSqft`, `lotSize`, `maintFee`, `taxRate`, `taxAmount` — decimals in
   the real data broke Int columns).
