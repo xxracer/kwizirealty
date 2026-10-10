@@ -29,7 +29,10 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">
+      {/* suppressHydrationWarning: browser extensions (e.g. Grammarly's
+          data-gr-ext-installed) inject attributes into <body> before React
+          loads and cause a harmless hydration-mismatch console error. */}
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
         <AuthProvider>{children}</AuthProvider>
         <CookieConsent />
       </body>

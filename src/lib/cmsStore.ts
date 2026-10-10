@@ -587,9 +587,13 @@ export const cmsStore = {
       batch.delete(docSnap.ref);
       // Files live at their descriptive storagePath (e.g. cms_files/csv/<name>.csv),
       // not at cms_files/<docId>.csv — deleting the doc-id path silently no-ops.
+      // EACH SQL import also keeps a raw backup at
+      // cms_files/sql_imports/<docId>.csv.gz — "delete all" must remove that
+      // backup too, otherwise the CSV still exists in Storage after the wipe.
       try {
         const pathToDelete = data.storagePath || `cms_files/${docSnap.id}.csv`;
         deleteObject(ref(storage, pathToDelete)).catch(() => {});
+        deleteObject(ref(storage, `cms_files/sql_imports/${docSnap.id}.csv.gz`)).catch(() => {});
       } catch (e) {}
     });
     await batch.commit();
