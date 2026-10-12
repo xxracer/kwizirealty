@@ -16,6 +16,7 @@ import { engine, type BoundaryKey, type MetricKey, type PropertyData } from '@/l
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import { auth } from '@/lib/firebase';
 import {
+  clearPendingProperties,
   commitPendingProperties,
   commitPendingSession,
   countCommittedProperties,
@@ -1244,6 +1245,10 @@ function AdminPageInner() {
      *  GeoJSON in a data section points the user to the right section, any
      *  other non-CSV document says it cannot be uploaded. */
     skippedFiles: { name: string; message: string }[];
+    /** Files auto-routed to their own section instead of this one (owner
+     *  rule 2026-10-11: everything in the folder uploads; these show in a
+     *  separate blue box, never silent). */
+    routed?: { name: string; message: string }[];
   } | null>(null);
   /** Files whose detected data type doesn't match the section they were
    *  dropped on — the big centered popup explains and offers one-click fixes. */
@@ -1374,6 +1379,29 @@ function AdminPageInner() {
       console.error('[admin] force commit failed', err);
       setToast({ type: 'error', message: `Could not force commit: ${message}` });
       setSqlStatus((s) => ({ ...s, loading: false, error: message }));
+    }
+  };
+
+  /** OWNER REQUEST (2026-10-11): next to "Confirm all now", a "Cancel all now"
+   *  that deletes the pending SQL rows — when you cancel, NOTHING enters the
+   *  map: the staged rows are wiped from the database and the staged file
+   *  entries (whose rows lived in SQL) are removed from the staging panel. */
+  const handleCancelAll = async () => {
+    if (!confirm('Delete ALL pending SQL rows? Nothing will be uploaded to the map. This cannot be undone.')) return;
+    setProcessing(true);
+    try {
+      await clearPendingProperties();
+      // SQL-only staged entries die with their rows; non-SQL staged files
+      // (GeoJSON etc.) stay untouched in the panel.
+      setStagedFiles((prev) => prev.filter((s) => !s.sessionId));
+      await loadSqlStatus();
+      setToast({ type: 'success', message: 'Pending rows deleted — nothing entered the map database.' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[admin] cancel pending failed', err);
+      setToast({ type: 'error', message: `Could not delete the pending rows: ${message}` });
+    } finally {
+      setProcessing(false);
     }
   };
 
@@ -1526,6 +1554,8 @@ function AdminPageInner() {
     staged: number;
     skipped: number;
     reportItems?: unknown[];
+    skippedFiles?: { name: string; message: string }[];
+    routed?: { name: string; message: string }[];
   } | null> => {
     if (!fileList?.length) return null;
     // silent: an auto-routed sub-batch (its summary merges into the caller's;
@@ -1571,7 +1601,14 @@ function AdminPageInner() {
     // automatic routing.
     const routedGroups: Partial<Record<Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, File[]>> = {};
     const routedMessages: { name: string; message: string }[] = [];
-    const routedSubSummaries: { found: number; staged: number; skipped: number; reportItems?: unknown[] }[] = [];
+    const routedSubSummaries: {
+      found: number;
+      staged: number;
+      skipped: number;
+      reportItems?: unknown[];
+      skippedFiles?: { name: string; message: string }[];
+      routed?: { name: string; message: string }[];
+    }[] = [];
 
     const inputFiles = Array.from(fileList);
     const acceptedExt =
@@ -1939,6 +1976,7 @@ function AdminPageInner() {
         skipped: skippedCount,
         reasons: skippedReasons,
         skippedFiles: skippedFileMessages,
+        routed: routedMessages,
       });
     }
 
@@ -1956,25 +1994,27 @@ function AdminPageInner() {
 
     // Final merged summary: this call + every auto-routed sub-batch, so the
     // owner sees the WHOLE folder's result in one honest box.
-    if (routedSubSummaries.length > 0 || routedMessages.length > 0) {
-      let found = inputFiles.length;
-      let staged = newStaged.length;
-      let skipped = skippedCount;
-      for (const sub of routedSubSummaries) {
-        found += sub.found;
-        staged += sub.staged;
-        skipped += sub.skipped;
-      }
+    let allRouted = routedMessages;
+    if (routedSubSummaries.length > 0) {
+      // The routed files are PART of this drop — found is NOT re-counted; the
+      // staged total spans here + each routed bucket; failures accumulate.
+      const subStaged = routedSubSummaries.reduce((a, s2) => a + s2.staged, 0);
+      const subSkipped = routedSubSummaries.reduce((a, s2) => a + s2.skipped, 0);
+      allRouted = [
+        ...routedMessages,
+        ...routedSubSummaries.flatMap((s2) => s2.routed ?? []),
+      ];
       if (!opts?.silent) {
         setUploadSummary({
-          found,
-          staged,
-          skipped,
-          reasons: { ...skippedReasons, ...(routedMessages.length ? { 'auto-routed': routedMessages.length } : {}) },
-          skippedFiles: [...skippedFileMessages, ...routedMessages],
+          found: inputFiles.length,
+          staged: newStaged.length + subStaged,
+          skipped: skippedCount + subSkipped,
+          reasons: skippedReasons,
+          skippedFiles: [...skippedFileMessages, ...routedSubSummaries.flatMap((s2) => s2.skippedFiles ?? [])],
+          routed: allRouted,
         });
       }
-      console.log(`[handleFiles] merged with ${routedSubSummaries.length} auto-routed batch(es): found=${found}, staged=${staged}`);
+      console.log(`[handleFiles] merged with ${routedSubSummaries.length} auto-routed batch(es): staged=${newStaged.length + subStaged}`);
     }
 
     if (newStaged.length > 0) {
@@ -2036,6 +2076,8 @@ function AdminPageInner() {
       staged: newStaged.length,
       skipped: skippedCount,
       reportItems: ownReportItems,
+      skippedFiles: skippedFileMessages,
+      routed: allRouted && allRouted.length ? allRouted : undefined,
     };
 
     if (newStaged.length > 0) {
@@ -3178,6 +3220,15 @@ function AdminPageInner() {
         >
           {sqlStatus.loading ? 'Processing…' : 'Confirm all now'}
         </button>
+        {/* OWNER REQUEST (2026-10-11): the cancel counterpart — deletes the
+            pending rows so nothing enters the map. */}
+        <button
+          onClick={handleCancelAll}
+          disabled={sqlStatus.loading}
+          className="shrink-0 px-4 py-2 bg-transparent hover:bg-red-500/10 disabled:bg-transparent text-red-400 hover:text-red-300 border border-red-500/40 text-sm font-medium rounded-xl transition-colors"
+        >
+          Cancel all now
+        </button>
       </div>
 
       <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -3991,38 +4042,64 @@ function AdminPageInner() {
 
               <div className="lg:col-span-2">
                 {uploadSummary && uploadSummary.skipped > 0 && (
-                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 mb-4">
-                    <div className="text-sm font-semibold text-white mb-1">
-                      {uploadSummary.found} file(s) found · {uploadSummary.staged} staged · {uploadSummary.skipped} skipped
+                  <div className="bg-red-500/10 border-2 border-red-500/50 rounded-2xl p-4 mb-4">
+                    <div className="text-sm font-bold text-red-300 mb-1 flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4" /> {uploadSummary.skipped} file(s) could NOT be uploaded
                     </div>
-                    <div className="text-xs text-gray-400">
+                    <div className="text-xs text-gray-300">
                       {Object.entries(uploadSummary.reasons).map(([reason, count]) => {
                         const labels: Record<string, string> = {
-                          'wrong-extension': 'wrong file type',
+                          'wrong-extension': 'could not upload it (not a supported file for this section)',
                           'missing-columns': 'missing required columns',
                           'wrong-section': 'belongs to a different section',
-                          'parse-error': 'parse/read error',
+                          'parse-error': 'the file could not be read/parsed — check the console for details',
                         };
                         return <span key={reason} className="mr-3">{count} {labels[reason] || reason}</span>;
                       })}
+                      {uploadSummary.found > 0 && (
+                        <span className="text-gray-500 ml-1">({uploadSummary.found} file(s) in the folder · {uploadSummary.staged} uploaded total)</span>
+                      )}
                     </div>
                     {uploadSummary.skippedFiles.length > 0 && (
                       <ul className="mt-3 space-y-1.5">
-                        {uploadSummary.skippedFiles.slice(0, 15).map((f, i) => (
+                        {uploadSummary.skippedFiles.slice(0, 25).map((f, i) => (
                           <li
                             key={i}
-                            className="text-[11px] leading-snug text-amber-200/90 bg-background/60 border border-amber-500/20 rounded-lg px-3 py-1.5 break-all"
+                            className="text-[11px] leading-snug text-red-200 bg-red-500/5 border border-red-500/30 rounded-lg px-3 py-1.5 break-all"
                           >
                             {f.message}
                           </li>
                         ))}
-                        {uploadSummary.skippedFiles.length > 15 && (
-                          <li className="text-[11px] text-amber-200/70 px-3">
-                            +{uploadSummary.skippedFiles.length - 15} more file(s) skipped for the reasons above.
+                        {uploadSummary.skippedFiles.length > 25 && (
+                          <li className="text-[11px] text-red-300/80 px-3">
+                            +{uploadSummary.skippedFiles.length - 25} more file(s) could not be uploaded for the reasons above.
                           </li>
                         )}
                       </ul>
                     )}
+                  </div>
+                )}
+                {uploadSummary && uploadSummary.routed && uploadSummary.routed.length > 0 && (
+                  <div className="bg-cyan-500/10 border border-cyan-500/40 rounded-2xl p-4 mb-4">
+                    <div className="text-sm font-bold text-cyan-200 mb-1 flex items-center gap-2">
+                      <CheckCircle className="w-4 h-4" /> {uploadSummary.routed.length} file(s) were uploaded in their own section
+                    </div>
+                    <p className="text-[11px] text-gray-400">
+                      They were not uploaded here because their data belongs somewhere else — but they DID upload (below is where each went).
+                    </p>
+                    <ul className="mt-2 space-y-1.5">
+                      {uploadSummary.routed.slice(0, 25).map((f, i) => (
+                        <li
+                          key={i}
+                          className="text-[11px] leading-snug text-cyan-100/90 bg-cyan-500/5 border border-cyan-500/25 rounded-lg px-3 py-1.5 break-all"
+                        >
+                          {f.message}
+                        </li>
+                      ))}
+                      {uploadSummary.routed.length > 25 && (
+                        <li className="text-[11px] text-cyan-300/80 px-3">+{uploadSummary.routed.length - 25} more routed file(s).</li>
+                      )}
+                    </ul>
                   </div>
                 )}
                 {stagedFiles.length > 0 && (
@@ -4780,22 +4857,43 @@ function AdminPageInner() {
             </div>
 
             <div className="flex-1 overflow-auto p-5 space-y-3">
-              {/* Skipped files — same place as the uploaded ones so the user
-                  sees everything that happened to the folder in one glance. */}
+              {/* Files that could NOT be uploaded — RED with the reason per
+                  file, owner requirement: nothing skips silently. */}
               {uploadSummary && uploadSummary.skippedFiles.length > 0 && (
-                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
-                  <p className="text-xs font-semibold text-amber-200 mb-1.5">
-                    Skipped files ({uploadSummary.skippedFiles.length})
+                <div className="bg-red-500/10 border-2 border-red-500/50 rounded-xl px-4 py-3">
+                  <p className="text-xs font-bold text-red-300 mb-1.5 flex items-center gap-2">
+                    <AlertTriangle className="w-3.5 h-3.5" /> Could NOT be uploaded ({uploadSummary.skippedFiles.length})
                   </p>
                   <ul className="space-y-1">
                     {uploadSummary.skippedFiles.slice(0, 20).map((f, i) => (
-                      <li key={i} className="text-[11px] leading-snug text-amber-200/90 break-all">
+                      <li key={i} className="text-[11px] leading-snug text-red-200 break-all">
                         {f.message}
                       </li>
                     ))}
                     {uploadSummary.skippedFiles.length > 20 && (
-                      <li className="text-[11px] text-amber-200/70">
-                        +{uploadSummary.skippedFiles.length - 20} more file(s) skipped.
+                      <li className="text-[11px] text-red-300/80">
+                        +{uploadSummary.skippedFiles.length - 20} more file(s) — same reasons.
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              )}
+              {/* Files uploaded somewhere else (their own section) — CYAN so
+                  "only 19 of 24" reads as 24 uploaded + 5 here-listed. */}
+              {uploadSummary && uploadSummary.routed && uploadSummary.routed.length > 0 && (
+                <div className="bg-cyan-500/10 border border-cyan-500/40 rounded-xl px-4 py-3">
+                  <p className="text-xs font-bold text-cyan-200 mb-1.5 flex items-center gap-2">
+                    <CheckCircle className="w-3.5 h-3.5" /> Uploaded in their own section ({uploadSummary.routed.length})
+                  </p>
+                  <ul className="space-y-1">
+                    {uploadSummary.routed.slice(0, 20).map((f, i) => (
+                      <li key={i} className="text-[11px] leading-snug text-cyan-100/90 break-all">
+                        {f.message}
+                      </li>
+                    ))}
+                    {uploadSummary.routed.length > 20 && (
+                      <li className="text-[11px] text-cyan-300/80">
+                        +{uploadSummary.routed.length - 20} more routed file(s).
                       </li>
                     )}
                   </ul>
