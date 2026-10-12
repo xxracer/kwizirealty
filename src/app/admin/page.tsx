@@ -24,6 +24,7 @@ import {
   stagePropertyRows,
 } from '@/lib/dataConnectClient';
 import { publishSqlDatasetVersion } from '@/lib/sqlSync';
+import { isSQLEnabled } from '@/lib/sqlData';
 import {
   csvToFeatureCollection,
   diffAgainstExisting,
@@ -71,7 +72,20 @@ import {
   Loader2,
 } from 'lucide-react';
 
-type AdminSection = 'dashboard' | 'sales' | 'rent' | 'current' | 'tax' | 'schools' | 'boundaries' | 'areas' | 'ads' | 'users';
+type AdminSection =
+  | 'dashboard'
+  | 'sales'
+  | 'current-sales'
+  | 'current-rent'
+  | 'current-tax'
+  | 'current'
+  | 'rent'
+  | 'tax'
+  | 'schools'
+  | 'boundaries'
+  | 'areas'
+  | 'ads'
+  | 'users';
 type DataTab = 'upload' | 'edit';
 type PropertyEditMode = 'edit' | 'create';
 
@@ -120,13 +134,24 @@ const SECTIONS: { id: AdminSection; label: string; icon: React.ReactNode; desc: 
   { id: 'dashboard', label: 'Dashboard', icon: <Home className="w-4 h-4" />, desc: 'Overview of all data' },
   { id: 'sales', label: 'Sales Data', icon: <TrendingUp className="w-4 h-4" />, desc: 'Sold prices & history' },
   { id: 'rent', label: 'Rent Data', icon: <DollarSign className="w-4 h-4" />, desc: 'Rental prices & history' },
-  { id: 'current', label: 'Current Listings', icon: <Building className="w-4 h-4" />, desc: 'Active for sale / for rent' },
+  // OWNER MODEL: Current Listings opens a downward submenu — each child is an
+  // INDEPENDENT upload folder (its own Sales bundle, its own Rent bundle —
+  // uploads stay separate, never one combined bucket).
+  { id: 'current', label: 'Current Listings', icon: <Building className="w-4 h-4" />, desc: 'All current listings — upload inside a folder' },
+  { id: 'current-sales', label: '└ Sales', icon: <Building className="w-4 h-4 opacity-60" />, desc: 'Current for-sale uploads' },
+  { id: 'current-rent', label: '└ Rent', icon: <Building className="w-4 h-4 opacity-60" />, desc: 'Current for-rent uploads' },
+  { id: 'current-tax', label: '└ Taxes', icon: <FileText className="w-4 h-4 opacity-60" />, desc: 'Current tax uploads' },
   { id: 'tax', label: 'Tax Records', icon: <FileText className="w-4 h-4" />, desc: 'Assessed values & taxes' },
   { id: 'schools', label: 'School Ratings', icon: <School className="w-4 h-4" />, desc: 'TEA scores' },
   { id: 'areas', label: 'Area Metrics', icon: <Layers className="w-4 h-4" />, desc: 'Boundary GeoJSON uploads' },
   { id: 'ads', label: 'Ads Campaigns', icon: <Megaphone className="w-4 h-4" />, desc: 'Manage advertisements' },
   { id: 'users', label: 'System Users', icon: <Users className="w-4 h-4" />, desc: 'Manage access' },
 ];
+
+/** Child sections that expand (drill down) under their parent in the sidebar. */
+const SECTION_CHILDREN: Partial<Record<AdminSection, AdminSection[]>> = {
+  current: ['current-sales', 'current-rent', 'current-tax'],
+};
 
 interface SectionConfig {
   title: string;
@@ -174,6 +199,41 @@ const SECTION_CONFIG: Record<Exclude<AdminSection, 'dashboard' | 'ads' | 'users'
     requiredColumns: REQUIRED_PROPERTY_HEADERS,
     category: ['current-sale', 'current-rent', 'property'],
     fileHint: 'Current for Sale / Current for Rent CSVs',
+  },
+  'current-sales': {
+    title: 'Current Listings — Sales',
+    subtitle: 'Manage the Current Listings of the Sales bucket only.',
+    whatItModifies: [
+      'Active for-sale listings on the map',
+      'Current sale list prices',
+      'HOA fees shown on property cards',
+    ],
+    requiredColumns: REQUIRED_PROPERTY_HEADERS,
+    category: ['current-sale', 'property'],
+    fileHint: 'Current for Sale CSVs — kept INDEPENDENT from Rent and Tax uploads',
+  },
+  'current-rent': {
+    title: 'Current Listings — Rent',
+    subtitle: 'Manage the Current Listings of the Rent bucket only.',
+    whatItModifies: [
+      'Active for-rent listings on the map',
+      'Current rent prices',
+      'HOA fees shown on property cards',
+    ],
+    requiredColumns: REQUIRED_PROPERTY_HEADERS,
+    category: ['current-rent'],
+    fileHint: 'Current for Rent CSVs — kept INDEPENDENT from Sales and Tax uploads',
+  },
+  'current-tax': {
+    title: 'Current Listings — Taxes',
+    subtitle: 'Manage the Current Listings of the Tax bucket only.',
+    whatItModifies: [
+      'Tax amount/rate/year attached to current listings',
+      'Tax coverage on the report panel',
+    ],
+    requiredColumns: REQUIRED_TAX_HEADERS,
+    category: ['current-tax', 'tax'],
+    fileHint: 'Current Taxes CSVs — uploads go to the Current-Taxes bucket only',
   },
   tax: {
     title: 'Tax Records',
@@ -446,12 +506,12 @@ function findMlsColumn(headers: string[] | undefined): string | undefined {
 }
 
 /** Categories whose rows live in the SQL `properties` table (direct import). */
-const SQL_BACKED_CATEGORIES = new Set<string>(['sales', 'rent', 'current-sale', 'current-rent', 'tax']);
+const SQL_BACKED_CATEGORIES = new Set<string>(['sales', 'rent', 'current-sale', 'current-rent', 'current-tax', 'tax']);
 
 // After committing one of these buckets the tax records must be re-merged onto
 // the sale rows: a fresh sale upload brings new rows with empty tax fields, and
 // a tax upload brings the values to copy onto them. (mergeTaxIntoSaleRows.)
-const TAX_MERGE_CATEGORIES = new Set<string>(['sales', 'current-sale', 'tax']);
+const TAX_MERGE_CATEGORIES = new Set<string>(['sales', 'current-sale', 'current-tax', 'tax']);
 
 /**
  * Recompute the (mlsNumber, datasetYear) pairs a CSV file staged into SQL,
@@ -610,6 +670,13 @@ function detectCategory(fileName: string, section: AdminSection): CMSFileCategor
   for (let i = parts.length - 1; i >= 0; i--) {
     const part = parts[i];
     if (part.endsWith('.geojson') || part.endsWith('.json')) return 'boundary';
+    // "Current Taxes/…csv" must go to the current-tax bucket, not plain 'tax' —
+    // the current keyword wins over the generic tax check here.
+    if (part.includes('current')) {
+      if (part.includes('sale')) return 'current-sale';
+      if (part.includes('rent')) return 'current-rent';
+      if (part.includes('tax')) return 'current-tax';
+    }
     if (part.includes('tax')) return 'tax';
     if (part.includes('school')) {
       if (part.includes('elem')) return 'school-elementary';
@@ -632,6 +699,12 @@ function detectCategory(fileName: string, section: AdminSection): CMSFileCategor
   const fallback =
     section === 'sales'
       ? 'sales'
+      : section === 'current-sales'
+      ? 'current-sale'
+      : section === 'current-rent'
+      ? 'current-rent'
+      : section === 'current-tax'
+      ? 'current-tax'
       : section === 'rent'
       ? 'rent'
       : section === 'current'
@@ -652,8 +725,11 @@ function categorySectionName(category: CMSFileCategory): string {
     case 'rent':
       return 'Rent Data';
     case 'current-sale':
+      return 'Current Listings — Sales';
     case 'current-rent':
-      return 'Current Listings';
+      return 'Current Listings — Rent';
+    case 'current-tax':
+      return 'Current Listings — Taxes';
     case 'tax':
       return 'Tax Records';
     case 'school-elementary':
@@ -709,6 +785,8 @@ function effectSentenceFor(category: CMSFileCategory, year: number | null): stri
     case 'current-sale':
     case 'current-rent':
       return 'Active for-sale/for-rent listings, keyed by MLS number + year. Old records keep their own year entry — history is never deleted.';
+    case 'current-tax':
+      return 'Current tax listings: tax amount/rate/year keyed by MLS number. Attached to the rows that share the same MLS; re-uploading refreshes values.';
     case 'boundary':
     case 'custom-area':
       return 'GeoJSON areas: new features are drawn on the map; areas with the same name are updated.';
@@ -1008,40 +1086,67 @@ type TreeNode = {
   folders: { [key: string]: TreeNode };
 };
 
-function buildTree(files: Omit<CMSFileRecord, 'rows'>[], title: string): TreeNode {
+function buildTree(
+  files: Omit<CMSFileRecord, 'rows'>[],
+  title: string,
+  splitByType = false
+): TreeNode {
   const root: TreeNode = { name: 'Root', files: [], folders: {} };
   const sectionNode: TreeNode = { name: title, files: [], folders: {} };
   root.folders[title] = sectionNode;
 
-  // Group files by detected year so the admin sees "2021", "2022", ... folders.
-  const byYear: Record<string, Omit<CMSFileRecord, 'rows'>[]> = {};
-  for (const file of files) {
-    const cleanName = file.name.split('/').pop() || file.name;
-    const year = file.year ?? null;
-    const folder = year != null ? String(year) : 'No Year';
-    byYear[folder] = byYear[folder] || [];
-    byYear[folder].push({ ...file, name: cleanName });
+  const yearFolder = (f: Omit<CMSFileRecord, 'rows'>) =>
+    f.year != null ? String(f.year) : 'No Year';
+
+  const yearFolders = (list: Omit<CMSFileRecord, 'rows'>[]): Record<string, TreeNode> => {
+    const folders: Record<string, TreeNode> = {};
+    const byYear: Record<string, Omit<CMSFileRecord, 'rows'>[]> = {};
+    for (const file of list) {
+      byYear[yearFolder(file)] = byYear[yearFolder(file)] || [];
+      byYear[yearFolder(file)].push({ ...file, name: file.name.split('/').pop() || file.name });
+    }
+    const sortedFolders = Object.keys(byYear).sort((a, b) => {
+      const na = Number(a);
+      const nb = Number(b);
+      const aIsNum = !isNaN(na);
+      const bIsNum = !isNaN(nb);
+      if (aIsNum && bIsNum) return na - nb;
+      if (aIsNum) return -1;
+      if (bIsNum) return 1;
+      return a.localeCompare(b);
+    });
+    for (const folder of sortedFolders) {
+      folders[folder] = {
+        name: folder,
+        files: byYear[folder].sort((a, b) => a.name.localeCompare(b.name)),
+        folders: {},
+      };
+    }
+    return folders;
+  };
+
+  // Current Listings (and any section that opts in): separate For Sale /
+  // For Rent folders, with the year sub-folders nested inside each type.
+  if (splitByType) {
+    const typeGroups: Array<{ match: string[]; label: string }> = [
+      { match: ['current-sale'], label: 'For Sale' },
+      { match: ['current-rent'], label: 'For Rent' },
+      { match: ['current-tax'], label: 'Taxes' },
+      { match: ['property'], label: 'General' },
+    ];
+    for (const group of typeGroups) {
+      const list = files.filter((f) => group.match.includes(f.category));
+      if (!list.length) continue;
+      sectionNode.folders[group.label] = {
+        name: group.label,
+        files: [],
+        folders: yearFolders(list),
+      };
+    }
+    return root;
   }
 
-  const sortedFolders = Object.keys(byYear).sort((a, b) => {
-    const na = Number(a);
-    const nb = Number(b);
-    const aIsNum = !isNaN(na);
-    const bIsNum = !isNaN(nb);
-    if (aIsNum && bIsNum) return na - nb;
-    if (aIsNum) return -1;
-    if (bIsNum) return 1;
-    return a.localeCompare(b);
-  });
-
-  for (const folder of sortedFolders) {
-    sectionNode.folders[folder] = {
-      name: folder,
-      files: byYear[folder].sort((a, b) => a.name.localeCompare(b.name)),
-      folders: {},
-    };
-  }
-
+  sectionNode.folders = yearFolders(files);
   return root;
 }
 
@@ -1273,6 +1378,16 @@ function AdminPageInner() {
   };
 
   const reloadEngine = useCallback(async () => {
+    // SQL-FIRST: the map's aggregates come from /api/query, never from CSVs
+    // re-parsed in this tab. The old reload re-downloaded EVERY csv and
+    // parsed ~500k rows on the main thread — the exact "the CMS hangs, RAM
+    // collapses" the owner reported after each delete. SQL mode's refresh =
+    // bump the tick so the map's SQL effect re-queries (fresh ETag included).
+    if (isSQLEnabled()) {
+      setEngineLoaded(true);
+      setEngineTick((t) => t + 1);
+      return;
+    }
     await getEngine().loadAllCSV(true);
     setEngineLoaded(true);
     setEngineTick((t) => t + 1);
@@ -2425,9 +2540,20 @@ function AdminPageInner() {
       section === 'dashboard' || section === 'ads' || section === 'users'
         ? null
         : SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
-    const categories = sectionConfig
+    let categories = sectionConfig
       ? (Array.isArray(sectionConfig.category) ? sectionConfig.category : [sectionConfig.category])
       : [];
+    // Inside the Current Listings sub-menu, Delete-All scopes to the ACTIVE
+    // tab — deleting "Taxes" from the Tax tab must never take the Sales or
+    // Rent listings with it (and vice versa).
+    if (section === 'current' && currentSubTab !== 'all') {
+      categories =
+        currentSubTab === 'sale'
+          ? ['current-sale']
+          : currentSubTab === 'rent'
+          ? ['current-rent']
+          : ['current-tax'];
+    }
     const scope = sectionConfig?.title.toLowerCase() ?? 'uploaded';
     if (confirm(`Are you sure you want to delete ALL ${scope} files? This cannot be undone.`)) {
       setProcessing(true);
@@ -2443,6 +2569,7 @@ function AdminPageInner() {
         rent: { types: ['rent'], dateMode: 'dated' },
         'current-sale': { types: ['sale'], dateMode: 'undated' },
         'current-rent': { types: ['rent'], dateMode: 'undated' },
+        'current-tax': { types: ['tax'], dateMode: 'any' },
         tax: { types: ['tax'], dateMode: 'any' },
       };
       const sqlScope = { types: [] as string[], dateMode: 'any' as 'any' | 'dated' | 'undated' };
@@ -2520,8 +2647,8 @@ function AdminPageInner() {
   const getQuickFields = useCallback(
     (key: AdminSection): string[] => {
       if (key === 'rent') return RENT_QUICK_FIELDS;
-      if (key === 'current') return CURRENT_QUICK_FIELDS;
-      if (key === 'tax') return TAX_QUICK_FIELDS;
+      if (key === 'current' || key === 'current-sales' || key === 'current-rent') return CURRENT_QUICK_FIELDS;
+      if (key === 'tax' || key === 'current-tax') return TAX_QUICK_FIELDS;
       return SALES_QUICK_FIELDS;
     },
     []
@@ -2630,6 +2757,11 @@ function AdminPageInner() {
     setToast({ type: 'success', message: 'School rating saved and map updated.' });
   };
 
+  // Current Listings sub-menu state: which data kind is selected inside the
+  // section (All = every listing bucket, Sales / Rent / Taxes as requested
+  // by the owner — each tab filters AND scopes uploads/deletes).
+  const [currentSubTab, setCurrentSubTab] = useState<'all' | 'sale' | 'rent' | 'tax'>('all');
+
   const sectionFiles = useMemo(() => {
     if (section === 'dashboard' || section === 'ads' || section === 'users') return [];
     // 'areas' reads SECTION_CONFIG like every other section — its category is
@@ -2637,9 +2769,16 @@ function AdminPageInner() {
     // boundary GeoJSON files appear here.
     const config = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
     if (!config) return [];
-    const cats = Array.isArray(config.category) ? config.category : [config.category];
+    let cats = Array.isArray(config.category) ? config.category : [config.category];
+    // Current Listings sub-menu: the section drills down by data kind —
+    // Sales / Rent tabs filter the section to exactly that bucket.
+    if (section === 'current') {
+      if (currentSubTab === 'sale') cats = ['current-sale'];
+      else if (currentSubTab === 'rent') cats = ['current-rent'];
+      else if (currentSubTab === 'tax') cats = ['current-tax'];
+    }
     return files.filter((f) => cats.includes(f.category));
-  }, [files, section]);
+  }, [files, section, currentSubTab]);
 
   const filteredFiles = useMemo(() => {
     if (!searchQuery.trim()) return sectionFiles;
@@ -3184,10 +3323,19 @@ function AdminPageInner() {
     }));
   }, [filteredProperties, getEngine().isLoaded, engineTick]);
 
-  const renderPropertyEditor = (mode: 'sales' | 'rent' | 'current') => {
+  const renderPropertyEditor = (mode: 'sales' | 'rent' | 'current' | 'current-sales' | 'current-rent') => {
     const property = propertyEditMode === 'edit' ? selectedProperty : null;
     const fields = getQuickFields(mode);
-    const sectionName = mode === 'rent' ? 'Rent Data' : mode === 'current' ? 'Current Listings' : 'Sales Data';
+    const sectionName =
+      mode === 'rent'
+        ? 'Rent Data'
+        : mode === 'current-sales'
+        ? 'Current Listings — Sales'
+        : mode === 'current-rent'
+        ? 'Current Listings — Rent'
+        : mode === 'current'
+        ? 'Current Listings'
+        : 'Sales Data';
 
     return (
       <div className="bg-surface border border-border-subtle rounded-2xl p-5">
@@ -3703,6 +3851,30 @@ function AdminPageInner() {
             <div className="grid lg:grid-cols-3 gap-6">
               <div className="lg:col-span-1">
                 <div className="bg-surface border border-border-subtle rounded-2xl p-5 sticky top-4">
+                  {/* OWNER MODEL: the Current Listings PARENT is an overview only.
+                      Nothing is uploaded here — each bucket uploads inside its
+                      own sub-menu folder (Sales / Rent / Taxes). */}
+                  {key === 'current' ? (
+                    <>
+                      <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                        <Upload className="w-4 h-4" /> File overview
+                      </h3>
+                      <div className="border border-amber-500/30 bg-amber-500/10 rounded-xl p-4 text-xs text-amber-200 leading-relaxed">
+                        <p className="font-semibold text-amber-300 mb-1">No uploads in this panel</p>
+                        <p>
+                          Current Listings shows every complete current list (Sales, Rent and
+                          Taxes). Uploads are INDEPENDENT per bucket — open one of the folders
+                          in the sidebar menu below Current Listings:
+                        </p>
+                        <ul className="mt-2 space-y-1 text-[11px]">
+                          <li>└ Sales → uploads Current for-Sale CSVs</li>
+                          <li>└ Rent → uploads Current for-Rent CSVs</li>
+                          <li>└ Taxes → uploads Current Taxes CSVs</li>
+                        </ul>
+                      </div>
+                    </>
+                  ) : (
+                    <>
                   <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
                     <Upload className="w-4 h-4" /> Upload {config.title}
                   </h3>
@@ -3741,6 +3913,8 @@ function AdminPageInner() {
                       </div>
                     </div>
                   </div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -3954,6 +4128,32 @@ function AdminPageInner() {
                 )}
 
                 <div className="bg-surface border border-border-subtle rounded-2xl p-5">
+                  {/* Current Listings sub-menu — the owner asked for a drill-down
+                      (Sales / Rent / Taxes and so on) inside the section. Each
+                      tab scopes uploads, the file tree and Delete-All to that
+                      bucket; "All" keeps the whole section in one list. */}
+                  {section === 'current' && (
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      {([
+                        { id: 'all', label: 'All listings' },
+                        { id: 'sale', label: 'Sales' },
+                        { id: 'rent', label: 'Rent' },
+                        { id: 'tax', label: 'Taxes' },
+                      ] as const).map((tab) => (
+                        <button
+                          key={tab.id}
+                          onClick={() => setCurrentSubTab(tab.id)}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                            currentSubTab === tab.id
+                              ? 'bg-blue-600 text-white shadow'
+                              : 'bg-background text-gray-400 hover:text-white border border-border-subtle'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex flex-col sm:flex-row gap-3 mb-4 items-start sm:items-center justify-between">
                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
                       <Database className="w-4 h-4" /> Uploaded {config.title} Files
@@ -3979,12 +4179,12 @@ function AdminPageInner() {
 
                   {filteredFiles.length === 0 ? (
                     <div className="text-sm text-gray-500 py-8 text-center bg-background/40 rounded-xl border border-border-subtle">
-                      No {config.title.toLowerCase()} files uploaded yet.
+                      No {currentSubTab === 'all' ? config.title.toLowerCase() : currentSubTab === 'sale' ? 'sales' : currentSubTab === 'rent' ? 'rent' : 'tax'} files uploaded yet — drop them on the upload card above.
                     </div>
                   ) : (
                     <div className="space-y-2 max-h-[500px] overflow-auto pr-1">
                       {(() => {
-                        const rootNode = buildTree(filteredFiles, config.title);
+                        const rootNode = buildTree(filteredFiles, config.title, section === 'current');
                         return Object.values(rootNode.folders).map(folder => (
                           <FolderNode 
                             key={folder.name} 
@@ -4029,9 +4229,9 @@ function AdminPageInner() {
           </>
         ) : (
           <>
-            {key === 'tax' && renderTaxEditor()}
+            {(key === 'tax' || key === 'current-tax') && renderTaxEditor()}
             {key === 'schools' && renderSchoolEditor()}
-            {(key === 'sales' || key === 'rent' || key === 'current') && renderPropertyEditor(key)}
+            {(key === 'sales' || key === 'rent' || key === 'current' || key === 'current-sales' || key === 'current-rent') && renderPropertyEditor(key)}
           </>
         )}
       </div>
@@ -4068,25 +4268,66 @@ function AdminPageInner() {
           </div>
         </div>
         <nav className="flex-1 p-3 space-y-1 overflow-auto">
-          {SECTIONS.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => setSection(s.id)}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all text-left ${
-                section === s.id
-                  ? 'bg-blue-600 text-white shadow'
-                  : highlightSection === s.id
-                  ? 'bg-cyan-500/15 text-white ring-2 ring-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.55)] animate-pulse'
-                  : 'text-gray-400 hover:bg-background hover:text-white'
-              }`}
-            >
-              {s.icon}
-              <span className="flex-1">{s.label}</span>
-              {highlightSection === s.id && section !== s.id && (
-                <span className="text-[9px] font-bold uppercase bg-cyan-400 text-black rounded-full px-1.5 py-0.5">Here</span>
-              )}
-            </button>
-          ))}
+          {SECTIONS.map((s) => {
+            const allChildren = new Set(Object.values(SECTION_CHILDREN).flat() as AdminSection[]);
+            if (allChildren.has(s.id)) return null; // rendered nested under its parent
+            const children = SECTION_CHILDREN[s.id] ?? [];
+            // A parent with children expands DOWNWARD whenever it (or one of
+            // its children) is the active/highlighted section — the drill-down
+            // upload folder model the owner asked for.
+            const expanded = children.length > 0 && (
+              section === s.id || children.includes(section) ||
+              highlightSection === s.id || children.includes(highlightSection as AdminSection)
+            );
+            const active = section === s.id || children.includes(section);
+            return (
+              <div key={s.id}>
+                <button
+                  onClick={() => setSection(s.id)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all text-left ${
+                    section === s.id
+                      ? 'bg-blue-600 text-white shadow'
+                      : highlightSection === s.id
+                      ? 'bg-cyan-500/15 text-white ring-2 ring-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.55)] animate-pulse'
+                      : active
+                      ? 'bg-blue-600/40 text-white'
+                      : 'text-gray-400 hover:bg-background hover:text-white'
+                  }`}
+                >
+                  {s.icon}
+                  <span className="flex-1">{s.label}</span>
+                  {children.length > 0 && (
+                    <span className="text-[10px] text-current opacity-70">{expanded ? '▾' : '▸'}</span>
+                  )}
+                  {highlightSection === s.id && section !== s.id && (
+                    <span className="text-[9px] font-bold uppercase bg-cyan-400 text-black rounded-full px-1.5 py-0.5">Here</span>
+                  )}
+                </button>
+                {expanded && (
+                  <div className="mt-1 mb-1 ml-4 pl-2 border-l border-border-subtle space-y-1">
+                    {children.map((childId) => {
+                      const child = SECTIONS.find((x) => x.id === childId);
+                      if (!child) return null;
+                      return (
+                        <button
+                          key={childId}
+                          onClick={() => setSection(childId)}
+                          className={`w-full flex items-center gap-2 pl-2.5 pr-3 py-2 rounded-lg text-xs font-medium transition-all text-left ${
+                            section === childId
+                              ? 'bg-blue-500/25 text-white'
+                              : 'text-gray-400 hover:bg-background hover:text-white'
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${section === childId ? 'bg-blue-400' : 'bg-gray-600'}`} />
+                          <span className="flex-1">{child.label.replace(/^└ /, '')}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </nav>
         <div className="p-4 border-t border-border-subtle">
           <Link

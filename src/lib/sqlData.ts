@@ -185,7 +185,9 @@ export async function fetchSqlAggregates(
     });
     if (!res.ok) return null;
     const data = await res.json();
-    if (data.unsupported || !data.mapValues) return null;
+    // selectionOnly responses carry mapValues/points = null (meaning "keep
+    // the base map state") — that is valid, not an unsupported metric.
+    if (data.unsupported || (!data.reportStats && !data.mapValues)) return null;
     return data as SqlAggregates;
   } catch {
     return null;

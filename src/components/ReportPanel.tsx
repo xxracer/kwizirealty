@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { BarChart3, Printer } from 'lucide-react';
+import { BarChart3, Database, Printer } from 'lucide-react';
 import type { MetricKey, PropertyData, BoundaryKey } from '@/lib/engine';
 import {
   QuickStatsCard,
@@ -268,6 +268,14 @@ export default function ReportPanel({
         <div className="flex items-center gap-2 text-gray-400">
           <BarChart3 className="w-4 h-4 text-blue-400" />
           <h2 className="text-xs font-bold uppercase tracking-wider">Detailed Market Report</h2>
+          {/* OWNER REQUIREMENT: the report marks exactly which data feeds it —
+              the uploaded CSV files (SQL datasets). */}
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 border border-blue-500/30 px-2 py-0.5 text-[10px] font-semibold text-blue-300"
+            title="Every number in this report comes from the CSV files uploaded through the CMS"
+          >
+            <Database className="w-3 h-3" /> {reportStats.count.toLocaleString()} rows from uploaded CSVs
+          </span>
         </div>
         <div className="flex items-center gap-4">
           <div className="text-xs text-gray-500 font-bold">{selectionSummary}</div>

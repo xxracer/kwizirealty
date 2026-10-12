@@ -17,6 +17,7 @@ export type SqlImportType =
   | 'rent'
   | 'current-sale'
   | 'current-rent'
+  | 'current-tax'
   | 'tax'
   | 'school-elementary'
   | 'school-middle'
@@ -79,11 +80,25 @@ function cleanNumber(val: unknown): number {
 
 function cleanDate(raw: string): { date: string; year: number; ts: number } {
   if (!raw) return { date: '', year: 0, ts: 0 };
+  // mm/dd/yyyy (har.com legacy exports)
   const parts = raw.split('/');
   if (parts.length === 3) {
     const y = parseInt(parts[2], 10);
     const m = parseInt(parts[0], 10);
     const d = parseInt(parts[1], 10);
+    const year = isFinite(y) ? y : 0;
+    const ts = year && m && d ? new Date(year, m - 1, d).getTime() : 0;
+    return { date: raw, year, ts };
+  }
+  // ISO YYYY-MM-DD (recent har.com exports). Without this branch both the
+  // year and the epoch timestamp end up 0 — which empties the monthly time
+  // series (close_date_ts > 0 filter), kills period filtering, and forces
+  // /api/query off its fast aggregate path onto the ~70s full-row fallback.
+  const iso = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    const y = parseInt(iso[1], 10);
+    const m = parseInt(iso[2], 10);
+    const d = parseInt(iso[3], 10);
     const year = isFinite(y) ? y : 0;
     const ts = year && m && d ? new Date(year, m - 1, d).getTime() : 0;
     return { date: raw, year, ts };
@@ -168,7 +183,9 @@ function isSaleType(type: SqlImportType): boolean {
 }
 
 function isTaxType(type: SqlImportType): boolean {
-  return type === 'tax';
+  // current-tax = tax values that belong to CURRENT (active) listings —
+  // same SQL bucket (listing_type 'tax'), its own CMS file bucket.
+  return type === 'tax' || type === 'current-tax';
 }
 
 /** True when the row has the minimum fields required for a property row. */

@@ -3,6 +3,7 @@
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch, query as fsQuery, where } from 'firebase/firestore';
 import { ref, uploadString, uploadBytes, getDownloadURL, deleteObject, listAll, getMetadata, type StorageReference } from 'firebase/storage';
 import { db, storage } from './firebase';
+import { isSQLEnabled } from './sqlData';
 import type { BoundaryKey, MetricKey } from './engine';
 import Papa from 'papaparse';
 
@@ -12,6 +13,7 @@ export type CMSFileCategory =
   | 'rent'
   | 'current-sale'
   | 'current-rent'
+  | 'current-tax'
   | 'tax'
   | 'school-elementary'
   | 'school-middle'
@@ -134,7 +136,7 @@ const listeners = new Set<() => void>();
  * Tax/school CSVs are dropped by the normalizer (no lat/lng) and boundary
  * geojson goes live immediately, so none of those trigger a rebuild.
  */
-const DATASET_CATEGORIES = new Set<CMSFileCategory>(['property', 'sales', 'rent', 'current-sale', 'current-rent']);
+const DATASET_CATEGORIES = new Set<CMSFileCategory>(['property', 'sales', 'rent', 'current-sale', 'current-rent', 'current-tax']);
 
 /**
  * Fires the automatic dataset rebuild in the admin's browser. Dynamic import
@@ -144,6 +146,13 @@ const DATASET_CATEGORIES = new Set<CMSFileCategory>(['property', 'sales', 'rent'
  * heavy jobs (memory care).
  */
 function triggerDatasetRebuild(delta: { addedRows?: number; removedRows?: number } = {}) {
+  // SQL-FIRST: the Storage manifest + browser rebuild is the legacy pipeline.
+  // With the SQL mirror as the source of truth (all admin uploads go straight
+  // to SQL), a rebuild would re-download EVERY csv and re-parse ~500k rows in
+  // this very tab — the "RAM collapse / everything loads at once / stuck"
+  // the owner reported after every delete. The map refreshes from SQL via
+  // /api/query instead; the worker rebuild stays for non-SQL mode only.
+  if (isSQLEnabled()) return;
   void import('./datasetRebuild/client')
     .then((m) => m.requestDatasetRebuild(delta))
     .catch(() => {});
@@ -162,16 +171,18 @@ function detectStorageCategory(name: string, fallback?: CMSFileCategory): CMSFil
     // serving the bundled local polygons instead.
     return 'boundary';
   }
+  if (lower.includes('tax') && !lower.includes('current')) return 'tax';
+  if (lower.includes('current')) {
+    if (lower.includes('rent')) return 'current-rent';
+    if (lower.includes('sale')) return 'current-sale';
+    if (lower.includes('tax')) return 'current-tax';
+  }
   if (lower.includes('tax')) return 'tax';
   if (lower.includes('school') || lower.includes('tea')) {
     if (lower.includes('elem')) return 'school-elementary';
     if (lower.includes('middle')) return 'school-middle';
     if (lower.includes('high')) return 'school-high';
     return 'school-elementary';
-  }
-  if (lower.includes('current')) {
-    if (lower.includes('rent')) return 'current-rent';
-    if (lower.includes('sale')) return 'current-sale';
   }
   if (lower.includes('rent')) return 'rent';
   if (lower.includes('sale') || lower.includes('sold')) return 'sales';

@@ -134,6 +134,66 @@ export async function GET(req: Request) {
   return POST(req);
 }
 
+/** The most-used metric×boundary combinations — warmed in order right after
+ *  the landing view so switching metric/boundary in the UI stays instant too. */
+const PREWARM_COMBOS: Array<{ boundary: string; metric: string }> = [
+  { boundary: 'subdivisions', metric: 'Close Price' },
+  { boundary: 'zipcodes', metric: 'Close Price' },
+  { boundary: 'highschools', metric: 'Close Price' },
+  { boundary: 'subdivisions', metric: 'Est. Rental Price' },
+  { boundary: 'zipcodes', metric: 'Est. Rental Price' },
+  { boundary: 'highschools', metric: 'Est. Rental Price' },
+  { boundary: 'subdivisions', metric: 'Price per Sqft' },
+  { boundary: 'subdivisions', metric: 'Days on Market' },
+  { boundary: 'elementary', metric: 'Elem ETA Score' },
+  { boundary: 'middle', metric: 'Middle ETA Score' },
+];
+
+const prewarmRequestBody = (boundary: string, metric: string) =>
+  JSON.stringify({
+    filters: {},
+    resolved: { elementary: [], middle: [], high: [] },
+    boundary,
+    metric,
+    selectedIds: [],
+    startTs: null,
+    endTs: null,
+    propertyOverrides: [],
+  });
+
+/** Fire-and-forget: compute the DEFAULT map view once and store it in the
+ *  /api/query result cache (cms_files/cache/…), so the next visitor's first
+ *  map load reads a warm entry instead of paying the multi-second aggregate
+ *  computation. Self-fetches this same deployment's /api/query — a plain
+ *  default-shaped body matches the canonical cache key real requests use. */
+function prewarmDefaultMapQuery(req: Request): void {
+  void (async () => {
+    try {
+      const origin = new URL(req.url).origin;
+      const target = new URL('/api/query', origin);
+      const landing = PREWARM_COMBOS[0];
+      await fetch(target, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: prewarmRequestBody(landing.boundary, landing.metric),
+      });
+      console.log('[sql/sync] default map view prewarmed');
+      // The rest warm in the background, spread out so no single burst of
+      // Postgres work stacks up at once.
+      for (const combo of PREWARM_COMBOS.slice(1)) {
+        await new Promise((s) => setTimeout(s, 2500));
+        await fetch(target, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: prewarmRequestBody(combo.boundary, combo.metric),
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('[sql/sync] prewarm failed:', err instanceof Error ? err.message : err);
+    }
+  })();
+}
+
 export async function POST(req: Request) {
   // Auth — a signed-in Firebase token, the CRON_SECRET (Vercel Cron keeps the
   // mirror fresh when no one has the map open), or a same-origin public call:
@@ -164,6 +224,28 @@ export async function POST(req: Request) {
   // below meant getAdminDataConnect()/getAdminAuth() never ran first).
   const db = getAdminFirestore();
   const stateRef = db.collection(STATE_DOC.collection).doc(STATE_DOC.id);
+  const state = await stateRef.get();
+  const stateData = state.data();
+  const current: SyncState = state.exists && stateData
+    ? { version: stateData.version ?? 0, syncedChunks: stateData.syncedChunks ?? [] }
+    : { version: 0, syncedChunks: [] };
+
+  // Direct SQL import mode (SQL_FIRST / admin uploads): the admin panel is the
+  // source of truth. The legacy Storage manifest must NEVER wipe rows that were
+  // uploaded directly to SQL, and the manifest doesn't even exist in this mode
+  // (its fetch failing 503'd this route before the state was ever read —
+  // a pointless retry loop on every SQL-first deployment). Check the mode
+  // FIRST; only Storage-manifest syncs need the manifest.
+  if (stateData?.directImport === true) {
+    // Fire-and-forget map prewarm: after every data publish the DEFAULT map
+    // view (landing state) is computed once and stored in the query result
+    // cache, so the next visitor's first /api/query reads a warm cache entry
+    // instead of running the ~15s Postgres workout. The cache key is
+    // canonical (filter defaults resolved server-side), so this plain
+    // default-shaped body warms the exact entry real map requests read.
+    prewarmDefaultMapQuery(req);
+    return NextResponse.json({ ok: true, done: true, version: current.version, skipped: true });
+  }
 
   // 1. Manifest = the single source of truth for what SQL must contain.
   const manifest = await fetchJson(MANIFEST_PATH);
@@ -175,20 +257,6 @@ export async function POST(req: Request) {
   const allChunks: string[] = [];
   for (const b of Object.keys(boundaries)) {
     for (const c of boundaries[b]?.chunks || []) allChunks.push(c);
-  }
-
-  const state = await stateRef.get();
-  const stateData = state.data();
-  const current: SyncState = state.exists && stateData
-    ? { version: stateData.version ?? 0, syncedChunks: stateData.syncedChunks ?? [] }
-    : { version: 0, syncedChunks: [] };
-
-  // Direct SQL import mode (SQL_FIRST / admin uploads): the admin panel is the
-  // source of truth. The legacy Storage manifest must NEVER wipe rows that were
-  // uploaded directly to SQL, because the manifest is empty when CSVs live in
-  // SQL only. Skip the destructive clear/ingest cycle in that mode.
-  if (stateData?.directImport === true) {
-    return NextResponse.json({ ok: true, done: true, version, skipped: true });
   }
 
   // Empty manifest = no published Storage dataset. Do not wipe SQL rows; the
@@ -214,6 +282,7 @@ export async function POST(req: Request) {
   const pending = allChunks.filter((c) => !syncedChunks.includes(c));
   if (pending.length === 0) {
     await stateRef.set({ version, syncedChunks, done: true, totalRows: manifest.totalRows ?? 0, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    prewarmDefaultMapQuery(req);
     return NextResponse.json({ ok: true, done: true, version, synced: allChunks.length, total: allChunks.length });
   }
 

@@ -35,6 +35,7 @@ import { getTeaScoreMaps } from '@/lib/server/teaScores';
 import { applyPropertyOverrides } from '@/lib/engineCore';
 import type { PropertyOverrideLite } from '@/lib/engineCore';
 import { getDatasetVersionTag } from '@/lib/server/datasetVersion';
+import { readQueryCache, writeQueryCache } from '@/lib/server/queryCache';
 import {
   generateETag,
   isMatch,
@@ -290,13 +291,47 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Bad request' }, { status: 400 });
   }
 
-  // Conditional cache: compute an ETag from the request body + dataset version.
-  // If the browser already has this exact response, return 304 with no body.
+  // Conditional cache: compute an ETag from a CANONICAL request identity +
+  // dataset version. The identity resolves every filter default server-side
+  // (buildVariables), sorts the selection/override arrays and drops body-shape
+  // noise — so any two requests that would compute the SAME response share one
+  // ETag/cache entry, no matter how the client serialized the body. That is
+  // what lets the prewarm (a plain default-shaped POST) warm the exact entry a
+  // real visitor's map (full filter state) will read.
   const datasetVersion = await getDatasetVersionTag();
-  const etag = generateETag(body, datasetVersion);
+  const identity = {
+    variables: buildVariables(filters, body.resolved, body.startTs, body.endTs, metric),
+    boundary: body.boundary,
+    metric: body.metric,
+    selection: [...(body.selectedIds ?? [])].sort(),
+    overrides: (body.propertyOverrides ?? [])
+      .slice()
+      .sort((a, b) => `${a.mlsNumber}/${a.id ?? ''}`.localeCompare(`${b.mlsNumber}/${b.id ?? ''}`)),
+    resolved: {
+      elementary: [...(body.resolved?.elementary ?? [])].sort(),
+      middle: [...(body.resolved?.middle ?? [])].sort(),
+      high: [...(body.resolved?.high ?? [])].sort(),
+    },
+  };
+  const etag = generateETag(identity, datasetVersion);
   if (isMatch(req, etag)) {
     return notModifiedResponse(etag);
   }
+
+  // Server-side result cache: the ETag encodes the body + dataset version, so
+  // it IS the cache key. A warm hit turns the 60s+ Postgres workout into a
+  // single Storage download; any data change rotates the key invalidates it.
+  const cacheKey = etag.slice(1, -1);
+  const cached = await readQueryCache(cacheKey);
+  if (cached) {
+    return withETag(cached.payload, cached.etag);
+  }
+
+  // Cold: compute and store for the next visitor.
+  const respond = (data: unknown) => {
+    writeQueryCache(cacheKey, etag, data);
+    return withETag(data, etag);
+  };
 
   const dc = getAdminDataConnect();
   const variables = buildVariables(filters, body.resolved, body.startTs, body.endTs, metric);
@@ -394,7 +429,7 @@ export async function POST(req: Request) {
 
       const points = pointRows.map((row: any) => ({ lat: Number(row.lat ?? 0), lng: Number(row.lng ?? 0) }));
 
-      return withETag({
+      return respond({
         mapValues: { values, counts, names },
         reportStats,
         marketHealth,
@@ -402,7 +437,7 @@ export async function POST(req: Request) {
         forecastComparison: [],
         yearBuiltData,
         points,
-      }, etag);
+      });
     } catch (err) {
       // Ops not deployed yet (or a thin result) — fall through to the legacy
       // full-row path so the response stays identical while the connector
@@ -412,6 +447,58 @@ export async function POST(req: Request) {
   }
 
   try {
+    // SELECTION REPORT — only the SELECTED areas' rows are needed. The old
+    // flow ALSO ran the full filteredProperties fetch (a capped 200k-row
+    // sample, ~70s through Data Connect) just to re-derive the map values the
+    // client ALREADY holds from its base (selection-less) query. Selection
+    // reports now skip that entirely and return aggregate-only rows
+    // (filteredPropertiesForSelection has no $limit — exact rows), with
+    // `mapValues`/`points` as null = "unchanged from the base query"; the
+    // page merges them with the map state it already owns. This turns a
+    // 75s selection report into a few seconds.
+    if (selectedIds && selectedIds.length) {
+      const { limit: _limit, ...selectionVars } = variables;
+      const selRes = await dc.executeQuery('filteredPropertiesForSelection', {
+        ...selectionVars,
+        boundary,
+        selectedIds,
+      });
+      const selRows: any[] = (selRes.data as any)?.properties || [];
+      const selProps = selRows.map(rowToProperty);
+      // CMS single-property edits apply before any aggregation.
+      if (body.propertyOverrides?.length) {
+        applyPropertyOverrides(selProps, body.propertyOverrides);
+      }
+
+      const selEngine = new RealEstateEngine();
+      selEngine.data = selProps;
+      if (ETA_METRICS.has(metric)) {
+        selEngine.setTeaScores(await getTeaScoreMaps());
+      }
+
+      const isRentalSel =
+        metric === 'Est. Rental Price' ||
+        metric === 'Rental Price per Sqft' ||
+        metric === 'Rental Days On Market' ||
+        metric === 'Rent-to-Sale Ratio';
+
+      return respond({
+        // null = unchanged from the base (selection-less) map query — the
+        // page keeps its previous mapValues/points instead of replacing them.
+        mapValues: null,
+        points: null,
+        reportStats: selEngine.getStatsForSelection(selProps, boundary, selectedIds),
+        marketHealth: selEngine.getMarketHealth(selProps, boundary, selectedIds, isRentalSel ? 'rental' : 'sale'),
+        timeSeries: selEngine.getTimeSeries(selProps, boundary, metric, selectedIds),
+        forecastComparison: selEngine
+          .getForecastForSelection(selProps, boundary, metric, selectedIds)
+          .sort((a, b) => b.baseline - a.baseline)
+          .slice(0, 5),
+        yearBuiltData: buildYearBuiltData(selEngine, selProps, boundary, selectedIds),
+        selectionOnly: true,
+      });
+    }
+
     // LEGACY PATH — map values + points from the (capped, uniform) sample.
     const mapRes = await dc.executeQuery('filteredProperties', variables);
     const rows: any[] = (mapRes.data as any)?.properties || [];
@@ -431,20 +518,8 @@ export async function POST(req: Request) {
     const mapValues = engine.getMapValues(props, boundary, metric);
     const points = props.slice(0, POINT_CAP).map((d) => ({ lat: d.lat, lng: d.lng }));
 
-    // 3. Report aggregates. When an area is selected, fetch the exact scoped
-    //    rows (no cap) so the report is exact; otherwise reuse the map sample.
-    let reportProps = props;
-    if (selectedIds && selectedIds.length) {
-      // filteredPropertiesForSelection has no $limit param — drop it.
-      const { limit: _limit, ...selectionVars } = variables;
-      const selRes = await dc.executeQuery('filteredPropertiesForSelection', {
-        ...selectionVars,
-        boundary,
-        selectedIds,
-      });
-      const selRows: any[] = (selRes.data as any)?.properties || [];
-      reportProps = selRows.map(rowToProperty);
-    }
+    // 3. Report aggregates (no selection): reuse the map sample.
+    const reportProps = props;
 
     const reportStats = engine.getStatsForSelection(reportProps, boundary, selectedIds || []);
     // Mirrors page.tsx: rental metrics score market health as a rental market.
@@ -468,7 +543,7 @@ export async function POST(req: Request) {
     // Year-built distribution for the report widget (mirrors page.tsx).
     const yearBuiltData = buildYearBuiltData(engine, reportProps, boundary, selectedIds || []);
 
-    return withETag({
+    return respond({
       mapValues: { values: mapValues.values, counts: mapValues.counts, names: mapValues.names },
       reportStats,
       marketHealth,
@@ -476,7 +551,7 @@ export async function POST(req: Request) {
       forecastComparison,
       yearBuiltData,
       points,
-    }, etag);
+    });
   } catch (err) {
     console.error('[api/query] SQL Connect failed:', err);
     return NextResponse.json({ error: 'SQL query failed' }, { status: 500 });

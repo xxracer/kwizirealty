@@ -78,11 +78,23 @@ function cleanNumber(val) {
 
 function cleanDate(raw) {
   if (!raw) return { date: '', year: 0, ts: 0 };
+  // mm/dd/yyyy (har.com legacy exports)
   const parts = String(raw).split('/');
   if (parts.length === 3) {
     const y = parseInt(parts[2], 10);
     const m = parseInt(parts[0], 10);
     const d = parseInt(parts[1], 10);
+    const year = isFinite(y) ? y : 0;
+    const ts = year && m && d ? new Date(year, m - 1, d).getTime() : 0;
+    return { date: raw, year, ts };
+  }
+  // ISO YYYY-MM-DD (recent har.com exports) — same branch the browser mapper
+  // (src/lib/sqlImport.ts cleanDate) carries after the close_date_ts=0 fix.
+  const iso = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    const y = parseInt(iso[1], 10);
+    const m = parseInt(iso[2], 10);
+    const d = parseInt(iso[3], 10);
     const year = isFinite(y) ? y : 0;
     const ts = year && m && d ? new Date(year, m - 1, d).getTime() : 0;
     return { date: raw, year, ts };

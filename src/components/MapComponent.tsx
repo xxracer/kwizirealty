@@ -11,7 +11,7 @@ import { MousePointer2, Square, Trash2, BarChart3, Loader2, RotateCcw } from 'lu
 import { motion, AnimatePresence } from 'framer-motion';
 import { cmsStore } from '@/lib/cmsStore';
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
-import { normalizeGeoJsonCrs } from '@/lib/geojsonUpload';
+import { getFeatureName, normalizeGeoJsonCrs } from '@/lib/geojsonUpload';
 import { readGeoCache, writeGeoCache, dropGeoCache } from '@/lib/csvCache';
 
 // navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
@@ -406,7 +406,7 @@ export default function MapComponent({
 
     const features: GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>[] = [];
 
-    geoJsonData.features.forEach((feature) => {
+    geoJsonData.features.forEach((feature, index) => {
       const props = feature.properties || {};
 
       // Match common identifiers in the GeoJSON to what our engine expects.
@@ -422,10 +422,29 @@ export default function MapComponent({
       } else {
         rawName = getGeoProp(props, 'NAME', 'Name', 'Subdivision', 'id') || '';
       }
-      const key = boundary === 'elementary' || boundary === 'middle'
+      // OWNER RULE: an uploaded boundary file must render EVERY area it
+      // contains — none of them may be silently dropped. A feature whose
+      // name property is empty/unrecognizable ('', 'NA', 'UNKNOWN', exotic
+      // property keys …) still gets a real name from the generic resolver
+      // (any string property, nested id), and as an absolute last resort a
+      // stable synthetic name ("Area 123") so it stays visible, clickable
+      // and countable. Only genuine non-polygon geometries are skipped.
+      const cleanedName = boundary === 'elementary' || boundary === 'middle'
         ? cleanSchoolName(rawName)
         : cleanBoundaryName(rawName);
-      if (!key) return;
+      let key = cleanedName;
+      if (!key) {
+        const geom = feature.geometry as { type?: string; coordinates?: unknown } | null;
+        key = cleanBoundaryName(
+          getFeatureName({
+            type: 'Feature',
+            geometry: { type: geom?.type ?? '', coordinates: (geom?.coordinates ?? []) as never },
+            properties: props,
+          })
+        );
+      }
+      if (!key) key = cleanBoundaryName(`Area ${index + 1}`);
+      if (!key) return; // impossible, typed guard for the compiler
 
       const value = metricValues[key];
       const count = sampleCounts[key] || 0;
@@ -434,7 +453,7 @@ export default function MapComponent({
       // kept and rendered grey/opaque so boundaries are always visible.
       const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
       const color = hasMetric ? getColorForValue(value, colorStops) : '#374151';
-      const name = nameMap[key] || String(rawName || key);
+      const name = nameMap[key] || String(rawName || cleanedName || key);
 
       // Only push if there's valid geometry
       if (feature.geometry && (feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon')) {
@@ -992,11 +1011,13 @@ export default function MapComponent({
     const { local, cms, authoritative } = boundaryFreshnessRef.current;
     const cmsAt = cms?.[fileName];
     const localAt = local?.[key];
-    // Deletion needs POSITIVE evidence: either the CMS has been explicitly
-    // initialized for boundaries (authoritative flag) or its metadata lists
-    // other boundary files — in both cases this file being absent means it
-    // was deleted, never "silently missing".
-    const cmsManagesBoundaries = authoritative || (cms !== null && Object.keys(cms).length > 0);
+    // Deletion needs POSITIVE evidence read from the CMS. With the storage
+    // rules now private, an ANONYMOUS visitor can't read cms_files at all —
+    // that is cms === null (read failed), NOT "the list is empty", and must
+    // fall back to the bundled copy instead of treating every boundary as
+    // deleted. The authoritative flag only applies when the CMS list itself
+    // was readable.
+    const cmsManagesBoundaries = cms !== null && (authoritative || Object.keys(cms).length > 0);
     if (cmsManagesBoundaries && !cmsAt) {
       console.warn(`[Kwizi Map] ${fileName} not found in CMS boundary files — treating as deleted.`);
       return { newer: false, deleted: true };
@@ -1243,16 +1264,23 @@ export default function MapComponent({
 
   const updateAreaLayerStyles = () => {
     if (!areaLayerRef.current) return;
-    areaLayerRef.current.eachLayer((layer: any) => {
-      const feature = layer.feature as GeoJSON.Feature | undefined;
-      if (!feature) return;
-      const props = (feature.properties || {}) as Record<string, any>;
-      const id = String(props.id ?? feature.id ?? '');
-      const value = metricValuesRef.current[id];
-      const count = sampleCountsRef.current[id] || 0;
-      const name = nameMapRef.current[id] || id;
-      const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
-      const color = hasMetric ? getColorForValue(value, colorStopsRef.current) : '#374151';
+    // PROGRESSIVE RENDER SUPPORT: the area layer is a LAYER GROUP containing
+    // one GeoJSON subgroup per render batch. eachLayer on the group returns
+    // those subgroups (which have no .feature) — descending one more level is
+    // what reaches the actual polygon paths. Without the descent every style
+    // update no-oped and the polys stayed permanently grey after the data
+    // landed (the regression the owner caught: "the polygons never painted").
+    areaLayerRef.current.eachLayer((child: any) => {
+      const styleOne = (layer: any) => {
+        const feature = layer.feature as GeoJSON.Feature | undefined;
+        if (!feature) return;
+        const props = (feature.properties || {}) as Record<string, any>;
+        const id = String(props.id ?? feature.id ?? '');
+        const value = metricValuesRef.current[id];
+        const count = sampleCountsRef.current[id] || 0;
+        const name = nameMapRef.current[id] || id;
+        const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
+        const color = hasMetric ? getColorForValue(value, colorStopsRef.current) : '#374151';
 
       props.value = value ?? 0;
       props.count = count;
@@ -1264,10 +1292,29 @@ export default function MapComponent({
       layer.setStyle(makeAreaStyle(id, value, selected, count));
       // No-data boundaries stay interactive (hover/click) — they are visible.
       if (layer.options) layer.options.interactive = true;
+      };
+      // Descend: child entries of the group are the per-batch GeoJSON layers;
+      // their children are the styled polygon paths (each carries .feature).
+      if (child.feature) {
+        styleOne(child);
+      } else if (typeof child.eachLayer === 'function') {
+        child.eachLayer((leaf: any) => {
+          if (leaf.feature) styleOne(leaf);
+          else if (typeof leaf.eachLayer === 'function') {
+            leaf.eachLayer((leaf2: any) => { if (leaf2.feature) styleOne(leaf2); });
+          }
+        });
+      }
     });
   };
 
   const lastAreaFeatureIdsRef = useRef<string[]>([]);
+
+  // Progressive rendering of the area layer — the live batch counter shown in
+  // the map's loading pill, plus the animation handle so a boundary switch
+  // mid-render can cancel a stale batch loop.
+  const [areaRenderProgress, setAreaRenderProgress] = useState<{ done: number; total: number } | null>(null);
+  const areaRenderRafRef = useRef<{ id: number }>({ id: 0 });
 
   const sortedFeatureIds = (features: GeoJSON.Feature[]): string[] => {
     const ids = features.map((f) => String((f.properties as any)?.id ?? f.id ?? ''));
@@ -1300,77 +1347,140 @@ export default function MapComponent({
     areaFeaturesRef.current = areaFeatures;
     lastAreaFeatureIdsRef.current = sortedFeatureIds(areaFeatures);
     console.log('[Kwizi Map] features to render', { count: areaFeatures.length });
-
-    areaLayerRef.current = L.geoJSON(areaFeatures as any, {
-      style: (feature) => {
-        const props = (feature?.properties || {}) as Record<string, any>;
-        const id = String(props.id ?? (feature as any).id ?? '');
-        return makeAreaStyle(id, props.value, selectedRef.current.includes(id), props.count ?? 0);
-      },
-      onEachFeature: (feature, layer) => {
-        const pathLayer = layer as L.Path;
-        const props = (feature.properties || {}) as Record<string, any>;
-        const id = String(props.id ?? (feature as any).id ?? '');
-        const hasMetric = props.hasMetric === true;
-
-        pathLayer.on('mouseover', (e) => {
-          pathLayer.setStyle({ weight: 1.6, color: '#00d4ff', fillOpacity: Math.min(0.8, fillOpacityRef.current + 0.3) });
-          if (!popupRef.current) {
-            popupRef.current = L.popup({
-              closeButton: false,
-              autoPan: false,
-              className: 'kwizi-map-popup',
-            });
-          }
-          popupRef.current.setLatLng(e.latlng).setContent(makePopupHtml(feature)).openOn(map);
-        });
-
-        pathLayer.on('mousemove', (e) => {
-          popupRef.current?.setLatLng(e.latlng);
-        });
-
-        pathLayer.on('mouseout', () => {
-          const selected = selectedRef.current.includes(id);
-          pathLayer.setStyle(makeAreaStyle(id, props.value, selected, props.count ?? 0));
-          popupRef.current?.close();
-        });
-
-        pathLayer.on('click', (e) => {
-          if (toolRef.current !== 'select') return;
-          L.DomEvent.stopPropagation(e);
-          const currentlySelected = selectedRef.current.includes(id);
-          let next: string[];
-          if (multiSelectRef.current) {
-            next = currentlySelected
-              ? selectedRef.current.filter((x) => x !== id)
-              : [...selectedRef.current, id];
-          } else {
-            next = currentlySelected ? [] : [id];
-          }
-          onSelectionChange(next);
-        });
-      },
-    }).addTo(map);
-
-    areaLayerJustBuiltRef.current = true;
-    setAreaLayerReady(true);
-    if (initialRevealDoneRef.current) {
-      setBoundarySwitching(false);
-    } else if (areaFeaturesRef.current.length > 0) {
-      initialRevealDoneRef.current = true;
-      setBoundarySwitching(false);
+    // Surface any feature that physically cannot be drawn (null/no polygon
+    // geometry) instead of dropping it silently — owner rule: an uploaded
+    // file with N areas must not lose areas without a visible explanation.
+    const inputCount = geoJsonData.features?.length ?? 0;
+    if (inputCount !== areaFeatures.length) {
+      console.warn(
+        `[Kwizi Map] ${inputCount - areaFeatures.length} feature(s) skipped — null geometry or not a Polygon/MultiPolygon (rendered ${areaFeatures.length}/${inputCount}).`
+      );
     }
 
-    if (fitBounds) {
-      const pointBounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
-      if (pointBounds) {
-        map.invalidateSize();
-        map.fitBounds(pointBounds, { padding: [8, 8], maxZoom: 12, animate: false });
+    // RENDER PROGRESSIVELY, one batch of polygons per animation frame, inside
+    // a layer group — never the whole FeatureCollection in one synchronous
+    // pass (a 5k-polygon draw used to block the main thread for seconds and
+    // spike RAM: the "it loads everything at once and the browser dies" load).
+    // A small counter keeps the owner's guaranteed visible progress.
+    const previousLayer = areaLayerRef.current as L.LayerGroup | null;
+    if (previousLayer) {
+      previousLayer.remove();
+      areaLayerRef.current = null;
+    }
+
+    const RENDER_BATCH = areaFeatures.length > 10000 ? 600 : 350;
+    const groups = L.layerGroup().addTo(map);
+    areaLayerRef.current = groups as unknown as typeof areaLayerRef.current;
+
+    const styleFn = (feature: any) => {
+      const props = (feature?.properties || {}) as Record<string, any>;
+      const id = String(props.id ?? feature?.id ?? '');
+      return makeAreaStyle(id, props.value, selectedRef.current.includes(id), props.count ?? 0);
+    };
+    const onEachFn = (feature: GeoJSON.Feature, layer: L.Layer) => {
+      const pathLayer = layer as L.Path;
+      const props = (feature.properties || {}) as Record<string, any>;
+      const id = String(props.id ?? (feature as any).id ?? '');
+
+      pathLayer.on('mouseover', (e) => {
+        pathLayer.setStyle({ weight: 1.6, color: '#00d4ff', fillOpacity: Math.min(0.8, fillOpacityRef.current + 0.3) });
+        if (!popupRef.current) {
+          popupRef.current = L.popup({
+            closeButton: false,
+            autoPan: false,
+            className: 'kwizi-map-popup',
+          });
+        }
+        popupRef.current.setLatLng(e.latlng).setContent(makePopupHtml(feature)).openOn(map);
+      });
+
+      pathLayer.on('mousemove', (e) => {
+        popupRef.current?.setLatLng(e.latlng);
+      });
+
+      pathLayer.on('mouseout', () => {
+        const selected = selectedRef.current.includes(id);
+        pathLayer.setStyle(makeAreaStyle(id, props.value, selected, props.count ?? 0));
+        popupRef.current?.close();
+      });
+
+      pathLayer.on('click', (e) => {
+        if (toolRef.current !== 'select') return;
+        L.DomEvent.stopPropagation(e);
+        const currentlySelected = selectedRef.current.includes(id);
+        let next: string[];
+        if (multiSelectRef.current) {
+          next = currentlySelected
+            ? selectedRef.current.filter((x) => x !== id)
+            : [...selectedRef.current, id];
+        } else {
+          next = currentlySelected ? [] : [id];
+        }
+        onSelectionChange(next);
+      });
+    };
+
+    const rafRef = { id: 0 };
+    areaRenderRafRef.current = rafRef;
+    const batches: GeoJSON.Feature[][] = [];
+    for (let i = 0; i < areaFeatures.length; i += RENDER_BATCH) {
+      batches.push(areaFeatures.slice(i, i + RENDER_BATCH));
+    }
+    let batchIndex = 0;
+    setAreaRenderProgress({ done: 0, total: areaFeatures.length });
+
+    const drawNextBatch = () => {
+      // The boundary may have been switched mid-render — the group is gone and
+      // a fresh render owns the ref; stop this stale animation immediately.
+      if (areaRenderRafRef.current !== rafRef) return;
+      if (!map || areaLayerRef.current !== groups) return;
+      const batch = batches[batchIndex];
+      if (batch && batch.length) {
+        L.geoJSON(batch as any, { style: styleFn, onEachFeature: onEachFn }).addTo(groups);
       }
-    }
-
-    console.log('[Kwizi Map] rebuildAreaLayer done', { ms: Math.round(performance.now() - t0), rendered: areaFeatures.length });
+      batchIndex++;
+      setAreaRenderProgress({ done: Math.min(areaFeatures.length, batchIndex * RENDER_BATCH), total: areaFeatures.length });
+      if (batchIndex < batches.length) {
+        rafRef.id = requestAnimationFrame(drawNextBatch);
+        return;
+      }
+      // FINAL batch done — all N areas are on screen.
+      setAreaRenderProgress(null);
+      // If the metric values landed WHILE these batches were drawing, every
+      // batch painted with the then-current (empty) values. One final restyle
+      // pass colors every polygon with the data in hand right now — the map
+      // never stays grey when data is available.
+      if (areaFeaturesRef.current.length > 0) updateAreaLayerStyles();
+      areaLayerJustBuiltRef.current = true;
+      setAreaLayerReady(true);
+      if (initialRevealDoneRef.current) {
+        setBoundarySwitching(false);
+      } else if (areaFeaturesRef.current.length > 0) {
+        initialRevealDoneRef.current = true;
+        setBoundarySwitching(false);
+      }
+      if (fitBounds) {
+        const pointBounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
+        if (pointBounds) {
+          map.invalidateSize();
+          map.fitBounds(pointBounds, { padding: [8, 8], maxZoom: 12, animate: false });
+        }
+      }
+      console.log('[Kwizi Map] rebuildAreaLayer done', { ms: Math.round(performance.now() - t0), rendered: areaFeatures.length });
+    };
+    // First batch paints synchronously so something is on screen NOW, then
+    // the rest spread across frames.
+    drawNextBatch();
   };
+
+  // Cancel any in-flight progressive render on unmount.
+  useEffect(() => {
+    return () => {
+      if (areaRenderRafRef.current) {
+        cancelAnimationFrame(areaRenderRafRef.current.id);
+      }
+    };
+  }, []);
 
   // Build (or rebuild) the area layer when the boundary or the set of
   // data-backed areas changes. No-data polygons are now filtered out, so the
@@ -1814,7 +1924,11 @@ export default function MapComponent({
     return () => clearTimeout(id);
   }, []);
 
-  const showBoundaryOverlay = boundaryLoading || boundarySwitching;
+  // OWNER RULE: the loading overlay must NOT close until the polygons' data
+  // is fully on screen — it stays while the progressive render is drawing
+  // its batches.
+  const showBoundaryOverlay =
+    boundaryLoading || boundarySwitching || areaRenderProgress !== null;
 
   return (
     <div
@@ -1833,6 +1947,19 @@ export default function MapComponent({
             <div className="bg-[#121620] border border-white/[0.06] rounded-2xl p-6 flex flex-col items-center gap-4 shadow-2xl">
               <Loader2 className="w-10 h-10 text-blue-500 animate-spin [animation-duration:0.6s]" />
               <p className="text-sm text-gray-200 font-medium tracking-wide">Loading Boundary Data...</p>
+              {areaRenderProgress && (
+                <div className="w-48">
+                  <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 rounded-full transition-all duration-200"
+                      style={{ width: `${Math.round((areaRenderProgress.done / Math.max(1, areaRenderProgress.total)) * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-[11px] text-gray-400 mt-1.5">
+                    Drawing areas {areaRenderProgress.done.toLocaleString()} / {areaRenderProgress.total.toLocaleString()}…
+                  </p>
+                </div>
+              )}
             </div>
           </motion.div>
         )}

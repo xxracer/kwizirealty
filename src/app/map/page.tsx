@@ -990,7 +990,18 @@ function MapPageInner() {
         if (cancelled) return;
         if (agg) {
           setSqlFailed(false);
-          setSqlAgg(agg);
+          // Selection-only responses (mapValues/points = null markers) keep
+          // the map's base state: colors, names and dots come from the
+          // selection-less base query and do NOT change when the user
+          // selects areas for a report.
+          setSqlAgg((prev) => ({
+            ...agg,
+            mapValues:
+              agg.mapValues ??
+              prev?.mapValues ??
+              { values: {}, counts: {}, names: {} },
+            points: agg.points ?? prev?.points ?? [],
+          }) as SqlAggregates);
           setReportError(null);
           if (!cancelled) clearApplyPopup();
         } else {

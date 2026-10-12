@@ -249,6 +249,59 @@ mutation clearPendingProperties @auth(level: PUBLIC) {
   _execute(sql: "DELETE FROM properties WHERE upload_session_id IS NOT NULL")
 }
 
+# Repair: rows committed while the mapper only parsed mm/dd/yyyy carry the
+# close_date string but close_date_ts = 0 (recent har.com exports use ISO
+# dates). A zero ts disables period filtering and empties the monthly series —
+# /api/query then flags its fast aggregates as thin and falls back to the
+# ~70s full-row path on every map load. This derives the epoch (ms, UTC
+# midnight — same convention the browser mapper stores) from close_date for
+# ISO or mm/dd/yyyy strings. Idempotent: only rows with ts=0/null are touched.
+# Diagnostic (read-only): classify the subdivisions column shapes so a bad
+# mapper column mapping is visible instantly (padded codes / numeric junk vs
+# real names) — added 2026-10-11 while chasing the "map shows no data" bug.
+query debugSubdivisionShapes @auth(level: USER) {
+  shapes: _select(
+    sql: """
+    SELECT
+      CASE
+        WHEN subdivisions IS NULL OR subdivisions = '' THEN 'empty'
+        WHEN subdivisions ~ '^\d{8,}$' THEN 'padded-code'
+        WHEN subdivisions ~ '^[0-9.+/ -]*$' THEN 'digits-punct'
+        ELSE 'named'
+      END AS shape,
+      count(*)::int AS n
+    FROM properties
+    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '')
+    GROUP BY 1
+    ORDER BY 2 DESC
+    """,
+    params: []
+  )
+}
+
+mutation backfillCloseDateTs @auth(level: NO_ACCESS) {
+  _execute(sql: """
+    UPDATE properties
+    SET close_date_ts =
+      CASE
+        WHEN close_date ~ '^\d{4}-\d{1,2}-\d{1,2}$' THEN
+          (EXTRACT(EPOCH FROM make_date(
+            substring(close_date, 1, 4)::int,
+            LEAST(substring(close_date, 6, 2)::int, 12),
+            LEAST(substring(close_date, 9, 2)::int, 31))) * 1000)::bigint
+        WHEN close_date ~ '^\d{1,2}/\d{1,2}/\d{4}$' THEN
+          (EXTRACT(EPOCH FROM make_date(
+            split_part(close_date, '/', 3)::int,
+            LEAST(split_part(close_date, '/', 1)::int, 12),
+            LEAST(split_part(close_date, '/', 2)::int, 31))) * 1000)::bigint
+        ELSE 0
+      END
+    WHERE upload_session_id IS NULL
+      AND (close_date_ts IS NULL OR close_date_ts = 0)
+      AND close_date IS NOT NULL AND close_date <> ''
+  """, params: [])
+}
+
 # Tax CSVs land in their own listing_type='tax' bucket (they carry no price,
 # coordinates or boundaries, so no read op can serve them directly). This
 # mutation MERGES each property's latest tax record onto its sale rows so the
