@@ -1520,10 +1520,17 @@ function AdminPageInner() {
   const handleFiles = async (
     fileList: FileList | File[] | null,
     section: Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>,
-    opts?: { ignoreSectionMismatch?: boolean }
-  ) => {
-    if (!fileList?.length) return;
-    setProcessing(true);
+    opts?: { ignoreSectionMismatch?: boolean; silent?: boolean }
+  ): Promise<{
+    found: number;
+    staged: number;
+    skipped: number;
+    reportItems?: unknown[];
+  } | null> => {
+    if (!fileList?.length) return null;
+    // silent: an auto-routed sub-batch (its summary merges into the caller's;
+    // the caller already owns the processing overlay).
+    if (!opts?.silent) setProcessing(true);
 
     const config = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG];
     const categories = config ? (Array.isArray(config.category) ? config.category : [config.category]) : [];
@@ -1554,6 +1561,17 @@ function AdminPageInner() {
     const newStaged: StagedFile[] = [];
     const sqlStagingPromises: Promise<void>[] = [];
     const batchKeySet = new Set<string>();
+
+    // OWNER RULE (2026-10-11): a folder with 25/50/100 CSVs uploads ALL of
+    // them — a detection mismatch never holds files back, never waits for a
+    // click and never silently drops one. Files that are NOT the section's
+    // kind are routed here + re-run through THEIR own section's full flow
+    // (validation, SQL staging, upload report) after the main loop. The old
+    // blocking "belongs in a different section?" popup is replaced by this
+    // automatic routing.
+    const routedGroups: Partial<Record<Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, File[]>> = {};
+    const routedMessages: { name: string; message: string }[] = [];
+    const routedSubSummaries: { found: number; staged: number; skipped: number; reportItems?: unknown[] }[] = [];
 
     const inputFiles = Array.from(fileList);
     const acceptedExt =
@@ -1586,8 +1604,14 @@ function AdminPageInner() {
         const sectionTitle = SECTION_CONFIG[section as keyof typeof SECTION_CONFIG]?.title;
         const isGeoSection = section === 'boundaries' || section === 'areas';
         if (lowerName.endsWith('.geojson') || lowerName.endsWith('.json')) {
-          // GeoJSON can only land here in a data section (geo sections accept
-          // it) — point the user back to Boundaries/Area Metrics.
+          // OWNER RULE: every file in a dropped folder uploads (25/50/100 — all
+          // of them). A geolocation file dropped on a data section is not
+          // skipped: it routes into the Boundaries/Areas flow automatically.
+          if (!isGeoSection && !opts?.ignoreSectionMismatch) {
+            (routedGroups['areas'] = routedGroups['areas'] || []).push(file as File);
+            routedMessages.push({ name: displayName, message: `"${displayName}" is a GeoJSON file — routed to Area Metrics (the map's polygon upload) instead of ${sectionTitle}.` });
+            continue;
+          }
           skippedFileMessages.push({
             name: displayName,
             message: `"${displayName}" is a geolocation (GeoJSON) file — I'm skipping it because it does not go in ${sectionTitle}. Please place it where it goes: Boundaries.`,
@@ -1797,19 +1821,17 @@ function AdminPageInner() {
         const category = refineCategoryByRows(parsed.meta.fields || [], sniff, detected);
 
         // Files whose detected category belongs to a different data section
-        // are collected for the misfit popup instead of silently skipped —
-        // the popup explains where they go, with an example, and offers a
-        // one-click fix. This prevents a "Sale 2024.csv" from being stored as
-        // Rent data just because the user had the Rent tab open.
+        // are AUTO-ROUTED into their own section's flow — every file in the
+        // folder uploads, nothing waits for a click (owner rule: 25/50/100
+        // CSVs = 25/50/100 uploads, each landing where its data says).
         if (!opts?.ignoreSectionMismatch && category !== 'property' && !categories.includes(category)) {
-          misfitFiles.push({ file, relativePath, category, evidence: describeCategoryEvidence(sniff, category) });
-          skippedCount++;
-          skippedReasons['wrong-section'] = (skippedReasons['wrong-section'] || 0) + 1;
-          skippedFileMessages.push({
+          const target = CATEGORY_TARGET_SECTION[category] ?? section;
+          (routedGroups[target] = routedGroups[target] || []).push(file as File);
+          routedMessages.push({
             name: relativePath,
-            message: `"${relativePath}" is ${categorySectionName(category)} — I'm skipping it because it does not go in this section. Please place it where it goes: ${categorySectionName(category)}.`,
+            message: `"${relativePath}" is ${categorySectionName(category)} — routed to ${categorySectionName(category)} automatically instead of ${SECTION_CONFIG[section as keyof typeof SECTION_CONFIG]?.title}.`,
           });
-          console.log(`[handleFiles] misfit ${relativePath}: detected category=${category}, current section=${section}`);
+          console.log(`[handleFiles] auto-route ${relativePath}: detected category=${category} → section ${target}`);
           continue;
         }
 
@@ -1910,29 +1932,63 @@ function AdminPageInner() {
     }
 
     console.log(`[handleFiles] done. ${inputFiles.length} received, ${newStaged.length} staged, ${skippedCount} skipped. Reasons:`, skippedReasons);
-    setUploadSummary({
-      found: inputFiles.length,
-      staged: newStaged.length,
-      skipped: skippedCount,
-      reasons: skippedReasons,
-      skippedFiles: skippedFileMessages,
-    });
+    if (!opts?.silent) {
+      setUploadSummary({
+        found: inputFiles.length,
+        staged: newStaged.length,
+        skipped: skippedCount,
+        reasons: skippedReasons,
+        skippedFiles: skippedFileMessages,
+      });
+    }
 
-    // Misfit files get the big centered popup (with the target section
-    // highlighted) instead of a one-line toast that scrolls away.
-    if (misfitFiles.length > 0) {
-      setSectionMisfits(misfitFiles);
-      setHighlightSection(CATEGORY_TARGET_SECTION[misfitFiles[0].category] ?? null);
+    // Route the non-matching files through their own section's FULL flow —
+    // every file of the folder uploads (25/50/100 = all of them), each into
+    // its own bucket. Silent runs: no separate processing overlay, no
+    // duplicate toast — everything merges into THIS call's summary + report.
+    for (const [target, files] of Object.entries(routedGroups) as [Exclude<AdminSection, 'dashboard' | 'ads' | 'users'>, File[]][]) {
+      if (!files.length) continue;
+      const sub = await handleFiles(files, target, { silent: true });
+      if (sub) {
+        routedSubSummaries.push(sub);
+      }
+    }
+
+    // Final merged summary: this call + every auto-routed sub-batch, so the
+    // owner sees the WHOLE folder's result in one honest box.
+    if (routedSubSummaries.length > 0 || routedMessages.length > 0) {
+      let found = inputFiles.length;
+      let staged = newStaged.length;
+      let skipped = skippedCount;
+      for (const sub of routedSubSummaries) {
+        found += sub.found;
+        staged += sub.staged;
+        skipped += sub.skipped;
+      }
+      if (!opts?.silent) {
+        setUploadSummary({
+          found,
+          staged,
+          skipped,
+          reasons: { ...skippedReasons, ...(routedMessages.length ? { 'auto-routed': routedMessages.length } : {}) },
+          skippedFiles: [...skippedFileMessages, ...routedMessages],
+        });
+      }
+      console.log(`[handleFiles] merged with ${routedSubSummaries.length} auto-routed batch(es): found=${found}, staged=${staged}`);
     }
 
     if (newStaged.length > 0) {
+      // staged files land in BOTH modes — silent sub-batches included (their
+      // uploads are real and must appear in the panel + Add-All).
       setStagedFiles((prev) => [...prev, ...newStaged]);
       const totalNew = newStaged.reduce((sum, s) => sum + s.stats.new, 0);
       const totalDup = newStaged.reduce((sum, s) => sum + s.stats.duplicate, 0);
-      setToast({
-        type: 'success',
-        message: `${newStaged.length} file(s) staged: ${totalNew.toLocaleString()} new rows, ${totalDup.toLocaleString()} duplicates skipped.`,
-      });
+      if (!opts?.silent) {
+        setToast({
+          type: 'success',
+          message: `${newStaged.length} file(s) staged: ${totalNew.toLocaleString()} new rows, ${totalDup.toLocaleString()} duplicates skipped.`,
+        });
+      }
     }
 
     // Wait for every direct SQL staging job to finish before closing the
@@ -1954,18 +2010,33 @@ function AdminPageInner() {
     // zip codes/cities the file covers — the toasts never made that clear.
     // Fires for SQL CSVs AND GeoJSON uploads alike. Every document opens
     // EXPANDED — the popup is the "what did I upload" report, so hiding it
-    // behind a collapsed eye made it look empty.
+    // behind a collapsed eye made it look empty. Silent sub-batches return
+    // their items so the caller can merge them into ONE popup.
+    let ownReportItems: ReturnType<typeof buildUploadReportFor>[] = [];
     if (newStaged.length > 0) {
-      const reportItems = newStaged
+      ownReportItems = newStaged
         .filter((s) => s.sessionId || s.geoJson)
         .map((s) => buildUploadReportFor(s));
-      if (reportItems.length) {
-        setUploadReport(reportItems);
-        setReportExpanded(new Set(reportItems.map((_, i) => i)));
-      }
+    }
+    // Merge the auto-routed sub-batches' items so ONE popup describes the
+    // whole folder drop.
+    const allMergedReportItems = [
+      ...ownReportItems,
+      ...routedSubSummaries.flatMap((s) => (s.reportItems ?? []) as typeof ownReportItems),
+    ];
+    if (!opts?.silent && allMergedReportItems.length) {
+      setUploadReport(allMergedReportItems);
+      setReportExpanded(new Set(allMergedReportItems.map((_, i) => i)));
     }
 
-    setProcessing(false);
+    if (!opts?.silent) setProcessing(false);
+
+    return {
+      found: inputFiles.length,
+      staged: newStaged.length,
+      skipped: skippedCount,
+      reportItems: ownReportItems,
+    };
 
     if (newStaged.length > 0) {
       // Trigger a quick dedupe pass so staged rows also honor the same-MCS
