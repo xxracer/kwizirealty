@@ -1589,7 +1589,9 @@ function AdminPageInner() {
     }
 
     const newStaged: StagedFile[] = [];
-    const sqlStagingPromises: Promise<void>[] = [];
+    // SQL staging jobs run ONE FILE AT A TIME (never six giant parallel
+    // mutations choking the connection) — sequential await in the tail.
+    const sqlStagingJobs: (() => Promise<void>)[] = [];
     const batchKeySet = new Set<string>();
 
     // OWNER RULE (2026-10-11): a folder with 25/50/100 CSVs uploads ALL of
@@ -1943,15 +1945,14 @@ function AdminPageInner() {
             staged.importProgress = { loaded: 0, total: newRows.length, status: 'error', error: 'This data is already in the database' };
           } else {
             staged.importProgress = { loaded: 0, total: newRows.length, status: 'running' };
-            sqlStagingPromises.push(
-              runSqlStaging(id, newRows, actualCategory as any, sessionId, record.year).then(() => {
-                setUploadProgress((prev) =>
-                  prev && prev.phase === 'Staging CSV rows in SQL…'
-                    ? { ...prev, current: Math.min(prev.current + 1, prev.total) }
-                    : prev
-                );
-              })
-            );
+            sqlStagingJobs.push(async () => {
+              await runSqlStaging(id, newRows, actualCategory as any, sessionId, record.year);
+              setUploadProgress((prev) =>
+                prev && prev.phase === 'Staging CSV rows in SQL…'
+                  ? { ...prev, current: Math.min(prev.current + 1, prev.total) }
+                  : prev
+              );
+            });
           }
         }
 
@@ -2031,18 +2032,20 @@ function AdminPageInner() {
       }
     }
 
-    // Wait for every direct SQL staging job to finish before closing the
-    // loading popup. Non-SQL files (GeoJSON, school CSVs) just sit in staged
-    // files and need the user to click Add All, so they don't block the popup.
-    if (sqlStagingPromises.length > 0) {
+    // Run every SQL staging job SEQUENTIALLY (one file at a time — progress
+    // advances visibly per file; no giant parallel mutations) and only close
+    // the loading popup when the LAST one finished.
+    if (sqlStagingJobs.length > 0) {
       setUploadProgress({
         current: 0,
-        total: sqlStagingPromises.length,
+        total: sqlStagingJobs.length,
         fileName: '',
         phase: 'Staging CSV rows in SQL…',
         startedAt: Date.now(),
       });
-      await Promise.all(sqlStagingPromises);
+      for (const job of sqlStagingJobs) {
+        await job();
+      }
       setUploadProgress(null);
     }
 

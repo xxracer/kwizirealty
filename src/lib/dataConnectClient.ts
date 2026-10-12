@@ -102,6 +102,8 @@ async function dataConnectFetch<T>(
   // URL, not the body. Variables use the protobuf Struct JSON mapping.
   const body = { operationName, variables: payload };
 
+  const STAGE_TIMEOUT_MS = 60_000;
+
   const send = async (credential: 'token' | 'apiKey'): Promise<Response> => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (credential === 'token' && token) {
@@ -112,7 +114,16 @@ async function dataConnectFetch<T>(
       // "invalid authentication credentials" rejection.
       headers['x-goog-api-key'] = apiKey;
     }
-    return fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    // NEVER hang forever (owner: "the popup finished and it froze, no
+    // real-time progress"). A dead/idle connection (backend swap, network
+    // drop) aborts and the caller retries/heals instead of freezing the tab.
+    const ac = new AbortController();
+    const killer = setTimeout(() => ac.abort(), STAGE_TIMEOUT_MS);
+    try {
+      return await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ac.signal });
+    } finally {
+      clearTimeout(killer);
+    }
   };
 
   let res = await send(token ? 'token' : 'apiKey');
