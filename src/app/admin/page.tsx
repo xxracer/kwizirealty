@@ -2071,15 +2071,6 @@ function AdminPageInner() {
 
     if (!opts?.silent) setProcessing(false);
 
-    return {
-      found: inputFiles.length,
-      staged: newStaged.length,
-      skipped: skippedCount,
-      reportItems: ownReportItems,
-      skippedFiles: skippedFileMessages,
-      routed: allRouted && allRouted.length ? allRouted : undefined,
-    };
-
     if (newStaged.length > 0) {
       // Trigger a quick dedupe pass so staged rows also honor the same-MCS
       // duplicate detection. This is normally a no-op, but prevents stale state.
@@ -2094,6 +2085,15 @@ function AdminPageInner() {
         }))
       );
     }
+
+    return {
+      found: inputFiles.length,
+      staged: newStaged.length,
+      skipped: skippedCount,
+      reportItems: ownReportItems,
+      skippedFiles: skippedFileMessages,
+      routed: allRouted && allRouted.length ? allRouted : undefined,
+    };
   };
 
   const dismissMisfits = () => {
@@ -4112,14 +4112,51 @@ function AdminPageInner() {
                         const readyCount = stagedFiles.filter(
                           (s) => !s.sessionId || s.importProgress?.status === 'done'
                         ).length;
+                        const stagingCount = stagedFiles.filter(
+                          (s) => s.sessionId && s.importProgress?.status === 'running'
+                        ).length;
+                        const blockedCount = stagedFiles.filter(
+                          (s) => s.sessionId && s.importProgress?.status === 'error'
+                        ).length;
                         return (
-                          <button
-                            onClick={() => openConfirmAllModal()}
-                            disabled={processing || readyCount === 0}
-                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                          >
-                            <Plus className="w-3.5 h-3.5" /> Confirm all ({readyCount})
-                          </button>
+                          <div className="flex flex-col items-end gap-1">
+                            {/* OWNER RULE: NOTHING confirms while any file is
+                                still being uploaded — the button stays locked
+                                until every file finished staging. */}
+                            <button
+                              onClick={() => openConfirmAllModal()}
+                              disabled={processing || readyCount === 0 || stagingCount > 0}
+                              title={stagingCount > 0 ? 'Locked: files are still uploading in SQL. Confirming unlocks when every file is done.' : undefined}
+                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                            >
+                              {stagingCount > 0 ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading — locked until done
+                                </>
+                              ) : (
+                                <>
+                                  <Plus className="w-3.5 h-3.5" /> Confirm all ({readyCount})
+                                </>
+                              )}
+                            </button>
+                            {/* OWNER CLEARITY (2026-10-11): "(12)" alone looked
+                                like "only 12 uploaded". The button always said
+                                how many are staging / blocked so nothing is a
+                                mystery. */}
+                            {stagingCount > 0 && (
+                              <span className="text-[10px] text-blue-300 font-semibold">
+                                + {stagingCount} still staging in SQL…
+                              </span>
+                            )}
+                            {blockedCount > 0 && (
+                              <span
+                                className="text-[10px] text-red-400 font-semibold"
+                                title="These were not uploaded: their MLS numbers are already in the database, or the SQL insert failed — open the document's eye for the detail."
+                              >
+                                {blockedCount} not uploaded (see the detail rows)
+                              </span>
+                            )}
+                          </div>
                         );
                       })()}
                     </div>
@@ -4220,8 +4257,21 @@ function AdminPageInner() {
                                   Import failed: {staged.importProgress.error || 'unknown error'}
                                 </div>
                               ) : staged.importProgress.status === 'running' ? (
-                                <div className="text-xs text-gray-400">
-                                  Staging in SQL: {staged.importProgress.loaded.toLocaleString()} / {staged.importProgress.total.toLocaleString()} rows
+                                // OWNER RULE (2026-10-11): files still being
+                                // uploaded show AMBER — they exist, they are
+                                // NOT confirmed, nothing can be confirmed
+                                // while any of these is alive.
+                                <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2 text-xs text-amber-300">
+                                  <span className="inline-flex items-center gap-1.5">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Uploading in SQL: {staged.importProgress.loaded.toLocaleString()} / {staged.importProgress.total.toLocaleString()} rows
+                                  </span>
+                                  <div className="mt-1 w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full bg-amber-400 rounded-full transition-all duration-200"
+                                      style={{ width: `${Math.round((staged.importProgress.loaded / Math.max(1, staged.importProgress.total)) * 100)}%` }}
+                                    />
+                                  </div>
                                 </div>
                               ) : (
                                 <div className="text-xs text-emerald-400">
