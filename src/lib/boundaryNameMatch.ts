@@ -49,6 +49,9 @@ export interface BoundaryAliasIndex {
 function canonicalize(key: string): string {
   return String(key || '')
     .toUpperCase()
+    // "&" vs "AND" spelled out — the REAL case (owner: Elena Fruit & Cotton
+    // Farms was grey): both sides must fold to " AND " identically.
+    .replace(/&/g, ' AND ')
     .replace(/[^A-Z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
@@ -72,10 +75,6 @@ function foldAll(k: string): string {
 
 function compact(k: string): string {
   return k.replace(/ /g, '');
-}
-
-function foldTokens(k: string): string {
-  return k.split(' ').filter((t) => t.length > 1).join(' ');
 }
 
 function suffixVariants(k: string): string[] {

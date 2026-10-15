@@ -71,6 +71,12 @@ export function writeQueryCache(cacheKey: string, etag: string, payload: unknown
         .save(Buffer.from(JSON.stringify(envelope), 'utf-8'), {
           contentType: 'application/json',
           metadata: { cacheExpiresAt: String(Date.now() + CACHE_TTL_HOURS * 3600 * 1000) },
+          // PROD FAILURE CAUGHT (2026-10-15 21:00): firebase-admin's save()
+          // uses the RESUMABLE upload protocol by default, and Google's
+          // resumable session "socket hang up"s from Vercel's runtime (the
+          // same trap the restore hit: intermediate 308 + dropped sockets).
+          // One-shot non-resumable upload always completes.
+          resumable: false,
         });
     } catch (err) {
       console.warn('[query-cache] write failed:', err instanceof Error ? err.message : err);

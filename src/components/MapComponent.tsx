@@ -1515,6 +1515,10 @@ export default function MapComponent({
     };
   }, []);
 
+  const emptyBoundaryFile =
+    !!geoJsonData && geoJsonData.type === 'FeatureCollection' &&
+    (geoJsonData.features?.length ?? 0) === 0;
+
   // Build (or rebuild) the area layer when the boundary or the set of
   // data-backed areas changes. No-data polygons are now filtered out, so the
   // number of rendered paths drops and the map no longer shows grey squares.
@@ -1960,6 +1964,7 @@ export default function MapComponent({
   // OWNER RULE: the loading overlay must NOT close until the polygons' data
   // is fully on screen — it stays while the progressive render is drawing
   // its batches.
+  // The overlay stays while any render phase is in flight.
   const showBoundaryOverlay =
     boundaryLoading || boundarySwitching || areaRenderProgress !== null;
 
@@ -1969,6 +1974,13 @@ export default function MapComponent({
       className="h-full w-full relative min-h-[280px] sm:min-h-[380px]"
       aria-label="Interactive real estate market map"
     >
+      {/* EMPTY boundary upload — visible explanation instead of a blank map */}
+      {emptyBoundaryFile && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[995] max-w-[85%] bg-amber-500/15 border border-amber-500/40 text-amber-200 text-[11px] leading-snug rounded-xl px-3.5 py-2 shadow-lg">
+          The boundary file for this view uploaded EMPTY (0 areas) — the map has no polygon shapes to draw.
+          Re-upload it through the CMS (Area Metrics / the section for this boundary).
+        </div>
+      )}
       <AnimatePresence>
         {showBoundaryOverlay && (
           <motion.div
