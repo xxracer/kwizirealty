@@ -35,6 +35,7 @@ import { getTeaScoreMaps } from '@/lib/server/teaScores';
 import { applyPropertyOverrides } from '@/lib/engineCore';
 import type { PropertyOverrideLite } from '@/lib/engineCore';
 import { getDatasetVersionTag } from '@/lib/server/datasetVersion';
+import { runHeavyCompute } from '@/lib/server/computeGate';
 import { readQueryCache, writeQueryCache } from '@/lib/server/queryCache';
 import {
   generateETag,
@@ -45,13 +46,37 @@ import {
 
 export const runtime = 'nodejs';
 
-/** Uniform-sample cap for the map values fetch (md5-ordered rows). */
-const SQL_ROW_CAP = Number(process.env.SQL_ROW_CAP || 200000);
-/** Points returned to the client; MapComponent culls by viewport + its own cap. */
-const POINT_CAP = 30000;
+/** Uniform-sample cap for the map values fetch (md5-ordered rows). 50k keeps
+ *  the whole legacy row pass well inside a Vercel function's memory — the
+ *  2026-10-15 runtime was OOM-killed ("instance ran out of available
+ *  memory") while building the 200k-row sample + the ~5MB JSON cache write.
+ *  The sample is md5-UNIFORM, so per-area medians/count are statistically
+ *  equivalent; the selection report path fetches exact rows (no cap) and is
+ *  unaffected by this cap. */
+const SQL_ROW_CAP = Number(process.env.SQL_ROW_CAP || 50000);
+/** Points returned to the client; MapComponent culls by viewport + its own
+ *  cap. 12k (md5-uniform: identical dot density at every zoom) instead of
+ *  30k — the points were ~40% of the 5.7MB payload that made the public map
+ *  laggy. */
+const POINT_CAP = 12000;
 
 /** ETA metrics need the TEA score maps that live in the browser engine. */
 const ETA_METRICS = new Set<MetricKey>(['Elem ETA Score', 'Middle ETA Score', 'High ETA Score']);
+
+/** SINGLE-FLIGHT + CONCURRENCY GATE for the map's Postgres work (owner 2026-10-15:
+ *  under real visitor traffic N identical requests multiplied 8s aggregates into
+ *  30s+ timeouts — the fast batch failed, everyone fell to the legacy row path,
+ *  double timeouts + the function OOM-killed). runHeavyCompute shares ONE
+ *  computation per (op + variables) across concurrent callers and caps the
+ *  number of heavy ops running at once (inside computeGate). */
+function gatedQuery(
+  dc: ReturnType<typeof getAdminDataConnect>,
+  op: string,
+  vars: Record<string, unknown>
+) {
+  const key = `${op}|${JSON.stringify(vars)}`;
+  return runHeavyCompute(key, () => dc.executeQuery(op, vars as never));
+}
 
 interface QueryBody {
   filters: PropertyFilters;
@@ -347,10 +372,10 @@ export async function POST(req: Request) {
     try {
       const { limit: _limit, ...filterVars } = variables;
       const [areaRes, overallRes, tsRes, pointsRes] = await Promise.all([
-        dc.executeQuery('areaMapValues', { ...filterVars, boundary }),
-        dc.executeQuery('overallAggregates', filterVars),
-        dc.executeQuery('monthlyTimeSeries', filterVars),
-        dc.executeQuery('mapPoints', { ...filterVars, limit: POINT_CAP }),
+        gatedQuery(dc, 'areaMapValues', { ...filterVars, boundary }),
+        gatedQuery(dc, 'overallAggregates', filterVars),
+        gatedQuery(dc, 'monthlyTimeSeries', filterVars),
+        gatedQuery(dc, 'mapPoints', { ...filterVars, limit: POINT_CAP }),
       ]);
 
       const areas: any[] = (areaRes.data as any)?.areas || [];
@@ -376,7 +401,11 @@ export async function POST(req: Request) {
         const key: string = row.key ?? '';
         if (!key) continue;
         counts[key] = row.n ?? 0;
-        names[key] = key;
+        // PAYLOAD CARE: the SQL display name IS the key (same cleaned string)
+        // — storing it again doubled the response for zero information and
+        // was a large share of the public map's 5.7MB-per-request lag. Only
+        // names that genuinely differ from the key go on the wire.
+        if (key !== key.trim()) names[key] = key.trim();
         if (col) {
           const v = row[col];
           if (v != null) values[key] = Number(v);
@@ -458,7 +487,7 @@ export async function POST(req: Request) {
     // 75s selection report into a few seconds.
     if (selectedIds && selectedIds.length) {
       const { limit: _limit, ...selectionVars } = variables;
-      const selRes = await dc.executeQuery('filteredPropertiesForSelection', {
+      const selRes = await gatedQuery(dc, 'filteredPropertiesForSelection', {
         ...selectionVars,
         boundary,
         selectedIds,
@@ -500,7 +529,7 @@ export async function POST(req: Request) {
     }
 
     // LEGACY PATH — map values + points from the (capped, uniform) sample.
-    const mapRes = await dc.executeQuery('filteredProperties', variables);
+    const mapRes = await gatedQuery(dc, 'filteredProperties', variables);
     const rows: any[] = (mapRes.data as any)?.properties || [];
     const props = rows.map(rowToProperty);
     // CMS single-property edits apply before any aggregation.

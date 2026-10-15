@@ -30,6 +30,7 @@ import {
   fetchSqlDistinct,
   type SqlAggregates,
 } from '@/lib/sqlData';
+import { buildBoundaryAliasIndex } from '@/lib/boundaryNameMatch';
 import { readSqlSyncState } from '@/lib/sqlSync';
 import { resolveQueriesToZips } from '@/lib/areaAliases';
 import { formatMetricInput, formatMetricValue, parseMetricInput } from '@/lib/legendFormat';
@@ -320,6 +321,10 @@ function MapPageInner() {
   // the user has active filters or a report selection. null = use the client
   // engine (no SQL, fetch in-flight, or SQL errored → graceful fallback).
   const [sqlAgg, setSqlAgg] = useState<SqlAggregates | null>(null);
+  // Current SQL values map (SQL-keyed) — read by the selection NAME BRIDGE
+  // via ref (no effect re-fire loop).
+  const sqlValuesRef = useRef<Record<string, number>>({});
+  sqlValuesRef.current = sqlAgg?.mapValues?.values ?? sqlValuesRef.current;
   // CMS metric overrides (boundary+metric → value), applied to the SQL-returned
   // map values to mirror engine.getMapValues' override pass (the server rows
   // are raw — overrides live client-side).
@@ -976,12 +981,29 @@ function MapPageInner() {
         const token = await user?.getIdToken();
         // CMS single-property edits must apply server-side as well.
         const overrides = await engine.getPropertyOverrideLites();
+        // NAME BRIDGE (owner report 2026-10-15): 1,372 polygons carry a data
+        // row spelled slightly differently (SEC II vs Sec 2, extra Amend/
+        // Phase suffixes…). Selection ids are POLYGON names — they must be
+        // resolved onto the SQL key families BEFORE the SQL filter, or the
+        // report gets 0 rows ("no data"). The values map of the CURRENT
+        // base query holds the genuine SQL keys — resolve via the shared
+        // deterministic index. Exact hits stay untouched.
+        let sqlSelection = selectedIds;
+        if (selectedIds.length > 0) {
+          const index = buildBoundaryAliasIndex(Object.keys(sqlValuesRef.current || {}));
+          const resolvedSet = new Set<string>();
+          for (const id of selectedIds) {
+            const hit = index.resolve(id);
+            resolvedSet.add(hit ?? id);
+          }
+          sqlSelection = [...resolvedSet];
+        }
         const agg = await fetchSqlAggregates(
           deferredAppliedFilters,
           resolved,
           boundary,
           metric,
-          selectedIds,
+          sqlSelection,
           startTs,
           endTs,
           token,
@@ -1277,15 +1299,29 @@ function MapPageInner() {
     return full.sort((a, b) => b.baseline - a.baseline).slice(0, 5);
   }, [useSql, sqlAgg, useWorker, workerAgg.result, dataReady, filteredData, boundary, metric, selectedIds]);
 
+  // NAME BRIDGE for the report charts: with a selection, the SQL values are
+  // keyed by the SQL-side spelling while selectedIds hold the polygon-side
+  // one — resolve both directions so a selected fuzzy-named area still feeds
+  // the chart (and never silently drops from the report).
+  const selectedAliasIndex = useMemo(
+    () => (selectedIds.length > 0 ? buildBoundaryAliasIndex(selectedIds) : null),
+    [selectedIds]
+  );
+
   const chartData = useMemo(() => {
     if (!dataReady) return [];
     const source = useSql ? (sqlAgg?.mapValues.values ?? {}) : metricValues;
     return Object.entries(source)
-      .filter(([k]) => selectedIds.length === 0 || selectedIds.includes(k))
+      .filter(
+        ([k]) =>
+          selectedIds.length === 0 ||
+          selectedIds.includes(k) ||
+          selectedAliasIndex?.resolve(k) !== null
+      )
       .map(([name, value]) => ({ name: cleanBoundaryName(name), value }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 5);
-  }, [useSql, sqlAgg, metricValues, selectedIds, dataReady]);
+  }, [useSql, sqlAgg, metricValues, selectedIds, selectedAliasIndex, dataReady]);
 
   const yearBuiltData = useMemo(() => {
     if (useSql) return sqlAgg?.yearBuiltData ?? [];

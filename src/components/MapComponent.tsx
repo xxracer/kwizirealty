@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import * as turf from '@turf/turf';
@@ -13,6 +13,7 @@ import { cmsStore } from '@/lib/cmsStore';
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import { getFeatureName, normalizeGeoJsonCrs } from '@/lib/geojsonUpload';
 import { readGeoCache, writeGeoCache, dropGeoCache } from '@/lib/csvCache';
+import { buildBoundaryAliasIndex, type BoundaryAliasIndex } from '@/lib/boundaryNameMatch';
 
 // navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
 // with ≤4 GB get lean constants everywhere: fewer point markers, and the
@@ -389,6 +390,31 @@ export default function MapComponent({
   metricRef.current = metric;
   fillOpacityRef.current = fillOpacity;
   metricValuesRef.current = metricValues;
+
+  // NAME BRIDGE (owner report 2026-10-15: 1,372 polygons stayed grey because
+  // their data rows carry a slightly different subdivision spelling — roman
+  // numerals, phase/sec/amend suffix words, spacing). The index folds both
+  // sides to the same deterministic key families; a miss stays grey on
+  // purpose (never a wrong color).
+  const boundaryAliasIndex = useMemo<BoundaryAliasIndex>(
+    () => buildBoundaryAliasIndex(Object.keys(metricValues || {})),
+    [metricValues]
+  );
+  const boundaryAliasIndexRef = useRef<BoundaryAliasIndex | null>(boundaryAliasIndex);
+  boundaryAliasIndexRef.current = boundaryAliasIndex;
+
+  /** Data values for a polygon key: exact first, then the alias families. */
+  const resolveMetricId = useCallback(
+    (key: string): string | null => {
+      if (!key) return null;
+      if (metricValuesRef.current[key] !== undefined || sampleCountsRef.current[key]) return key;
+      const resolved = boundaryAliasIndexRef.current?.resolve(key);
+      return resolved ?? null;
+    },
+    [boundaryAliasIndex]
+  );
+  const resolveMetricIdRef = useRef(resolveMetricId);
+  resolveMetricIdRef.current = resolveMetricId;
   sampleCountsRef.current = sampleCounts;
   nameMapRef.current = nameMap;
   colorStopsRef.current = colorStops;
@@ -446,14 +472,19 @@ export default function MapComponent({
       if (!key) key = cleanBoundaryName(`Area ${index + 1}`);
       if (!key) return; // impossible, typed guard for the compiler
 
-      const value = metricValues[key];
-      const count = sampleCounts[key] || 0;
+      // NAME BRIDGE: the CSV data may spell this area slightly differently
+      // (roman numerals, "Sec/Amend" suffixes, spacing) — resolve to the SQL
+      // key families; an exact hit always wins, a miss stays grey (never a
+      // wrong-colored polygon).
+      const dataId = resolveMetricIdRef.current(key) ?? '';
+      const value = dataId ? metricValues[dataId] : undefined;
+      const count = dataId ? sampleCounts[dataId] || 0 : 0;
       // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing
       // or non-finite values mean "no data" for this area. No-data areas are
       // kept and rendered grey/opaque so boundaries are always visible.
       const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
       const color = hasMetric ? getColorForValue(value, colorStops) : '#374151';
-      const name = nameMap[key] || String(rawName || cleanedName || key);
+      const name = nameMap[dataId] || nameMap[key] || String(rawName || cleanedName || key);
 
       // Only push if there's valid geometry
       if (feature.geometry && (feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon')) {
@@ -1276,9 +1307,11 @@ export default function MapComponent({
         if (!feature) return;
         const props = (feature.properties || {}) as Record<string, any>;
         const id = String(props.id ?? feature.id ?? '');
-        const value = metricValuesRef.current[id];
-        const count = sampleCountsRef.current[id] || 0;
-        const name = nameMapRef.current[id] || id;
+        // Same NAME BRIDGE as the build path — resolve before the value look-up
+        const dataId = resolveMetricIdRef.current(id) ?? '';
+        const value = dataId ? metricValuesRef.current[dataId] : undefined;
+        const count = dataId ? sampleCountsRef.current[dataId] || 0 : 0;
+        const name = nameMapRef.current[dataId] || nameMapRef.current[id] || id;
         const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
         const color = hasMetric ? getColorForValue(value, colorStopsRef.current) : '#374151';
 

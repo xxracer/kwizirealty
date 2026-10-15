@@ -26,6 +26,11 @@ export function isSQLEnabled(): boolean {
 // DEFAULT_FILTERS is a live object; snapshot it once for the comparison below.
 const DEFAULT_FILTERS_SNAPSHOT = JSON.stringify(DEFAULT_FILTERS);
 
+/** Client revalidation store: payload-key → { etag, body }. Identical repeat
+ *  requests send If-None-Match and a 304 returns with zero payload (the
+ *  5.7MB-per-request transfer was the public map's lag). */
+const revalidateCache = new Map<string, { etag: string; body: string }>();
+
 export interface SqlAggregates {
   mapValues: {
     values: Record<string, number>;
@@ -166,25 +171,49 @@ export async function fetchSqlAggregates(
   propertyOverrides?: { id: string; mlsNumber: string; address: string; zip: string; fields: Record<string, string>; mode?: 'edit' | 'create' }[]
 ): Promise<SqlAggregates | null> {
   try {
-    // The token is optional — the map serves signed-out visitors too.
+    const payload = {
+      filters,
+      resolved,
+      boundary,
+      metric,
+      selectedIds,
+      startTs,
+      endTs,
+      propertyOverrides,
+    };
+    // CLIENT REVALIDATION (owner: the public map is super laggy — measured
+    // 5.7MB transferring on EVERY request even when the server answered from
+    // its 2s cache). Identical repeat requests revalidate with If-None-Match:
+    // a 304 needs zero payload and the stored body is reused instantly.
+    const key = JSON.stringify(payload);
+    const prior = revalidateCache.get(key);
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    if (prior) headers['If-None-Match'] = prior.etag;
     const res = await fetch('/api/query', {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        filters,
-        resolved,
-        boundary,
-        metric,
-        selectedIds,
-        startTs,
-        endTs,
-        propertyOverrides,
-      }),
+      body: key,
     });
-    if (!res.ok) return null;
-    const data = await res.json();
+    if (res.status === 304 && prior?.body) {
+      return JSON.parse(prior.body) as SqlAggregates;
+    }
+    if (!res.ok) {
+      revalidateCache.delete(key);
+      return null;
+    }
+    const text = await res.text();
+    const data = JSON.parse(text);
+    const etag = res.headers.get('ETag');
+    if (etag && data.reportStats) {
+      // LRU-ish: the selection/period/filter combos the user actually used —
+      // capped so this never becomes a memory leak.
+      if (revalidateCache.size >= 24) {
+        const first = revalidateCache.keys().next().value as string | undefined;
+        if (first !== undefined) revalidateCache.delete(first);
+      }
+      revalidateCache.set(key, { etag, body: text });
+    }
     // selectionOnly responses carry mapValues/points = null (meaning "keep
     // the base map state") — that is valid, not an unsupported metric.
     if (data.unsupported || (!data.reportStats && !data.mapValues)) return null;
