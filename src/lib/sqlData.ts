@@ -138,7 +138,7 @@ export function periodToWindow(
  */
 export async function fetchSqlDistinct(
   idToken?: string
-): Promise<{ uniqueValues: DatasetUniqueValues; totalRows: number } | null> {
+): Promise<{ uniqueValues: DatasetUniqueValues; zipcodes?: string[]; totalRows: number } | null> {
   try {
     // The token is optional — the map serves signed-out visitors too.
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };

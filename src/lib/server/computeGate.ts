@@ -18,7 +18,12 @@
  *  - Failures do NOT wedge the gate: every slot releases in finally.
  */
 
-const MAX_CONCURRENT = 2;
+const MAX_CONCURRENT = 8;
+/** How long a request may WAIT for a compute slot before serving the last
+ *  completed result for that key instead (~45s). The OWNER'S rule: the map
+ *  must never sit "pending" for minutes — under load it serves the existing
+ *  data immediately and the fresh compute lands behind it. */
+const WAIT_DEADLINE_MS = 45_000;
 
 interface GateEntry {
   waiters: Array<() => void>;
@@ -34,26 +39,100 @@ function stateFor(map: Map<string, GateEntry>, key: string): GateEntry {
 }
 
 const inflight = new Map<string, Promise<unknown>>();
-const gate: GateEntry = { waiters: [], active: 0 };
+/** The last COMPLETED result per key — served instantly when the compute
+ *  slots are saturated (stale-while-revalidate; zero wait for the public). */
+const lastResults = new Map<string, unknown>();
+interface Waiter { fn: () => void; cancelled: boolean }
+const gate = { waiters: [] as Waiter[], active: 0 };
 
 /** Await one shared slot; up to MAX_CONCURRENT compute concurrently. */
-function acquire(): Promise<void> {
+function acquire(): { promise: Promise<void>; cancel: () => void } {
   if (gate.active < MAX_CONCURRENT) {
     gate.active++;
-    return Promise.resolve();
+    return { promise: Promise.resolve(), cancel: () => {} };
   }
-  return new Promise((resolve) => {
-    gate.waiters.push(() => {
-      gate.active++;
-      resolve();
+  let cancelled = false;
+  const promise = new Promise<void>((resolve) => {
+    gate.waiters.push({
+      fn: () => {
+        if (!cancelled) {
+          // Handing off an active slot from the releasing task — do not increment active again
+          resolve();
+        }
+      },
+      cancelled: false,
     });
   });
+  return {
+    promise,
+    // SLOT-LEAK FIX (2026-10-15): a waiter that lost the wait-race must leave
+    // the queue — otherwise its ghost consumed a slot later and the gate sat
+    // permanently at MAX_CONCURRENT (the "everything is busy" 500/503 storm).
+    cancel: () => {
+      cancelled = true;
+    },
+  };
 }
 
 function release(): void {
-  const next = gate.waiters.shift();
-  if (next) next();
-  else if (gate.active > 0) gate.active--;
+  while (gate.waiters.length) {
+    const w = gate.waiters.shift()!;
+    if (!w.cancelled) {
+      w.fn();
+      return;
+    }
+  }
+  if (gate.active > 0) gate.active--;
+}
+
+/**
+ * STALE-WHILE-REVALIDATE COMPUTE for the map's heavy work:
+ *  1. same-key concurrent callers share ONE computation (single-flight),
+ *  2. at most MAX_CONCURRENT run at once,
+ *  3. a caller who waited WAIT_DEADLINE_MS without a slot gets the LAST
+ *     completed result for its key immediately (and the running compute
+ *     serves the next caller), or a busy flag when there is nothing to serve.
+ */
+export async function runHeavyComputeStale<T>(
+  key: string,
+  fn: () => Promise<T>
+): Promise<{ ok: boolean; value?: T; stale?: T; staleServed?: boolean }> {
+  const running = inflight.get(key);
+  if (running) return { ok: true, value: (await running) as T };
+
+  const slot = acquire();
+  const acquired = await Promise.race([
+    slot.promise.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), WAIT_DEADLINE_MS)),
+  ]);
+  if (!acquired) {
+    slot.cancel(); // the ghost waiter leaves the queue — no slot leak
+  }
+  if (!acquired) {
+    // Slots saturated: never wait longer — serve the last good result.
+    const last = lastResults.get(key);
+    if (last !== undefined) return { ok: true, stale: last as T, staleServed: true };
+    return { ok: false };
+  }
+  const runningNow = inflight.get(key);
+  if (runningNow) {
+    release(); // another caller took this compute while we waited
+    return { ok: true, value: (await runningNow) as T };
+  }
+  const compute = (async () => fn())();
+  inflight.set(key, compute);
+  try {
+    const value = await compute;
+    lastResults.set(key, value);
+    if (lastResults.size > 24) {
+      const first = lastResults.keys().next().value as string | undefined;
+      if (first !== undefined) lastResults.delete(first);
+    }
+    return { ok: true, value };
+  } finally {
+    inflight.delete(key);
+    release();
+  }
 }
 
 /**

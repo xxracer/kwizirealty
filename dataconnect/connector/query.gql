@@ -279,6 +279,144 @@ query debugSubdivisionShapes @auth(level: USER) {
   )
 }
 
+# Read-only: the indexes that actually exist on the properties table —
+# if the schema's @index never materialized, every aggregate seq-scans.
+query debugPropertyIndexes @auth(level: USER) {
+  indexes: _select(
+    sql: """
+    SELECT indexname::text AS idx, indexdef::text AS def
+    FROM pg_indexes
+    WHERE tablename = 'properties'
+    ORDER BY indexname
+    """,
+    params: []
+  )
+}
+
+# AGGREGATE FAST TABLE (2026-10-15): the per-area medians for ALL boundaries
+# in ONE materialized view, computed once per data change instead of once per
+# request (a 797k-row aggregate took 12-17s COLD; the view answers in ms).
+mutation ensureAreaAggView @auth(level: NO_ACCESS) {
+  _execute(sql: """
+    CREATE MATERIALIZED VIEW IF NOT EXISTS properties_area_agg AS
+    SELECT 'subdivisions' AS boundary, subdivisions AS key,
+      count(*)::int AS n,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0) AS med_close_price,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) > 0) AS med_ppsf,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0) AS med_l2s,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE (CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) > 0) AS med_dom,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * 0.008) FILTER (WHERE close_price > 0) AS med_rent,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price * 0.008) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0) AS med_rent_psf,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0) AS med_lot,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0)) AS med_tax_rate
+    FROM properties
+    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '')
+    GROUP BY 1, 2
+    UNION ALL
+    SELECT 'zipcodes', zipcodes, count(*)::int,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
+    FROM properties
+    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND zipcodes <> ''
+    GROUP BY 1, 2
+    UNION ALL
+    SELECT 'highschools', highschools, count(*)::int,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
+    FROM properties
+    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND highschools <> ''
+    GROUP BY 1, 2
+    UNION ALL
+    SELECT 'elementary', elementary, count(*)::int,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
+    FROM properties
+    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND elementary <> ''
+    GROUP BY 1, 2
+    UNION ALL
+    SELECT 'middle', middle, count(*)::int,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
+    FROM properties
+    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND middle <> ''
+    GROUP BY 1, 2
+    UNION ALL
+    SELECT 'rent', subdivisions, count(*)::int,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
+    FROM properties
+    WHERE upload_session_id IS NULL AND listing_type = 'rent' AND subdivisions <> ''
+    GROUP BY 1, 2
+  """, params: [])
+}
+
+mutation refreshAreaAggView @auth(level: NO_ACCESS) {
+  _execute(sql: "REFRESH MATERIALIZED VIEW CONCURRENTLY properties_area_agg", params: [])
+}
+
+# The unique index CONCURRENTLY requires (refresh after every publish).
+mutation ensureAreaAggIndex @auth(level: NO_ACCESS) {
+  _execute(sql: """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_area_agg_boundary_key
+    ON properties_area_agg (boundary, key)
+  """, params: [])
+}
+
+# Verify (read-only): which of the given [mls, datasetYear] pairs exist in the
+# committed table — the per-file proof used before deleting a backup from
+# Storage (rows must be IN SQL before their CSV copy disappears).
+query keysPresent($keys: String!) @auth(level: USER) {
+  present: _select(
+    sql: """
+    SELECT r->>'m' AS m
+    FROM jsonb_array_elements($1::jsonb) AS r
+    WHERE EXISTS (
+      SELECT 1 FROM properties p
+      WHERE p.mls_number = (r->>'m')
+        AND p.dataset_year = COALESCE(NULLIF(r->>'y','')::int, 0)
+        AND p.upload_session_id IS NULL
+    )
+    """,
+    params: [$keys]
+  )
+}
+
 mutation backfillCloseDateTs @auth(level: NO_ACCESS) {
   _execute(sql: """
     UPDATE properties
@@ -530,6 +668,9 @@ query distinctValues @auth(level: PUBLIC) {
     SELECT
       count(*) FILTER (WHERE upload_session_id IS NULL) AS total_rows,
       array_agg(DISTINCT property_type) FILTER (WHERE property_type <> '' AND upload_session_id IS NULL) AS property_types,
+      -- OWNER RULE (2026-10-15): every list the UI shows must come from the
+      -- UPLOADED CSVs — the zip codes list feeds the search and labels.
+      array_agg(DISTINCT zipcodes) FILTER (WHERE zipcodes <> '' AND upload_session_id IS NULL) AS zipcodes,
       array_agg(DISTINCT city) FILTER (WHERE city <> '' AND upload_session_id IS NULL) AS cities,
       array_agg(DISTINCT school_district) FILTER (WHERE school_district <> '' AND upload_session_id IS NULL) AS school_districts,
       array_agg(DISTINCT elementary) FILTER (WHERE elementary <> '' AND upload_session_id IS NULL) AS elementary,

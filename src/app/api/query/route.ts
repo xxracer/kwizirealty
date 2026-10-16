@@ -35,7 +35,8 @@ import { getTeaScoreMaps } from '@/lib/server/teaScores';
 import { applyPropertyOverrides } from '@/lib/engineCore';
 import type { PropertyOverrideLite } from '@/lib/engineCore';
 import { getDatasetVersionTag } from '@/lib/server/datasetVersion';
-import { runHeavyCompute } from '@/lib/server/computeGate';
+import { dcWithTimeout } from '@/lib/firebaseAdmin';
+import { runHeavyComputeStale } from '@/lib/server/computeGate';
 import { readQueryCache, writeQueryCache } from '@/lib/server/queryCache';
 import {
   generateETag,
@@ -75,7 +76,19 @@ function gatedQuery(
   vars: Record<string, unknown>
 ) {
   const key = `${op}|${JSON.stringify(vars)}`;
-  return runHeavyCompute(key, () => dc.executeQuery(op, vars as never));
+  // The 60s server-side guard: a hung Data Connect fetch (the 5-minute 504
+  // the owner caught) frees the function with a clean retry-able error
+  // instead of holding it to the 300s Fluid limit.
+  // STALE-WHILE-REVALIDATE: when both compute slots are busy a caller never
+  // queues past 15s — the LAST completed result for this exact op+variables
+  // is served immediately (the map keeps data on screen; the fresh compute
+  // lands behind it for the next visitor).
+  return runHeavyComputeStale(key, () => dcWithTimeout(dc.executeQuery(op, vars as never))).then(
+    (g) => {
+      if (g.ok || g.stale !== undefined) return (g.value ?? g.stale)!;
+      throw Object.assign(new Error('Server busy — retrying automatically'), { status: 503 });
+    }
+  );
 }
 
 interface QueryBody {
@@ -581,8 +594,11 @@ export async function POST(req: Request) {
       yearBuiltData,
       points,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error('[api/query] SQL Connect failed:', err);
+    if (Number(err?.status) === 503) {
+      return NextResponse.json({ error: 'Server busy — the map retries automatically' }, { status: 503, headers: { 'Retry-After': '8' } });
+    }
     return NextResponse.json({ error: 'SQL query failed' }, { status: 500 });
   }
 }

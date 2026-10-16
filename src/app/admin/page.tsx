@@ -4723,7 +4723,9 @@ function AdminPageInner() {
                   </tr>
                 </thead>
                 <tbody>
-                  {previewFile.rows.slice(0, 100).map((row, i) => (
+                  {/* Preview shows 500 rows; the file's FULL row set lives in
+                      SQL — nothing is truncated from the data itself. */}
+                  {previewFile.rows.slice(0, 500).map((row, i) => (
                     <tr key={i} className="hover:bg-white/5">
                       {previewFile.headers.map((h) => (
                         <td key={h} className="px-3 py-2 text-gray-300 border-b border-white/5 whitespace-nowrap">{row[h]}</td>
@@ -4734,7 +4736,8 @@ function AdminPageInner() {
               </table>
             </div>
             <div className="px-5 py-3 border-t border-border-subtle text-xs text-gray-500">
-              Showing first 100 of {previewFile.rows.length.toLocaleString()} {previewFile.isGeoJson ? 'features' : 'rows'}
+              Showing first 500 of {previewFile.rows.length.toLocaleString()} {previewFile.isGeoJson ? 'features' : 'rows'} ·
+              the completed data lives in SQL (nothing truncated) · and the preview limit is display-only
             </div>
           </div>
         </div>

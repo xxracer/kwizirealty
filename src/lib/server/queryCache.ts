@@ -22,7 +22,7 @@
  * A TTL guards against entries outliving their purpose; data changes already
  * rotate the key, so in practice entries just age out unused.
  */
-import { getAdminStorageBucket } from '@/lib/firebaseAdmin';
+import { getAdminStorageBucket, storageWithTimeout } from '@/lib/firebaseAdmin';
 
 const CACHE_PREFIX = 'map_cache/';
 /** TTL in hours — data changes rotate the key, this is only a safety net. */
@@ -41,12 +41,12 @@ export async function readQueryCache(
 ): Promise<{ etag: string; payload: unknown } | null> {
   const file = getAdminStorageBucket().file(`${CACHE_PREFIX}${cacheKey}.json`);
   try {
-    const [exists] = await file.exists();
+    const [exists] = await storageWithTimeout(file.exists());
     if (!exists) return null;
-    const [metadata] = await file.getMetadata();
+    const [metadata] = await storageWithTimeout(file.getMetadata());
     const expiresAt = Number(metadata?.metadata?.cacheExpiresAt ?? 0);
     if (expiresAt && Date.now() > expiresAt) return null;
-    const [buf] = await file.download();
+    const [buf] = await storageWithTimeout(file.download());
     const parsed = JSON.parse(buf.toString('utf-8')) as CacheEnvelope | null;
     if (!parsed || typeof parsed.etag !== 'string') return null;
     return { etag: parsed.etag, payload: parsed.payload };
@@ -66,7 +66,7 @@ export function writeQueryCache(cacheKey: string, etag: string, payload: unknown
         cacheExpiresAt: Date.now() + CACHE_TTL_HOURS * 3600 * 1000,
         payload,
       };
-      await getAdminStorageBucket()
+      await storageWithTimeout(getAdminStorageBucket()
         .file(`${CACHE_PREFIX}${cacheKey}.json`)
         .save(Buffer.from(JSON.stringify(envelope), 'utf-8'), {
           contentType: 'application/json',
@@ -77,7 +77,7 @@ export function writeQueryCache(cacheKey: string, etag: string, payload: unknown
           // same trap the restore hit: intermediate 308 + dropped sockets).
           // One-shot non-resumable upload always completes.
           resumable: false,
-        });
+        }), 120_000);
     } catch (err) {
       console.warn('[query-cache] write failed:', err instanceof Error ? err.message : err);
     }

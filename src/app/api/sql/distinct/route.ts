@@ -42,7 +42,7 @@ export async function POST(req: Request) {
         middle: [],
         highschools: [],
       };
-      return NextResponse.json({ uniqueValues: empty, totalRows: 0 });
+      return NextResponse.json({ uniqueValues: empty, zipcodes: [], totalRows: 0 });
     }
     const uniqueValues: DatasetUniqueValues = {
       propertyType: row.property_types ?? [],
@@ -52,7 +52,9 @@ export async function POST(req: Request) {
       middle: row.middle ?? [],
       highschools: row.highschools ?? [],
     };
-    return NextResponse.json({ uniqueValues, totalRows: Number(row.total_rows ?? 0) });
+    // Zip codes live with the uploaded data too (owner rule 2026-10-15).
+    const zipcodes: string[] = row.zipcodes ?? [];
+    return NextResponse.json({ uniqueValues, zipcodes, totalRows: Number(row.total_rows ?? 0) });
   } catch (err) {
     console.error('[api/sql/distinct] failed:', err);
     return NextResponse.json({ error: 'Query failed' }, { status: 500 });

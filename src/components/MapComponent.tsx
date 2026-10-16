@@ -13,7 +13,7 @@ import { cmsStore } from '@/lib/cmsStore';
 import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import { getFeatureName, normalizeGeoJsonCrs } from '@/lib/geojsonUpload';
 import { readGeoCache, writeGeoCache, dropGeoCache } from '@/lib/csvCache';
-import { buildBoundaryAliasIndex, type BoundaryAliasIndex } from '@/lib/boundaryNameMatch';
+import { buildBoundaryAliasIndex, prefetchBoundaryNameMap, getZipVerifiedPolyResolver, getGeoAssignment, type BoundaryAliasIndex } from '@/lib/boundaryNameMatch';
 
 // navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
 // with ≤4 GB get lean constants everywhere: fewer point markers, and the
@@ -193,6 +193,7 @@ function computeDataBounds(data: PropertyData[]): L.LatLngBounds | null {
  *  polygons even when no property rows are held client-side (SQL-first mode). */
 function computeGeoJSONBounds(collection: GeoJSON.FeatureCollection | null): L.LatLngBounds | null {
   if (!collection?.features?.length) return null;
+  normalizeGeoJsonCrs(collection);
   let minLng = Infinity;
   let minLat = Infinity;
   let maxLng = -Infinity;
@@ -391,6 +392,19 @@ export default function MapComponent({
   fillOpacityRef.current = fillOpacity;
   metricValuesRef.current = metricValues;
 
+  // Prefetch the ZIP-verified polygon→data name map once per tab (the alias
+  // families still apply; the map only adds zip-verified bridges).
+  const [boundaryMapVersion, setBoundaryMapVersion] = useState(0);
+  useEffect(() => {
+    let active = true;
+    prefetchBoundaryNameMap().then(() => {
+      if (active) setBoundaryMapVersion((v) => v + 1);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // NAME BRIDGE (owner report 2026-10-15: 1,372 polygons stayed grey because
   // their data rows carry a slightly different subdivision spelling — roman
   // numerals, phase/sec/amend suffix words, spacing). The index folds both
@@ -408,8 +422,11 @@ export default function MapComponent({
     (key: string): string | null => {
       if (!key) return null;
       if (metricValuesRef.current[key] !== undefined || sampleCountsRef.current[key]) return key;
+      const zipVerified = getZipVerifiedPolyResolver();
+      const viaZip = zipVerified ? zipVerified(key) : null;
+      if (viaZip && (metricValuesRef.current[viaZip] !== undefined || sampleCountsRef.current[viaZip])) return viaZip;
       const resolved = boundaryAliasIndexRef.current?.resolve(key);
-      return resolved ?? null;
+      return viaZip ?? resolved ?? null;
     },
     [boundaryAliasIndex]
   );
@@ -422,6 +439,7 @@ export default function MapComponent({
 
   const buildAreaFeatures = (): GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>[] => {
     if (!geoJsonData || !geoJsonData.features) return [];
+    normalizeGeoJsonCrs(geoJsonData);
 
     // When the boundary has NO metric values at all (empty CMS dataset, or a
     // metric with zero coverage), still render the geography: the uploaded
@@ -477,13 +495,32 @@ export default function MapComponent({
       // key families; an exact hit always wins, a miss stays grey (never a
       // wrong-colored polygon).
       const dataId = resolveMetricIdRef.current(key) ?? '';
-      const value = dataId ? metricValues[dataId] : undefined;
-      const count = dataId ? sampleCounts[dataId] || 0 : 0;
+      let value = dataId ? metricValues[dataId] : undefined;
+      let count = dataId ? sampleCounts[dataId] || 0 : 0;
+      // GEOLOCATED FALLBACK (owner rule 2026-10-15): a polygon with no name
+      // match still gets ITS OWN data — every transaction inside its borders
+      // (the smallest containing polygon) builds its per-metric medians.
+      if ((typeof value !== 'number' || !count) && metric) {
+        const geo = getGeoAssignment(key);
+        if (geo && (geo.n ?? 0) >= 1) {
+          const field: string | null =
+            metric === 'Close Price' ? 'close'
+            : metric === 'Price per Sqft' ? 'ppsf'
+            : metric === 'Days on Market' ? 'dom'
+            : metric === 'Lot Size' ? 'lot'
+            : metric === 'Est. Rental Price' || metric === 'Rental Price per Sqft' ? 'rent'
+            : null;
+          if (field && typeof (geo as Record<string, number>)[field] === 'number') {
+            value = (geo as Record<string, number>)[field];
+            count = geo.n;
+          }
+        }
+      }
       // 0 is a legitimate metric value (e.g. median DOM of 0) — only missing
       // or non-finite values mean "no data" for this area. No-data areas are
       // kept and rendered grey/opaque so boundaries are always visible.
       const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
-      const color = hasMetric ? getColorForValue(value, colorStops) : '#374151';
+      const color = hasMetric ? getColorForValue(value as number, colorStops) : '#374151';
       const name = nameMap[dataId] || nameMap[key] || String(rawName || cleanedName || key);
 
       // Only push if there's valid geometry
@@ -1074,6 +1111,7 @@ export default function MapComponent({
     const version = uploadedAtMs(fileRecord.uploadedAt);
     const cachedData = await readGeoCache<GeoJSON.FeatureCollection>(fileName, version);
     if (cachedData) {
+      normalizeGeoJsonCrs(cachedData);
       boundaryCacheRef.current[key] = cachedData;
       setGeoJsonData(cachedData);
       return;
@@ -1165,6 +1203,8 @@ export default function MapComponent({
       if (localAt) {
         const cachedLocal = await readGeoCache<GeoJSON.FeatureCollection>(`${key}:local`, localAt);
         if (cachedLocal) {
+          normalizeGeoJsonCrs(cachedLocal);
+          if (localAt) writeGeoCache(`${key}:local`, localAt, cachedLocal);
           for (const k of Object.keys(boundaryCacheRef.current) as BoundaryKey[]) {
             if (k !== key) delete boundaryCacheRef.current[k];
           }
@@ -1293,27 +1333,52 @@ export default function MapComponent({
     };
   };
 
+  // Helper to iterate through all individual polygon leaf layers in areaLayerRef,
+  // recursing through batch GeoJSON subgroups.
+  const forEachAreaPolygon = useCallback(
+    (fn: (layer: any, feature: GeoJSON.Feature, id: string, props: Record<string, any>) => void) => {
+      if (!areaLayerRef.current) return;
+      const visit = (l: any) => {
+        if (l.feature) {
+          const props = (l.feature.properties || {}) as Record<string, any>;
+          const id = String(props.id ?? l.feature.id ?? '');
+          fn(l, l.feature, id, props);
+        } else if (typeof l.eachLayer === 'function') {
+          l.eachLayer(visit);
+        }
+      };
+      areaLayerRef.current.eachLayer(visit);
+    },
+    []
+  );
+
   const updateAreaLayerStyles = () => {
-    if (!areaLayerRef.current) return;
-    // PROGRESSIVE RENDER SUPPORT: the area layer is a LAYER GROUP containing
-    // one GeoJSON subgroup per render batch. eachLayer on the group returns
-    // those subgroups (which have no .feature) — descending one more level is
-    // what reaches the actual polygon paths. Without the descent every style
-    // update no-oped and the polys stayed permanently grey after the data
-    // landed (the regression the owner caught: "the polygons never painted").
-    areaLayerRef.current.eachLayer((child: any) => {
-      const styleOne = (layer: any) => {
-        const feature = layer.feature as GeoJSON.Feature | undefined;
-        if (!feature) return;
-        const props = (feature.properties || {}) as Record<string, any>;
-        const id = String(props.id ?? feature.id ?? '');
-        // Same NAME BRIDGE as the build path — resolve before the value look-up
-        const dataId = resolveMetricIdRef.current(id) ?? '';
-        const value = dataId ? metricValuesRef.current[dataId] : undefined;
-        const count = dataId ? sampleCountsRef.current[dataId] || 0 : 0;
-        const name = nameMapRef.current[dataId] || nameMapRef.current[id] || id;
-        const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
-        const color = hasMetric ? getColorForValue(value, colorStopsRef.current) : '#374151';
+    forEachAreaPolygon((layer, _feature, id, props) => {
+      // Same NAME BRIDGE as the build path — resolve before the value look-up
+      const dataId = resolveMetricIdRef.current(id) ?? '';
+      let value = dataId ? metricValuesRef.current[dataId] : undefined;
+      let count = dataId ? sampleCountsRef.current[dataId] || 0 : 0;
+      // GEOLOCATED FALLBACK (the build path's mirror) — a poly with no name
+      // match takes the medians of the transactions inside its borders.
+      if ((typeof value !== 'number' || !count) && metricRef.current) {
+        const geo = getGeoAssignment(id);
+        if (geo && (geo.n ?? 0) >= 1) {
+          const field =
+            metricRef.current === 'Close Price' ? 'close'
+            : metricRef.current === 'Price per Sqft' ? 'ppsf'
+            : metricRef.current === 'Days on Market' ? 'dom'
+            : metricRef.current === 'Lot Size' ? 'lot'
+            : metricRef.current === 'Est. Rental Price' || metricRef.current === 'Rental Price per Sqft' ? 'rent'
+            : null;
+          if (field && typeof (geo as Record<string, number>)[field] === 'number') {
+            value = (geo as Record<string, number>)[field];
+            count = geo.n;
+          }
+        }
+      }
+      const name = nameMapRef.current[dataId] || nameMapRef.current[id] || id;
+      const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
+      const color = hasMetric ? getColorForValue(value as number, colorStopsRef.current) : '#374151';
 
       props.value = value ?? 0;
       props.count = count;
@@ -1323,21 +1388,11 @@ export default function MapComponent({
 
       const selected = selectedRef.current.includes(id);
       layer.setStyle(makeAreaStyle(id, value, selected, count));
+      if (selected && typeof layer.bringToFront === 'function') {
+        layer.bringToFront();
+      }
       // No-data boundaries stay interactive (hover/click) — they are visible.
       if (layer.options) layer.options.interactive = true;
-      };
-      // Descend: child entries of the group are the per-batch GeoJSON layers;
-      // their children are the styled polygon paths (each carries .feature).
-      if (child.feature) {
-        styleOne(child);
-      } else if (typeof child.eachLayer === 'function') {
-        child.eachLayer((leaf: any) => {
-          if (leaf.feature) styleOne(leaf);
-          else if (typeof leaf.eachLayer === 'function') {
-            leaf.eachLayer((leaf2: any) => { if (leaf2.feature) styleOne(leaf2); });
-          }
-        });
-      }
     });
   };
 
@@ -1580,19 +1635,26 @@ export default function MapComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [metricValues, sampleCounts, nameMap, colorStops, fillOpacity]);
 
+  // When the ZIP-verified name map and geo-assignments land from the server,
+  // restyle all polygon layers immediately so they don't remain grey.
+  useEffect(() => {
+    if (!boundaryMapVersion) return;
+    if (areaLayerRef.current) {
+      updateAreaLayerStyles();
+    }
+  }, [boundaryMapVersion]);
+
   // Sync selection styles without rebuilding layers. Hidden (count 0) areas
   // keep their invisible style regardless of selection.
   useEffect(() => {
-    if (!areaLayerRef.current) return;
-    areaLayerRef.current.eachLayer((layer: any) => {
-      const feature = layer.feature as GeoJSON.Feature | undefined;
-      if (!feature) return;
-      const props = (feature.properties || {}) as Record<string, any>;
-      const id = String(props.id ?? feature.id ?? '');
+    forEachAreaPolygon((layer, _feature, id, props) => {
       const selected = selectedIds.includes(id);
       layer.setStyle(makeAreaStyle(id, props.value, selected, props.count ?? 0));
+      if (selected && typeof layer.bringToFront === 'function') {
+        layer.bringToFront();
+      }
     });
-  }, [selectedIds]);
+  }, [selectedIds, forEachAreaPolygon]);
 
   // Fly the map to the selected features when the parent signals a focus
   // event (e.g. the sidebar search found a match) so the user actually sees
@@ -1603,18 +1665,32 @@ export default function MapComponent({
     if (!map || selectedIds.length === 0) return;
     const bounds = L.latLngBounds([]);
     let found = 0;
-    areaLayerRef.current?.eachLayer((layer: any) => {
-      const feature = layer.feature as GeoJSON.Feature | undefined;
-      if (!feature) return;
-      const props = (feature.properties || {}) as Record<string, any>;
-      const id = String(props.id ?? feature.id ?? '');
+    forEachAreaPolygon((layer, _feature, id) => {
       if (selectedIds.includes(id) && typeof layer.getBounds === 'function') {
-        bounds.extend(layer.getBounds());
-        found++;
+        const b = layer.getBounds();
+        if (b && (typeof b.isValid === 'function' ? b.isValid() : true)) {
+          bounds.extend(b);
+          found++;
+        }
       }
     });
+    // Fallback: if layers are still drawing or not found in group, compute from GeoJSON features
+    if (found === 0 && areaFeaturesRef.current.length > 0) {
+      for (const feat of areaFeaturesRef.current) {
+        const props = (feat.properties || {}) as Record<string, any>;
+        const id = String(props.id ?? feat.id ?? '');
+        if (selectedIds.includes(id)) {
+          const tempLayer = L.geoJSON(feat as any);
+          const b = tempLayer.getBounds();
+          if (b && (typeof b.isValid === 'function' ? b.isValid() : true)) {
+            bounds.extend(b);
+            found++;
+          }
+        }
+      }
+    }
     if (found > 0 && bounds.isValid()) {
-      map.flyToBounds(bounds, { padding: [48, 48], maxZoom: 13 });
+      map.flyToBounds(bounds, { padding: [48, 48], maxZoom: 14 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusSelectionTick]);

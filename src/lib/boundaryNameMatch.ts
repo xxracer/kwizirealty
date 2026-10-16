@@ -22,6 +22,57 @@
  * Deterministic: same inputs → same resolution, no randomness, no network.
  */
 
+/** The ZIP-verified name map served by /api/boundary-name-map (built by
+ *  kwizi-python-tools/build_name_map.cjs). Loaded once per tab; the resolver
+ *  consults it AFTER the exact hit and BEFORE the fold families. */
+let zipVerifiedMap: Record<string, string> | null = null;
+let zipVerifiedPromise: Promise<void> | null = null;
+
+export function prefetchBoundaryNameMap(): Promise<void> {
+  if (zipVerifiedMap !== null) return Promise.resolve();
+  zipVerifiedPromise =
+    zipVerifiedPromise ||
+    (async () => {
+      try {
+        const res = await fetch('/api/boundary-name-map');
+        if (res.ok) {
+          const j = await res.json();
+          if (j?.entries && typeof j.entries === 'object') zipVerifiedMap = j.entries;
+          if (j?.geoAssignments && typeof j.geoAssignments === 'object') geoAssignments = j.geoAssignments;
+        }
+      } catch {
+        // best-effort — the fold families still resolve most areas
+      }
+      if (zipVerifiedMap === null) zipVerifiedMap = {};
+    })();
+  return zipVerifiedPromise;
+}
+
+export function getZipVerifiedPolyResolver(): ((key: string) => string | null) | null {
+  if (!zipVerifiedMap) return null;
+  return (key) => zipVerifiedMap![key] ?? null;
+}
+
+/** GEOMETRIC assignments (owner rule 2026-10-15: each transaction belongs to
+ *  its polygon by LATITUDE/LONGITUDE) — polys with no spelling match still
+ *  get their data from the rows located inside their borders. */
+let geoAssignments: Record<string, { n: number; close?: number; ppsf?: number; dom?: number; lot?: number; rent?: number }> = {};
+
+export function getGeoAssignment(key: string): { n: number; close?: number; ppsf?: number; dom?: number; lot?: number; rent?: number } | null {
+  return geoAssignments[key] ?? null;
+}
+
+/** har.com rows carry MULTI-NAME cells ("1F HIGHLAND HTS, ACRES HOMES, PINEMO"
+ *  / "TRAILS/LARKIN STREET") — split on comma/slash delimiters and index EVERY
+ *  substantial part against the same data key. Single-letter leftovers are
+ *  dropped by the token filter, so directionals like "T/H" don't pollute. */
+function splitMultiNames(key: string): string[] {
+  return String(key)
+    .split(/\s*[,;/]\s*/)
+    .map((part) => part.trim())
+    .filter((part) => part.replace(/[^A-Z0-9 ]/gi, '').length >= 4);
+}
+
 const ROMAN: Record<string, string> = {
   I: '1', II: '2', III: '3', IV: '4', V: '5', VI: '6', VII: '7',
   VIII: '8', IX: '9', X: '10', XI: '11', XII: '12', XIII: '13',
@@ -90,8 +141,9 @@ function suffixVariants(k: string): string[] {
       tokens = tokens.slice(0, -2).concat(last);
     } else if (SUFFIX_TOKENS.has(last)) {
       tokens = tokens.slice(0, -1);
-    } else if (/^[^A-Z]$/.test(last)) {
-      // folded single letter (T/H U/R leftovers)
+    } else if (last.length === 1 && !'@'.includes(last)) {
+      // single-letter tokens: N/S/E/W directionals AND the T/H U/R leftovers —
+      // geometry files write "Highland Farms S" where the CSV says the bare name.
       tokens = tokens.slice(0, -1);
     } else {
       break;
@@ -114,27 +166,30 @@ export function buildBoundaryAliasIndex(dataKeys: Iterable<string>): BoundaryAli
   // fallback ("ALEXAN MEMORIAL" poly → "ALEXAN MEMORIAL HOME OFFICE 2" data)
   const extensionForms: { form: string; key: string }[] = [];
   let count = 0;
-  for (const raw of dataKeys) {
-    const canonical = canonicalize(String(raw));
-    if (!canonical) continue;
-    count++;
-    const folded = foldAll(canonical);
-    // FULL forms of this key claim their slots FIRST (an exact-named key must
-    // always win over another key's stripped alias of the same form).
-    const forms = [canonical, folded, compact(folded), compact(canonical)];
-    for (const form of forms) {
-      if (!index.has(form)) index.set(form, String(raw));
-    }
-    // DATA-side longer names: index their suffix-stripped variants too, so a
-    // SHORT polygon name ("ABERDEEN GREEN 2") finds rows stored as
-    // "Aberdeen Green 2 Sec 20". First-come claims each loose form.
-    for (const variant of suffixVariants(folded)) {
-      const variantCompact = compact(variant);
-      if (variantCompact && !index.has(variantCompact)) index.set(variantCompact, String(raw));
-      if (!index.has(variant)) index.set(variant, String(raw));
-    }
-    const self = compact(folded);
-    extensionForms.push({ form: self, key: String(raw) });
+  for (const rawKey of dataKeys) {
+    // multi-name cells: every part claims its families too, pointing at the
+    // SAME raw data key (the whole cell's aggregates — the har's grouping).
+    for (const raw of [rawKey, ...splitMultiNames(String(rawKey))]) {
+      const canonical = canonicalize(raw);
+      if (!canonical) continue;
+      const folded = foldAll(canonical);
+      // FULL forms of this key claim their slots FIRST (an exact-named key
+      // must always win over another key's stripped alias of the same form).
+      const forms = [canonical, folded, compact(folded), compact(canonical)];
+      for (const form of forms) {
+        if (!index.has(form)) index.set(form, rawKey);
+      }
+      // DATA-side longer names: index their suffix-stripped variants too, so
+      // a SHORT polygon name ("ABERDEEN GREEN 2") finds rows stored as
+      // "Aberdeen Green 2 Sec 20". First-come claims each loose form.
+      for (const variant of suffixVariants(folded)) {
+        const variantCompact = compact(variant);
+        if (variantCompact && !index.has(variantCompact)) index.set(variantCompact, rawKey);
+        if (!index.has(variant)) index.set(variant, rawKey);
+      }
+  }
+    const self = compact(foldAll(canonicalize(String(rawKey))));
+    extensionForms.push({ form: self, key: String(rawKey) });
   }
 
   const resolve = (key: string): string | null => {

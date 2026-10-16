@@ -332,19 +332,14 @@ export const cmsStore = {
     const { rows, rawContent, ...recordWithoutRows } = record;
     const csvText = rawContent || rowsToCsv(record.headers, rows);
 
-    // Upload a compressed backup to Storage so the data is never lost if SQL
-    // is wiped. The path is separate from the legacy dataset CSV folder.
-    const backupPath = `cms_files/sql_imports/${record.id}.csv.gz`;
-    const backupRef = ref(storage, backupPath);
-    let blob: Blob;
-    if (typeof CompressionStream !== 'undefined') {
-      const gzipped = new Blob([csvText]).stream().pipeThrough(new CompressionStream('gzip'));
-      blob = new Blob([await new Response(gzipped).arrayBuffer()], { type: 'application/gzip' });
-    } else {
-      blob = new Blob([csvText], { type: 'text/csv' });
-    }
-    await uploadBytes(backupRef, blob);
-    const downloadUrl = await getDownloadURL(backupRef);
+    // OWNER RULE (2026-10-16): NO CSVs in Storage — the database IS the
+    // storage. The old per-file backup (cms_files/sql_imports/<id>.csv.gz)
+    // was removed: today every upload's rows are verified staged+committed
+    // in SQL, and a backup duplicated the whole dataset in Storage forever.
+    // The metadata doc still carries the inline CSV when small (rawContent),
+    // so the Eye/report keep their detail without any Storage object.
+    const backupPath = '';
+    const downloadUrl = '';
 
     const year = detectDatasetYear(record.name, rows);
     const metadata: Record<string, any> = {
@@ -352,8 +347,6 @@ export const cmsStore = {
       rowCount: record.rows.length,
       sqlImport: true,
       year,
-      storageUrl: downloadUrl,
-      storagePath: backupPath,
     };
     // Inline only if under ~900 KB; never store undefined (Firestore rejects it).
     if (csvText.length < 900_000) metadata.rawContent = csvText;

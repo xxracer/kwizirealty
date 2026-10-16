@@ -75,6 +75,29 @@ export function getAdminFirestore(): Firestore {
 }
 
 /** Admin Storage bucket handle (bucket id from NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET). */
+/** SERVER-SIDE SQL GUARD (owner log 2026-10-15: /api/query 504 with a FIVE
+ *  minute hang — a firebase-admin Data Connect fetch that never resolved;
+ *  the SDK has no timeout of its own). Race the call against a deadline so
+ *  a dead/hung backend connection frees the function with a clean,
+ *  retry-able error instead of holding it to the 300s Fluid limit. */
+export const SQL_GUARD_MS = 60_000;
+
+export function dcWithTimeout<T>(p: Promise<T>, ms = SQL_GUARD_MS): Promise<T> {
+  let killer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    killer = setTimeout(() => reject(new Error('SQL execution timed out (server-side guard)')), ms);
+  });
+  return Promise.race([p, deadline]).finally(() => {
+    if (killer) clearTimeout(killer);
+  }) as Promise<T>;
+}
+
+/** Storage guard for the query-cache read (a hung download also froze a
+ *  function to the 300s limit). Returns null on timeout/error. */
+export function storageWithTimeout<T>(p: Promise<T>, ms = 30_000): Promise<T> {
+  return dcWithTimeout(p, ms);
+}
+
 export function getAdminStorageBucket() {
   const bucketId =
     process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ||

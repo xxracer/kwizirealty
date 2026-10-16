@@ -30,7 +30,7 @@ import {
   fetchSqlDistinct,
   type SqlAggregates,
 } from '@/lib/sqlData';
-import { buildBoundaryAliasIndex } from '@/lib/boundaryNameMatch';
+import { buildBoundaryAliasIndex, prefetchBoundaryNameMap, getZipVerifiedPolyResolver } from '@/lib/boundaryNameMatch';
 import { readSqlSyncState } from '@/lib/sqlSync';
 import { resolveQueriesToZips } from '@/lib/areaAliases';
 import { formatMetricInput, formatMetricValue, parseMetricInput } from '@/lib/legendFormat';
@@ -325,11 +325,15 @@ function MapPageInner() {
   // via ref (no effect re-fire loop).
   const sqlValuesRef = useRef<Record<string, number>>({});
   sqlValuesRef.current = sqlAgg?.mapValues?.values ?? sqlValuesRef.current;
+  // Whole-aggregate ref for the loader's hang-fallback (see loadFullData).
+  const sqlAggRef = useRef<SqlAggregates | null>(null);
+  sqlAggRef.current = sqlAgg;
   // CMS metric overrides (boundary+metric → value), applied to the SQL-returned
   // map values to mirror engine.getMapValues' override pass (the server rows
   // are raw — overrides live client-side).
   const [cmsOverrides, setCmsOverrides] = useState<CMSMetricOverride[]>([]);
   useEffect(() => {
+    void prefetchBoundaryNameMap();
     let cancelled = false;
     cmsStore
       .listOverrides()
@@ -469,6 +473,9 @@ function MapPageInner() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [reversePalette, setReversePalette] = useState(false);
   const [autoScale, setAutoScale] = useState(true);
+  // OWNER RULE (2026-10-16): the map is ALL SOLID BLUE by default — the value
+  // gradient (scale range) only runs when the user ACTIVATES this toggle.
+  const [scaleActive, setScaleActive] = useState(false);
   const [customMin, setCustomMin] = useState<number>(0);
   const [customMax, setCustomMax] = useState<number>(0);
   /** Full data min/max — the fixed frame the draggable scale handles map onto. */
@@ -715,10 +722,23 @@ function MapPageInner() {
         // SQL-first: the dataset version comes from cms_meta/sql_sync, not from
         // a Storage manifest. The admin panel now uploads CSVs directly to SQL,
         // so there is no "mirror" loop to wait for.
-        const sqlPlan = await engine.resolveDataSource();
+        // OWNER-FREEZE FIX (2026-10-15): this single getDoc can HANG (a stuck
+        // Firestore watch) while the SQL aggregate ALREADY landed in the
+        // browser — the map sat on "Loading Data…" forever with the data
+        // painted behind it. Race the read; if the aggregate is in hand OR
+        // arrives within the window, we are READY anyway.
+        const sqlPlan = await Promise.race([
+          engine.resolveDataSource(),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 12_000)),
+        ]);
         if (sqlPlan) {
           setSqlSyncReady(true);
           loadedDatasetVersionRef.current = sqlPlan.version ?? 0;
+          return true;
+        }
+        if (sqlAggRef.current?.reportStats?.count) {
+          // The server's aggregate IS in this browser: real data, real use.
+          setSqlSyncReady(true);
           return true;
         }
         setSqlSyncReady(false);
@@ -985,16 +1005,15 @@ function MapPageInner() {
         // row spelled slightly differently (SEC II vs Sec 2, extra Amend/
         // Phase suffixes…). Selection ids are POLYGON names — they must be
         // resolved onto the SQL key families BEFORE the SQL filter, or the
-        // report gets 0 rows ("no data"). The values map of the CURRENT
-        // base query holds the genuine SQL keys — resolve via the shared
-        // deterministic index. Exact hits stay untouched.
+        // report gets 0 rows ("no data"). Chain: exact → the ZIP-verified
+        // name map → the deterministic fold families → as-is.
         let sqlSelection = selectedIds;
         if (selectedIds.length > 0) {
           const index = buildBoundaryAliasIndex(Object.keys(sqlValuesRef.current || {}));
+          const viaZipMap = getZipVerifiedPolyResolver();
           const resolvedSet = new Set<string>();
           for (const id of selectedIds) {
-            const hit = index.resolve(id);
-            resolvedSet.add(hit ?? id);
+            resolvedSet.add((viaZipMap && viaZipMap(id)) || index.resolve(id) || id);
           }
           sqlSelection = [...resolvedSet];
         }
@@ -1186,34 +1205,17 @@ function MapPageInner() {
   }, [effectiveMetricValues, autoScale, scaleFullRange]);
 
   const colorStops = useMemo(() => {
-    // Owner rule: Auto scale ON → every area with data paints the same blue
-    // (the scale is "not applied" yet); turning Auto scale OFF applies the
-    // Spectral ramp (the client's reference photo) over the manual Min/Max.
-    if (autoScale) {
-      const vals = Object.values(effectiveMetricValues).filter(
-        (v) =>
-          isFinite(v) &&
-          (v > 0 || metric === 'Appreciation Rate' || metric === 'Investor Index' || metric === 'Last Year Tax Rate')
-      );
-      // Linear scan — Math.min(...vals) with ~60k values risks a RangeError.
-      let min = Infinity;
-      let max = -Infinity;
-      for (const v of vals) {
-        if (v < min) min = v;
-        if (v > max) max = v;
-      }
-      if (isFinite(min) && isFinite(max)) {
-        return [[min, '#2c7be5'], [max, '#2c7be5']] as [number, string][];
-      }
-    }
+    // With the scale inactive, an EMPTY stops list makes getColorForValue
+    // return the single solid blue for every polygon (owner rule).
+    if (!scaleActive) return [];
     return generateColorStops(
       effectiveMetricValues,
       metric,
       reversePalette,
-      customMin,
-      customMax
+      autoScale ? undefined : customMin,
+      autoScale ? undefined : customMax
     );
-  }, [effectiveMetricValues, metric, reversePalette, autoScale, customMin, customMax]);
+  }, [scaleActive, effectiveMetricValues, metric, reversePalette, autoScale, customMin, customMax]);
 
   // Dragging a scale handle: grabbing a handle while Auto scale is on freezes
   // the current range (that's the range the user sees), then the drag expands
@@ -1449,7 +1451,31 @@ function MapPageInner() {
     const q = query.toUpperCase();
     const isZipQuery = /^\d{5}$/.test(q);
 
-    // 1) Loaded property rows (after a report): match address / ZIP / city /
+    // 1) Exact boundary feature by name — if the query directly matches a known
+    //    boundary name (e.g. "BRUSHY OAKS", "THE WOODLANDS"), that polygon match
+    //    is authoritative: do not let a random property street address hijack the
+    //    user's explicit area search.
+    const nameSource: Record<string, string> = {};
+    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
+      nameSource[id] = info.name;
+    }
+    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
+      if (!nameSource[id]) nameSource[id] = name;
+    }
+    const exactNameMatches = new Set<string>();
+    for (const [id, name] of Object.entries(nameSource)) {
+      const n = (name || '').toUpperCase().trim();
+      if (n === q || cleanBoundaryName(n) === cleanBoundaryName(q) || id === q) {
+        exactNameMatches.add(id);
+      }
+    }
+    if (exactNameMatches.size > 0) {
+      setSelectedIds(Array.from(exactNameMatches));
+      setSearchFocusTick((t) => t + 1);
+      return;
+    }
+
+    // 2) Loaded property rows (after a report): match address / ZIP / city /
     //    subdivision and map back to the active boundary's keys.
     if (filteredData.length > 0) {
       const matches = filteredData
@@ -1475,15 +1501,7 @@ function MapPageInner() {
       }
     }
 
-    // 2) Boundary features by name — boundaryLookup is loaded from the GeoJSON
-    //    and works even before any report has been generated.
-    const nameSource: Record<string, string> = {};
-    for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
-      nameSource[id] = info.name;
-    }
-    for (const [id, name] of Object.entries(effectiveNameMap || {})) {
-      if (!nameSource[id]) nameSource[id] = name;
-    }
+    // 3) Boundary features by name (partial/substring matches)
     const matched = new Set<string>();
     for (const [id, name] of Object.entries(nameSource)) {
       const n = (name || '').toUpperCase();
@@ -1492,13 +1510,18 @@ function MapPageInner() {
 
     // 3) ZIP code query: match features by their stored ZIP on any boundary
     //    (subdivisions/schools carry a Zip_Code prop), or by id when the
-    //    active boundary is ZIP codes.
+    //    active boundary is ZIP codes. OWNER RULE (2026-10-15): the ZIP list
+    //    comes from the UPLOADED CSVs (the SQL zipcodes) — a known ZIP that
+    //    has data but no geometry feature still reports itself instead of
+    //    failing silently.
     if (isZipQuery) {
       for (const [id, info] of Object.entries(boundaryLookup[boundary] || {})) {
         if (info.zip === q) matched.add(id);
         else if (boundary === 'zipcodes' && id === q) matched.add(id);
       }
       if (boundary === 'zipcodes' && nameSource[q]) matched.add(q);
+      const uploadedZip = (sqlDistinct?.zipcodes ?? []).includes(q);
+      if (uploadedZip && boundary === 'zipcodes') matched.add(q);
     }
 
     // 4) City / area name ("katy", "tomball", "sugar land"): resolve through
@@ -1527,14 +1550,22 @@ function MapPageInner() {
     } else {
       setSelectedIds([]);
     }
-  }, [searchQuery, filteredData, boundary, effectiveNameMap, boundaryLookup]);
+  }, [searchQuery, filteredData, boundary, effectiveNameMap, boundaryLookup, sqlDistinct]);
 
   // Worker mode: the rows live in the worker, so applySearch's row-level pass
   // can't run on the main thread. The worker's search supplements the
-  // boundary-name matching in applySearch — a non-empty result wins, mirroring
-  // the old precedence (row matches beat name matches).
+  // boundary-name matching in applySearch — a non-empty result wins when there
+  // is no exact boundary name match.
   useEffect(() => {
     if (!useWorker || !searchQuery.trim()) return;
+    const qTrim = searchQuery.trim().toUpperCase();
+    const hasExactBoundary = Object.entries(boundaryLookup[boundary] || {}).some(
+      ([id, info]) => {
+        const n = (info.name || '').toUpperCase().trim();
+        return n === qTrim || cleanBoundaryName(n) === cleanBoundaryName(qTrim) || id === qTrim;
+      }
+    );
+    if (hasExactBoundary) return;
     let cancelled = false;
     workerSearch(boundary, searchQuery).then((ids) => {
       if (cancelled || !ids || ids.length === 0) return;
@@ -1544,15 +1575,23 @@ function MapPageInner() {
     return () => {
       cancelled = true;
     };
-  }, [searchQuery, useWorker, boundary, workerSearch]);
+  }, [searchQuery, useWorker, boundary, workerSearch, boundaryLookup]);
 
   // SQL mode: the rows live server-side, so the search box's row-level pass
   // (address / zip / MLS number / city) runs via /api/search. A non-empty
-  // result wins, mirroring applySearch's precedence (row matches beat name
-  // matches); applySearch's boundary-name matching still runs first for area
-  // names and stays authoritative when the row search finds nothing.
+  // result wins when the query does NOT match an existing boundary name directly;
+  // when an exact boundary name exists (e.g. "BRUSHY OAKS"), the boundary match
+  // stays authoritative so random street names don't hijack the selection.
   useEffect(() => {
     if (!useSql || !searchQuery.trim()) return;
+    const qTrim = searchQuery.trim().toUpperCase();
+    const hasExactBoundary = Object.entries(boundaryLookup[boundary] || {}).some(
+      ([id, info]) => {
+        const n = (info.name || '').toUpperCase().trim();
+        return n === qTrim || cleanBoundaryName(n) === cleanBoundaryName(qTrim) || id === qTrim;
+      }
+    );
+    if (hasExactBoundary) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1582,7 +1621,7 @@ function MapPageInner() {
     };
     // reportGeneration refreshes after each data reload (same as applySearch's
     // callers rely on).
-  }, [searchQuery, useSql, boundary, reportGeneration]);
+  }, [searchQuery, useSql, boundary, reportGeneration, boundaryLookup]);
 
   // Live search: debounce the input so we filter as the user types.
   useEffect(() => {
@@ -2685,6 +2724,31 @@ function MapPageInner() {
           {/* Scale / legend */}
           <FilterSection icon={<BarChart3 className="w-4 h-4 text-cyan-400" />} title="Scale Range" defaultOpen={false}>
             <div className="space-y-3">
+              {/* OWNER RULE: the whole scale only runs when ACTIVATED. Off =
+                  every polygon solid blue. */}
+              <label className="flex items-center justify-between gap-3 cursor-pointer select-none">
+                <span className="flex items-center gap-2 text-xs font-semibold text-white">
+                  <input
+                    type="checkbox"
+                    checked={scaleActive}
+                    onChange={(e) => setScaleActive(e.target.checked)}
+                    className="rounded border-white/20 bg-white/5 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  Scale Range on
+                </span>
+                {scaleActive ? (
+                  <button
+                    onClick={() => { setScaleActive(false); setAutoScale(true); }}
+                    className="text-[10px] text-gray-400 hover:text-white underline"
+                  >
+                    Turn off (solid blue)
+                  </button>
+                ) : (
+                  <span className="text-[10px] text-gray-500">map = solid blue</span>
+                )}
+              </label>
+              {scaleActive && (
+              <>
               <p className="text-[10px] text-gray-500 leading-relaxed">
                 Controls the color scale of the map: each area is colored by where its metric value falls between Min and Max. With Auto scale on, Min/Max fit the current data automatically. Drag the handles on the bar to shrink or expand the range, or drag them back out to expand it again.
               </p>
@@ -2793,9 +2857,11 @@ function MapPageInner() {
                 })}
               </div>
               <div className="flex justify-between text-xs font-semibold text-gray-300">
-                <span>{formatMetricValue(metric, colorStops[0][0])}</span>
-                <span>{formatMetricValue(metric, colorStops[colorStops.length - 1][0])}</span>
+                <span>{formatMetricValue(metric, colorStops[0]?.[0] ?? 0)}</span>
+                <span>{formatMetricValue(metric, colorStops[colorStops.length - 1]?.[0] ?? 0)}</span>
               </div>
+              </>
+              )}
             </div>
           </FilterSection>
 
