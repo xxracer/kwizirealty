@@ -3,7 +3,7 @@
 # Native SQL mode: the WHERE clause replicates src/lib/engine.ts
 # filterProperties() exactly (same defaults are no-ops, same derived fields:
 # l2s = closePrice/listPrice*100 when listPrice > 0, dom = COALESCE(cdom, dom),
-# ppsf = pricePerSqft || closePrice/sqft, estRent = closePrice * 0.008).
+# ppsf = pricePerSqft || closePrice/sqft, rent = REAL rent rows (listing_type='rent'); sales views get NULL instead of estimates).
 #
 # School-rating filters are resolved client-side to school-name lists and sent
 # as the *Rating params (the TEA score maps live in the browser engine).
@@ -61,8 +61,7 @@ query filteredProperties(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) >= $19
-      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) <= $20
+      AND ($33 <> 'rent' OR COALESCE(listing_type, 'sale') = 'rent' AND close_price >= $19 AND close_price <= $20)
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -150,8 +149,7 @@ query filteredPropertiesForSelection(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND (close_price * CASE WHEN $35 = 'rent' THEN 1 ELSE 0.008 END) >= $19
-      AND (close_price * CASE WHEN $35 = 'rent' THEN 1 ELSE 0.008 END) <= $20
+      AND ($35 <> 'rent' OR COALESCE(listing_type, 'sale') = 'rent' AND close_price >= $19 AND close_price <= $20)
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -291,111 +289,6 @@ query debugPropertyIndexes @auth(level: USER) {
     """,
     params: []
   )
-}
-
-# AGGREGATE FAST TABLE (2026-10-15): the per-area medians for ALL boundaries
-# in ONE materialized view, computed once per data change instead of once per
-# request (a 797k-row aggregate took 12-17s COLD; the view answers in ms).
-mutation ensureAreaAggView @auth(level: NO_ACCESS) {
-  _execute(sql: """
-    CREATE MATERIALIZED VIEW IF NOT EXISTS properties_area_agg AS
-    SELECT 'subdivisions' AS boundary, subdivisions AS key,
-      count(*)::int AS n,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0) AS med_close_price,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) > 0) AS med_ppsf,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0) AS med_l2s,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE (CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) > 0) AS med_dom,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * 0.008) FILTER (WHERE close_price > 0) AS med_rent,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price * 0.008) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0) AS med_rent_psf,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0) AS med_lot,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0)) AS med_tax_rate
-    FROM properties
-    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '')
-    GROUP BY 1, 2
-    UNION ALL
-    SELECT 'zipcodes', zipcodes, count(*)::int,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
-    FROM properties
-    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND zipcodes <> ''
-    GROUP BY 1, 2
-    UNION ALL
-    SELECT 'highschools', highschools, count(*)::int,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
-    FROM properties
-    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND highschools <> ''
-    GROUP BY 1, 2
-    UNION ALL
-    SELECT 'elementary', elementary, count(*)::int,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
-    FROM properties
-    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND elementary <> ''
-    GROUP BY 1, 2
-    UNION ALL
-    SELECT 'middle', middle, count(*)::int,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
-    FROM properties
-    WHERE upload_session_id IS NULL AND COALESCE(listing_type, 'sale') IN ('sale', '') AND middle <> ''
-    GROUP BY 1, 2
-    UNION ALL
-    SELECT 'rent', subdivisions, count(*)::int,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END)) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) FILTER (WHERE list_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) FILTER (WHERE COALESCE(cdom, dom, 0) > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price) / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0),
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0))
-    FROM properties
-    WHERE upload_session_id IS NULL AND listing_type = 'rent' AND subdivisions <> ''
-    GROUP BY 1, 2
-  """, params: [])
-}
-
-mutation refreshAreaAggView @auth(level: NO_ACCESS) {
-  _execute(sql: "REFRESH MATERIALIZED VIEW CONCURRENTLY properties_area_agg", params: [])
-}
-
-# The unique index CONCURRENTLY requires (refresh after every publish).
-mutation ensureAreaAggIndex @auth(level: NO_ACCESS) {
-  _execute(sql: """
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_area_agg_boundary_key
-    ON properties_area_agg (boundary, key)
-  """, params: [])
 }
 
 # Verify (read-only): which of the given [mls, datasetYear] pairs exist in the
@@ -787,9 +680,9 @@ query areaMapValues(
       percentile_cont(0.5) WITHIN GROUP (ORDER BY list_price::float / sqft) FILTER (WHERE list_price > 0 AND sqft > 0) AS med_ppsf_list,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) AS med_l2s,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) AS med_dom,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) FILTER (WHERE close_price > 0) AS med_rent,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY 0.096) FILTER (WHERE close_price > 0) AS med_rts,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) / sqft) FILTER (WHERE sqft > 0 AND close_price > 0) AS med_rent_psf,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0 AND $34 = 'rent') AS med_rent,
+      CASE WHEN COALESCE(SUM(close_price) FILTER (WHERE COALESCE(listing_type, 'sale') IN ('sale', '') AND close_price > 0), 0) = 0 THEN NULL ELSE 100.0 * COALESCE(SUM(close_price) FILTER (WHERE listing_type = 'rent' AND close_price > 0), 0) / SUM(close_price) FILTER (WHERE COALESCE(listing_type, 'sale') IN ('sale', '') AND close_price > 0) END AS med_rts,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0 AND $34 = 'rent') AS med_rent_psf,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY ROUND((CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.85 END)) FILTER (WHERE (CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) > 0) AS med_rent_dom,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0) AS med_lot,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
@@ -806,8 +699,7 @@ query areaMapValues(
       AND lot_size >= $16 AND lot_size <= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $18
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $19
-      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) >= $20
-      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) <= $21
+      AND ($34 <> 'rent' OR COALESCE(listing_type, 'sale') = 'rent' AND close_price >= $20 AND close_price <= $21)
       AND ($22 IS NULL OR (close_date_ts >= $22::bigint AND close_date_ts <= $23::bigint))
       AND (COALESCE(cardinality($24::text[]), 0) = 0 OR property_type = ANY($24::text[]))
       AND ($25 = 'any' OR ($25 = 'yes' AND pool) OR ($25 = 'no' AND NOT pool))
@@ -931,8 +823,7 @@ query overallAggregates(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) >= $19
-      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) <= $20
+      AND ($33 <> 'rent' OR COALESCE(listing_type, 'sale') = 'rent' AND close_price >= $19 AND close_price <= $20)
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -1016,8 +907,8 @@ query monthlyTimeSeries(
       percentile_cont(0.5) WITHIN GROUP (ORDER BY list_price::float / sqft) FILTER (WHERE list_price > 0 AND sqft > 0) AS med_ppsf_list,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN list_price > 0 THEN (close_price::float / list_price) * 100 ELSE 0 END) AS med_l2s,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN COALESCE(cdom, 0) > 0 THEN cdom ELSE COALESCE(dom, 0) END) AS med_dom,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) FILTER (WHERE close_price > 0) AS med_rent,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) / sqft) FILTER (WHERE sqft > 0 AND close_price > 0) AS med_rent_psf,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0 AND $33 = 'rent') AS med_rent,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price / NULLIF(sqft,0)) FILTER (WHERE close_price > 0 AND sqft > 0 AND $33 = 'rent') AS med_rent_psf,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY lot_size) FILTER (WHERE lot_size > 0) AS med_lot,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY CASE WHEN maint_fee_schedule LIKE '%month%' THEN maint_fee * 12 WHEN maint_fee_schedule LIKE '%quarter%' THEN maint_fee * 4 WHEN maint_fee_schedule LIKE '%semi%' OR maint_fee_schedule LIKE '%half%' THEN maint_fee * 2 ELSE maint_fee END) FILTER (WHERE maint_fee > 0) AS med_hoa,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY COALESCE(tax_rate, 0)) AS med_tax_rate
@@ -1033,8 +924,7 @@ query monthlyTimeSeries(
       AND lot_size >= $15 AND lot_size <= $16
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $18
-      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) >= $19
-      AND (close_price * CASE WHEN $33 = 'rent' THEN 1 ELSE 0.008 END) <= $20
+      AND ($33 <> 'rent' OR COALESCE(listing_type, 'sale') = 'rent' AND close_price >= $19 AND close_price <= $20)
       AND ($21 IS NULL OR (close_date_ts >= $21::bigint AND close_date_ts <= $22::bigint))
       AND (COALESCE(cardinality($23::text[]), 0) = 0 OR property_type = ANY($23::text[]))
       AND ($24 = 'any' OR ($24 = 'yes' AND pool) OR ($24 = 'no' AND NOT pool))
@@ -1122,8 +1012,7 @@ query mapPoints(
       AND lot_size >= $16 AND lot_size <= $17
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) >= $18
       AND COALESCE(price_per_sqft, CASE WHEN sqft > 0 THEN close_price::float / sqft ELSE 0 END) <= $19
-      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) >= $20
-      AND (close_price * CASE WHEN $34 = 'rent' THEN 1 ELSE 0.008 END) <= $21
+      AND ($34 <> 'rent' OR COALESCE(listing_type, 'sale') = 'rent' AND close_price >= $20 AND close_price <= $21)
       AND ($22 IS NULL OR (close_date_ts >= $22::bigint AND close_date_ts <= $23::bigint))
       AND (COALESCE(cardinality($24::text[]), 0) = 0 OR property_type = ANY($24::text[]))
       AND ($25 = 'any' OR ($25 = 'yes' AND pool) OR ($25 = 'no' AND NOT pool))

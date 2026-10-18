@@ -25,8 +25,41 @@
 import { getAdminStorageBucket, storageWithTimeout } from '@/lib/firebaseAdmin';
 
 const CACHE_PREFIX = 'map_cache/';
-/** TTL in hours — data changes rotate the key, this is only a safety net. */
-const CACHE_TTL_HOURS = 24;
+/** TTL in hours — data changes rotate the key, this is only a safety net.
+ *  30 days (not 24h): every upload rotates the whole key set through the
+ *  dataset version, so a long-lived entry can never serve stale data — while
+ *  a 24h TTL just GUARANTEED daily cold-computes (8-17s) for whoever visited
+ *  between expiry and the next sync's prewarm. */
+
+const CACHE_TTL_HOURS = 24 * 30;
+
+/** In-memory warm-instance cache (the Python app's st.cache_data equivalent):
+ *  a Vercel Fluid instance that stays alive serves a repeat /api/query with a
+ *  ~50ms memory read instead of a Storage round-trip download (which is why a
+ *  cache "hit" still cost 1.5-3.6s). Six entries × ~2.7MB ≈ 16MB — safe under
+ *  Fluid's 2GB. */
+const MEM_CACHE_CAP = 6;
+const memCache = new Map<string, { etag: string; payload: unknown }>();
+
+function memGet(cacheKey: string) {
+  const hit = memCache.get(cacheKey);
+  if (hit) {
+    // refresh LRU recency
+    memCache.delete(cacheKey);
+    memCache.set(cacheKey, hit);
+  }
+  return hit || null;
+}
+
+function memPut(cacheKey: string, value: { etag: string; payload: unknown }) {
+  if (memCache.has(cacheKey)) memCache.delete(cacheKey);
+  memCache.set(cacheKey, value);
+  while (memCache.size > MEM_CACHE_CAP) {
+    const oldest = memCache.keys().next().value;
+    if (oldest === undefined) break;
+    memCache.delete(oldest);
+  }
+}
 
 interface CacheEnvelope {
   etag: string;
@@ -39,6 +72,8 @@ interface CacheEnvelope {
 export async function readQueryCache(
   cacheKey: string
 ): Promise<{ etag: string; payload: unknown } | null> {
+  const memHit = memGet(cacheKey);
+  if (memHit) return memHit;
   const file = getAdminStorageBucket().file(`${CACHE_PREFIX}${cacheKey}.json`);
   try {
     const [exists] = await storageWithTimeout(file.exists());
@@ -49,7 +84,9 @@ export async function readQueryCache(
     const [buf] = await storageWithTimeout(file.download());
     const parsed = JSON.parse(buf.toString('utf-8')) as CacheEnvelope | null;
     if (!parsed || typeof parsed.etag !== 'string') return null;
-    return { etag: parsed.etag, payload: parsed.payload };
+    const hit = { etag: parsed.etag, payload: parsed.payload };
+    memPut(cacheKey, hit);
+    return hit;
   } catch (err) {
     console.warn('[query-cache] read skipped:', err instanceof Error ? err.message : err);
     return null;
@@ -58,6 +95,7 @@ export async function readQueryCache(
 
 /** Store a computed response for reuse. Fire-and-forget — never blocks the reply. */
 export function writeQueryCache(cacheKey: string, etag: string, payload: unknown): void {
+  memPut(cacheKey, { etag, payload });
   void (async () => {
     try {
       const envelope: CacheEnvelope = {

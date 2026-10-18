@@ -25,6 +25,7 @@ import zlib from 'zlib';
 import { NextResponse } from 'next/server';
 import { getAdminAuth, getAdminDataConnect, getAdminFirestore } from '@/lib/firebaseAdmin';
 import { guardPublicRead } from '@/lib/server/requestGuard';
+import { invalidateDatasetVersionTag } from '@/lib/server/datasetVersion';
 import { FieldValue } from 'firebase-admin/firestore';
 
 export const runtime = 'nodejs';
@@ -237,6 +238,10 @@ export async function POST(req: Request) {
   // a pointless retry loop on every SQL-first deployment). Check the mode
   // FIRST; only Storage-manifest syncs need the manifest.
   if (stateData?.directImport === true) {
+    // Rotate the version-tag memo FIRST so the prewarm below mints keys for
+    // the NEW dataset version (with the memo still warm the prewarm would
+    // warm old-version entries nobody reads).
+    invalidateDatasetVersionTag();
     // Fire-and-forget map prewarm: after every data publish the DEFAULT map
     // view (landing state) is computed once and stored in the query result
     // cache, so the next visitor's first /api/query reads a warm cache entry
@@ -282,6 +287,7 @@ export async function POST(req: Request) {
   const pending = allChunks.filter((c) => !syncedChunks.includes(c));
   if (pending.length === 0) {
     await stateRef.set({ version, syncedChunks, done: true, totalRows: manifest.totalRows ?? 0, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    invalidateDatasetVersionTag();
     prewarmDefaultMapQuery(req);
     return NextResponse.json({ ok: true, done: true, version, synced: allChunks.length, total: allChunks.length });
   }

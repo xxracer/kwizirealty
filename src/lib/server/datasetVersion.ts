@@ -17,7 +17,37 @@ const SQL_SYNC_DOC = { collection: 'cms_meta', id: 'sql_sync' };
 const OVERRIDES_COLLECTION = 'cms_overrides';
 const PROPERTY_OVERRIDES_COLLECTION = 'cms_property_overrides';
 
+/** Called by /api/sql/sync right after data changes so the next /api/query
+ *  always builds its etag from the FRESH version (otherwise a request 60s
+ *  after an upload would still mint old-version keys and the prewarm could
+ *  warm entries the real visitors never read). */
+export function invalidateDatasetVersionTag(): void {
+  memo.value = null;
+  memo.at = 0;
+}
+
 export async function getDatasetVersionTag(): Promise<string> {
+  // The tag is read on EVERY /api/query — one SQL query + 4 Firestore reads
+  // added real latency to even a cache-hit request. Memoize for 60s: a data
+  // change (upload/commit/override) rotates the tag within a minute, which is
+  // far faster than the warm-up path itself; and the SQL-sync route that
+  // performs the change fires its own prewarm request that refreshes this
+  // memo through the new compute anyway. (60s ≪ the 15s gate deadline? No —
+  // this is the pre-gate version read; worst case a request 60s after an
+  // upload sees the old tag and reads a stale cache entry whose etag ALSO
+  // encodes the old version — the next request rotates it. An owner editing a
+  // property then re-checking the map within 60s sees the change arrive one
+  // refresh late, acceptable against 5 network round-trips on every request.)
+  if (memo.value && Date.now() - memo.at < 60_000) return memo.value;
+  const tag = await computeDatasetVersionTag();
+  memo.value = tag;
+  memo.at = Date.now();
+  return tag;
+}
+
+const memo: { value: string | null; at: number } = { value: null, at: 0 };
+
+async function computeDatasetVersionTag(): Promise<string> {
   const dc = getAdminDataConnect();
   const db = getFirestore();
 
