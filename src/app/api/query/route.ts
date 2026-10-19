@@ -329,6 +329,19 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Bad request' }, { status: 400 });
   }
 
+  // PERIOD "ALL" NORMALIZATION (measured 2026-10-18 — THE cold-cache bug):
+  // the real map page stamps `endTs = Date.now()` for "All data" while the
+  // prewarm body sends null. The canonical identity carried BOTH as-is, so
+  // endTs changed on EVERY page load — the prewarmed/default landing entry
+  // was NEVER hit by a real visitor: every fresh map load cold-computed the
+  // full aggregates (8-17s) no matter how warm the cache was. An open-ended
+  // window (no start, ends within 5min of now) is semantically identical to
+  // null (no records exist in the future) — normalize it.
+  if ((body.startTs ?? null) == null && (body.endTs ?? null) != null
+    && Math.abs(Number(body.endTs) - Date.now()) < 5 * 60_000) {
+    body.endTs = null;
+  }
+
   // Conditional cache: compute an ETag from a CANONICAL request identity +
   // dataset version. The identity resolves every filter default server-side
   // (buildVariables), sorts the selection/override arrays and drops body-shape
