@@ -47,6 +47,13 @@ interface ReportPanelProps {
   onToggleWindow?: (key: WindowType) => void;
   /** Close Period filter — the forecast card mirrors it in title + chart. */
   period?: string;
+  /** REAL rental medians for the selection (uploaded Rent CSVs; never an
+   *  estimate — owner rule 2026-10-18). */
+  realRent?: { count: number; medianRent: number | null; medianRentPsf: number | null } | null;
+  /** Sidebar/recompact mode (the left drawer next to the map): tighter
+   *  cards, single-column stack — the original app's layout (charts beside
+   *  the map) but sized for ~380px. */
+  compact?: boolean;
 }
 
 export default function ReportPanel({
@@ -66,6 +73,8 @@ export default function ReportPanel({
   pinnedWindows = [],
   onToggleWindow,
   period,
+  realRent,
+  compact = false,
 }: ReportPanelProps) {
   const selectionSummary = selectedNames.length
     ? `${selectedNames.length} area${selectedNames.length > 1 ? 's' : ''} selected`
@@ -145,20 +154,26 @@ export default function ReportPanel({
       addText('Sales · Tax · Rent', 40, cursorY, 16, true);
       cursorY += 15;
 
-      const estMonthlyRent = reportStats.avgSale * 0.008;
-      const taxRentData = reportStats.taxCoverage > 0
+      // OWNER RULE 2026-10-18: the PDF also shows the REAL rental medians
+      // (uploaded Rent CSVs) — no estimated rents may ever appear.
+      const rentShown = realRent && realRent.count > 0 && (realRent.medianRent ?? 0) > 0;
+      const taxRentData = (reportStats.taxCoverage > 0
         ? [
             ['Avg Annual Tax', formatVal(reportStats.avgTaxAmount)],
             ['Avg Tax Rate', reportStats.avgTaxRate.toFixed(2) + '%'],
-            ['Properties with Tax Data', Math.round(reportStats.taxCoverage * 100) + '%'],
-            ['Est. Monthly Rent', formatVal(estMonthlyRent)],
-            ['Est. Annual Rent', formatVal(estMonthlyRent * 12)]
+            ['Properties with Tax Data', Math.round(reportStats.taxCoverage * 100) + '%']
           ]
         : [
-            ['Avg Annual Tax', 'No tax data uploaded yet'],
-            ['Est. Monthly Rent', formatVal(estMonthlyRent)],
-            ['Est. Annual Rent', formatVal(estMonthlyRent * 12)]
-          ];
+            ['Avg Annual Tax', 'No tax data uploaded yet']
+          ]
+      ).concat(
+        rentShown
+          ? [
+              ['Median Monthly Rent (real)', formatVal(realRent!.medianRent ?? 0)],
+              ['Median Annual Rent (real)', formatVal((realRent!.medianRent ?? 0) * 12)],
+            ]
+          : [['Median Rent', 'No rental data in this selection']]
+      );
 
       autoTable(doc, {
         startY: cursorY,
@@ -260,31 +275,32 @@ export default function ReportPanel({
         transition={{ duration: 0.5 }}
       >
         <motion.div
-        className="flex items-center justify-between"
+        className={compact ? 'flex flex-col items-stretch gap-2' : 'flex items-center justify-between'}
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.05 }}
       >
-        <div className="flex items-center gap-2 text-gray-400">
-          <BarChart3 className="w-4 h-4 text-blue-400" />
-          <h2 className="text-xs font-bold uppercase tracking-wider">Detailed Market Report</h2>
+        <div className="flex items-center gap-2 text-gray-400 min-w-0">
+          <BarChart3 className="w-4 h-4 text-blue-400 shrink-0" />
+          <h2 className="text-xs font-bold uppercase tracking-wider whitespace-nowrap">Detailed Market Report</h2>
           {/* OWNER REQUIREMENT: the report marks exactly which data feeds it —
               the uploaded CSV files (SQL datasets). */}
           <span
-            className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 border border-blue-500/30 px-2 py-0.5 text-[10px] font-semibold text-blue-300"
+            className={`inline-flex items-center rounded-full bg-blue-500/10 border border-blue-500/30 text-[10px] font-semibold text-blue-300 whitespace-nowrap ${compact ? 'gap-0.5 px-1.5 py-0.5 ml-auto shrink-0' : 'gap-1 px-2 py-0.5'}`}
             title="Every number in this report comes from the CSV files uploaded through the CMS"
           >
-            <Database className="w-3 h-3" /> {reportStats.count.toLocaleString()} rows from uploaded CSVs
+            <Database className="w-3 h-3 shrink-0" /> {reportStats.count.toLocaleString()} {reportStats.count === 1 ? 'row' : 'rows'}
+            {!compact && ' from uploaded CSVs'}
           </span>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="text-xs text-gray-500 font-bold">{selectionSummary}</div>
+        <div className={compact ? 'flex items-center justify-between gap-2 w-full' : 'flex items-center gap-4'}>
+          <div className="text-xs text-gray-500 font-bold whitespace-nowrap">{selectionSummary}</div>
           {onHide && (
             <button
               onClick={onHide}
-              className="text-xs text-gray-400 hover:text-white underline transition-colors"
+              className="text-xs text-gray-400 hover:text-white underline transition-colors whitespace-nowrap"
             >
-              Hide report
+              Back to filters
             </button>
           )}
           <button
@@ -299,10 +315,11 @@ export default function ReportPanel({
       </motion.div>
 
       {/* Top row: stats + health */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className={compact ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-1 lg:grid-cols-2 gap-4'}>
         <QuickStatsCard
           stats={reportStats}
           isLoading={isLoading}
+          compact={compact}
           pinned={isPinned('quick-stats')}
           onTogglePin={() => onToggleWindow?.('quick-stats')}
         />
@@ -310,6 +327,7 @@ export default function ReportPanel({
           marketHealth={marketHealth}
           timeSeries={timeSeries}
           isLoading={isLoading}
+          compact={compact}
           pinned={isPinned('market-health')}
           onTogglePin={() => onToggleWindow?.('market-health')}
         />
@@ -318,18 +336,21 @@ export default function ReportPanel({
       {/* Sales / Tax / Rent breakdown for the selected areas */}
       <SalesTaxRentCard
         stats={reportStats}
+        rentStats={realRent}
         isLoading={isLoading}
+        compact={compact}
         pinned={isPinned('sales-tax-rent')}
         onTogglePin={() => onToggleWindow?.('sales-tax-rent')}
       />
 
       {/* Time series + forecast */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className={compact ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-1 lg:grid-cols-2 gap-4'}>
         <TimeSeriesCard
           metric={metric}
           metricLabel={metricLabel}
           timeSeries={timeSeries}
           isLoading={isLoading}
+          compact={compact}
           pinned={isPinned('time-series')}
           onTogglePin={() => onToggleWindow?.('time-series')}
         />
@@ -339,6 +360,7 @@ export default function ReportPanel({
           timeSeries={timeSeries}
           forecast={forecast}
           isLoading={isLoading}
+          compact={compact}
           pinned={isPinned('forecast')}
           onTogglePin={() => onToggleWindow?.('forecast')}
           period={period}
@@ -346,10 +368,11 @@ export default function ReportPanel({
       </div>
 
       {/* Year built + top areas */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className={compact ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-1 lg:grid-cols-2 gap-4'}>
         <YearBuiltCard
           yearBuiltData={yearBuiltData}
           isLoading={isLoading}
+          compact={compact}
           pinned={isPinned('year-built')}
           onTogglePin={() => onToggleWindow?.('year-built')}
         />
@@ -357,6 +380,7 @@ export default function ReportPanel({
           metric={metric}
           chartData={top5ChartData}
           isLoading={isLoading}
+          compact={compact}
           pinned={isPinned('top-areas')}
           onTogglePin={() => onToggleWindow?.('top-areas')}
         />
@@ -368,6 +392,7 @@ export default function ReportPanel({
         forecastComparison={top5ForecastComparison}
         boundary={boundary}
         isLoading={isLoading}
+        compact={compact}
         pinned={isPinned('forecast-comparison')}
         onTogglePin={() => onToggleWindow?.('forecast-comparison')}
       />

@@ -50,6 +50,10 @@ export interface SqlAggregates {
     avgTaxRate: number;
     taxCoverage: number;
   };
+  /** REAL rental medians for the selected areas (owner rule 2026-10-18: rents
+   *  in the report come from the uploaded Rent CSVs — never an estimate).
+   *  null = the selection has no rental rows. */
+  rentStats?: { count: number; medianRent: number | null; medianRentPsf: number | null } | null;
   marketHealth: {
     score: number;
     label: string;

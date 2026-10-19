@@ -513,11 +513,30 @@ export async function POST(req: Request) {
     // 75s selection report into a few seconds.
     if (selectedIds && selectedIds.length) {
       const { limit: _limit, ...selectionVars } = variables;
-      const selRes = await gatedQuery(dc, 'filteredPropertiesForSelection', {
-        ...selectionVars,
-        boundary,
-        selectedIds,
-      });
+      const isRentalSel =
+        metric === 'Est. Rental Price' ||
+        metric === 'Rental Price per Sqft' ||
+        metric === 'Rental Days On Market' ||
+        metric === 'Rent-to-Sale Ratio';
+      // REAL RENT (owner rule: "los precios de la renta no son para nada
+      // reales" — estimated 0.8% rents are FORBIDDEN): a sale-metric selection
+      // report also fetches the SELECTED areas' actual RENTAL rows in the same
+      // round trip, so the report's Rent card shows real rental medians.
+      const [selRes, rentRes] = await Promise.all([
+        gatedQuery(dc, 'filteredPropertiesForSelection', {
+          ...selectionVars,
+          boundary,
+          selectedIds,
+        }),
+        isRentalSel
+          ? Promise.resolve(null)
+          : gatedQuery(dc, 'filteredPropertiesForSelection', {
+              ...selectionVars,
+              listingType: 'rent',
+              boundary,
+              selectedIds,
+            }).catch(() => null),
+      ]);
       const selRows: any[] = (selRes.data as any)?.properties || [];
       const selProps = selRows.map(rowToProperty);
       // CMS single-property edits apply before any aggregation.
@@ -531,11 +550,22 @@ export async function POST(req: Request) {
         selEngine.setTeaScores(await getTeaScoreMaps());
       }
 
-      const isRentalSel =
-        metric === 'Est. Rental Price' ||
-        metric === 'Rental Price per Sqft' ||
-        metric === 'Rental Days On Market' ||
-        metric === 'Rent-to-Sale Ratio';
+      // Real rent stats built straight from the rental rows (median rent +
+      // median rent-per-sqft + row count). null = the selection has no rental
+      // data (or the metric IS a rental one — then stats already are rent).
+      let rentStats: { count: number; medianRent: number | null; medianRentPsf: number | null } | null = null;
+      if (rentRes) {
+        const rentRows: any[] = ((rentRes.data as any)?.properties || []).map(rowToProperty);
+        const rents = rentRows.map((r) => r.closePrice).filter((v) => v > 0).sort((a, b) => a - b);
+        const psfs = rentRows
+          .filter((r) => r.sqft > 0 && r.closePrice > 0)
+          .map((r) => r.closePrice / r.sqft)
+          .sort((a, b) => a - b);
+        const med = (a: number[]) => (a.length ? Math.round(a[a.length >> 1]) : null);
+        if (rentRows.length) {
+          rentStats = { count: rentRows.length, medianRent: med(rents), medianRentPsf: psfs.length ? Math.round(psfs[(psfs.length - 1) >> 1] * 100) / 100 : null };
+        }
+      }
 
       return respond({
         // null = unchanged from the base (selection-less) map query — the
@@ -543,6 +573,7 @@ export async function POST(req: Request) {
         mapValues: null,
         points: null,
         reportStats: selEngine.getStatsForSelection(selProps, boundary, selectedIds),
+        rentStats,
         marketHealth: selEngine.getMarketHealth(selProps, boundary, selectedIds, isRentalSel ? 'rental' : 'sale'),
         timeSeries: selEngine.getTimeSeries(selProps, boundary, metric, selectedIds),
         forecastComparison: selEngine

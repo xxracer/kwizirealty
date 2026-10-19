@@ -84,7 +84,7 @@ function r2Label(r2: number): string {
 
 function R2Tooltip() {
   return (
-    <div className="absolute bottom-full mb-2 right-0 w-56 bg-gray-900 border border-gray-700 text-gray-200 text-xs p-2.5 rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 font-normal text-left tracking-normal normal-case">
+    <div className="absolute bottom-full mb-2 right-0 w-56 bg-gray-900 border border-gray-700 text-gray-200 text-xs p-2.5 rounded-lg shadow-lg z-50 font-normal text-left tracking-normal normal-case">
       <div className="font-semibold text-white mb-1">R² (coefficient of determination)</div>
       <p className="mb-1.5">Measures how well the forecast fits the historical data.</p>
       <ul className="space-y-0.5 text-[10px]">
@@ -97,6 +97,28 @@ function R2Tooltip() {
 }
 
 const PIE_COLORS = ['#2c7be5', '#00d4ff', '#7c3aed', '#f59e0b', '#10b981'];
+
+/** CLICK-ONLY info badge (user feedback 2026-10-18: the hover tooltip fired
+ *  while the pointer merely passed/stood over the ⓘ during a page scroll —
+ *  very annoying). The explanation opens on an explicit click and closes on
+ *  the next click (inside or outside). */
+function R2InfoBadge() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-label="What is R-squared?"
+        aria-expanded={open}
+        className="cursor-pointer leading-none p-0.5"
+      >
+        <Info className="w-3 h-3 text-gray-500 hover:text-white transition-colors" />
+      </button>
+      {open && <R2Tooltip />}
+      {open && <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden="true" />}
+    </div>
+  );
+}
 
 export interface MarketHealth {
   score: number;
@@ -322,6 +344,7 @@ export function QuickStatsCard({
 
 export function SalesTaxRentCard({
   stats,
+  rentStats,
   isLoading,
   compact = false,
   pinned,
@@ -330,6 +353,10 @@ export function SalesTaxRentCard({
   dragHandle,
 }: {
   stats: ReportStats;
+  /** REAL rental medians for the selection (uploaded Rent CSVs). Owner rule
+   *  2026-10-18: estimated (0.8%×price) rents are FORBIDDEN — real values or
+   *  an explicit "no rental data" note, never a fake number. */
+  rentStats?: { count: number; medianRent: number | null; medianRentPsf: number | null } | null;
   isLoading?: boolean;
   compact?: boolean;
   pinned?: boolean;
@@ -337,11 +364,8 @@ export function SalesTaxRentCard({
   headerExtra?: React.ReactNode;
   dragHandle?: React.ReactNode;
 }) {
-  // Est. rent: no rental columns exist in the dataset, so rent is estimated
-  // at 0.8% of sale price (the same ratio the map's rent metrics use).
-  const estMonthlyRent = stats.avgSale * 0.008;
-  const estRentPerSqft = stats.avgSqft * 0.008; // avgSqft is the $/SqFt average
   const hasTaxData = stats.taxCoverage > 0;
+  const hasRealRent = !!rentStats && rentStats.count > 0 && (rentStats.medianRent ?? 0) > 0;
 
   const section = (label: string, color: string, rows: { label: string; value: React.ReactNode }[]) => (
     <div className="bg-[#0b0e14] border border-white/[0.06] rounded-xl p-3">
@@ -398,15 +422,27 @@ export function SalesTaxRentCard({
               </div>
             </div>
           )}
-          {section('Rent (est.)', 'text-orange-400', [
-            { label: 'Est. Monthly Rent', value: formatMoney(estMonthlyRent) + '/mo' },
-            { label: 'Est. Rent $/SqFt', value: '$' + estRentPerSqft.toFixed(2) + '/sqft' },
-            { label: 'Est. Annual Rent', value: formatMoney(estMonthlyRent * 12) + '/yr' },
-          ])}
+          {hasRealRent ? (
+            section('Rent (real)', 'text-orange-400', [
+              { label: 'Median Monthly Rent', value: formatMoney(rentStats!.medianRent ?? 0) + '/mo' },
+              ...(rentStats!.medianRentPsf
+                ? [{ label: 'Median Rent $/SqFt', value: '$' + rentStats!.medianRentPsf.toFixed(2) + '/sqft' }]
+                : []),
+              { label: 'Annualized Rent', value: formatMoney(rentStats!.medianRent! * 12) + '/yr' },
+              { label: 'Rental Rows', value: formatNumberCompact(rentStats!.count) },
+            ])
+          ) : (
+            <div className="bg-[#0b0e14] border border-white/[0.06] rounded-xl p-3">
+              <div className={`uppercase font-bold tracking-wider mb-2 text-orange-400 ${compact ? 'text-[9px]' : 'text-[10px]'}`}>Rent</div>
+              <div className={`text-gray-500 ${compact ? 'text-[9px]' : 'text-[11px]'}`}>
+                No rental data in this selection yet. Upload Rent Data CSVs in the Admin panel — the report shows real rental medians from those files.
+              </div>
+            </div>
+          )}
         </div>
       )}
       <div className={`mt-2 text-gray-600 ${compact ? 'text-[8px]' : 'text-[9px]'}`}>
-        Rent is an estimate (0.8% of sale price) — no real rental columns exist in the dataset. Tax figures come from Tax Data CSVs merged by MLS number.
+        Rent values are REAL rental medians from the uploaded Rent CSVs — never estimates. Tax figures come from Tax Data CSVs merged by MLS number.
       </div>
     </CardShell>
   );
@@ -883,10 +919,7 @@ export function ForecastCard({
               <span className={`text-[10px] font-semibold ${r2Color(forecast.r2)}`}>
                 R² = {forecast.r2.toFixed(2)} · {r2Label(forecast.r2)}
               </span>
-              <div className="relative group">
-                <Info className="w-3 h-3 text-gray-500 group-hover:text-white transition-colors cursor-help" />
-                <R2Tooltip />
-              </div>
+              <R2InfoBadge />
               <span className="text-[10px] text-gray-500">· Annual % = {forecast.annualPct.toFixed(2)}%</span>
               {forecast.sigma != null && (
                 <span className="text-[10px] text-gray-500 flex items-center gap-1">
@@ -1102,6 +1135,7 @@ export function ForecastComparisonCard({
   }, [forecastComparison, forecastSort]);
 
   const lowR2Count = useMemo(() => forecastComparison.filter((r) => r.r2 < 0.4).length, [forecastComparison]);
+  const [openR2, setOpenR2] = useState(false);
 
   const handleSort = (key: typeof forecastSort.key) => {
     setForecastSort((prev) => ({ key, asc: prev.key === key ? !prev.asc : false }));
@@ -1139,12 +1173,15 @@ export function ForecastComparisonCard({
       headerExtra={
         <div className="flex items-center gap-2">
           {!compact && lowR2Count > 0 && (
-            <div className="relative group flex items-center">
-              <span className="flex items-center gap-1 text-[10px] text-rose-400 cursor-help">
+            <div className="relative flex items-center">
+              <span
+                onClick={() => setOpenR2((v) => !v)}
+                className="flex items-center gap-1 text-[10px] text-rose-400 cursor-pointer"
+              >
                 <AlertTriangle className="w-3 h-3" />
                 {lowR2Count} low R²
               </span>
-              <R2Tooltip />
+              {openR2 && <R2Tooltip />}
             </div>
           )}
           {!compact && (

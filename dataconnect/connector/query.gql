@@ -310,6 +310,26 @@ query keysPresent($keys: String!) @auth(level: USER) {
   )
 }
 
+# Targeted probe: find rows an unresolved (grey) polygon should receive by
+# street name / subdivision / ZIP — searches the WHOLE committed table with
+# ILIKE patterns (the pass-side samples cap the scan; this answers "does the
+# CSV data for THIS area exist at all, and does it carry coordinates?").
+query greyAreaProbe($needles: [String!]!) @auth(level: USER) {
+  hits: _select(
+    sql: """
+    SELECT address, subdivisions, zip, city,
+           listing_type, close_price, sqft, dataset_year,
+           lat, lng
+    FROM properties
+    WHERE upload_session_id IS NULL
+      AND (address ILIKE ANY($1::text[])
+           OR subdivisions ILIKE ANY($1::text[]))
+    LIMIT 60
+    """,
+    params: [$needles]
+  )
+}
+
 mutation backfillCloseDateTs @auth(level: NO_ACCESS) {
   _execute(sql: """
     UPDATE properties

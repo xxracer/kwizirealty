@@ -318,6 +318,9 @@ export default function MapComponent({
   const customLayerRefsRef = useRef<Map<string, L.GeoJSON>>(new Map());
   const customDataCacheRef = useRef<Map<string, GeoJSON.FeatureCollection>>(new Map());
   const popupRef = useRef<L.Popup | null>(null);
+  // True while the map is panning/zooming (+250ms settle): hover popups and
+  // hover highlights stay off so a drag under the cursor never opens popups.
+  const suppressHoverPopupRef = useRef(false);
   const areaFeaturesRef = useRef<GeoJSON.Feature[]>([]);
   const boundsSetRef = useRef(false);
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -691,6 +694,20 @@ export default function MapComponent({
       // pan/zoom smooth. Hover/click still work on canvas layers.
       preferCanvas: true,
     }).setView([29.76, -95.37], 10);
+
+    // HOVER-POPUP SUPPRESSION WHILE MOVING (user feedback 2026-10-18: simply
+    // panning the map kept opening area popups under the moving cursor —
+    // "cuando me desplazo… se activa automáticamente… muy mal"). The popup
+    // stays closed during any pan/zoom and for a short settle window after.
+    suppressHoverPopupRef.current = false;
+    map.on('movestart', () => {
+      suppressHoverPopupRef.current = true;
+      popupRef.current?.close();
+      popupRef.current?.remove();
+    });
+    map.on('moveend', () => {
+      setTimeout(() => { suppressHoverPopupRef.current = false; }, 250);
+    });
 
     // CARTO now enforces API keys on production domains (tiles come back as an
     // "api key required" placeholder image — see carto.com/basemaps/apikey),
@@ -1471,6 +1488,8 @@ export default function MapComponent({
       const id = String(props.id ?? (feature as any).id ?? '');
 
       pathLayer.on('mouseover', (e) => {
+        // No popups while the map is moving (see suppressHoverPopupRef).
+        if (suppressHoverPopupRef.current) return;
         pathLayer.setStyle({ weight: 1.6, color: '#00d4ff', fillOpacity: Math.min(0.8, fillOpacityRef.current + 0.3) });
         if (!popupRef.current) {
           popupRef.current = L.popup({

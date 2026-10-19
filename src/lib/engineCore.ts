@@ -665,9 +665,10 @@ export function getBoundaryKeyFor(boundary: BoundaryKey, item: PropertyData): st
 }
 
 export function getRentalPrice(item: PropertyData): number {
-  // When the row is an actual rental record, closePrice already holds the
-  // monthly rent; otherwise fall back to the sale-price estimate.
-  return item.listingType === 'rent' ? item.closePrice : item.closePrice * 0.008;
+  // OWNER RULE (2026-10-18): rents are REAL. When the row is an actual rental
+  // record, closePrice already holds the monthly rent. A sale row has no rent
+  // — return 0 (the map stays grey there) instead of fabricating an estimate.
+  return item.listingType === 'rent' ? item.closePrice : 0;
 }
 
 export function getAnnualHOAFee(item: PropertyData): number {
@@ -759,8 +760,10 @@ export function filterProperties(
     const ppsf = d.pricePerSqft || (d.sqft ? d.closePrice / d.sqft : 0);
     if (ppsf < filters.pricePerSqftMin || ppsf > filters.pricePerSqftMax) return false;
 
-    const estRent = d.closePrice * 0.008;
-    if (estRent < filters.rentMin || estRent > filters.rentMax) return false;
+    // Rent-range filter binds REAL rents only (owner rule 2026-10-18): an
+    // actual rental record's closePrice IS the monthly rent; a sale row has
+    // no rent, so it stays (the rentMin/rentMax slider applies in rent mode).
+    if (d.listingType === 'rent' && (d.closePrice < filters.rentMin || d.closePrice > filters.rentMax)) return false;
 
     // A time period must actually filter: rows with no parseable close date
     // can't be placed in the window, so they only survive 'all' (start=null).

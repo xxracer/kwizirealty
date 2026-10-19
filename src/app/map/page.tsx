@@ -1313,7 +1313,7 @@ function MapPageInner() {
   const chartData = useMemo(() => {
     if (!dataReady) return [];
     const source = useSql ? (sqlAgg?.mapValues.values ?? {}) : metricValues;
-    return Object.entries(source)
+    const rows = Object.entries(source)
       .filter(
         ([k]) =>
           selectedIds.length === 0 ||
@@ -1321,8 +1321,17 @@ function MapPageInner() {
           selectedAliasIndex?.resolve(k) !== null
       )
       .map(([name, value]) => ({ name: cleanBoundaryName(name), value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 5);
+      .sort((a, b) => b.value - a.value);
+    // Distinct SQL keys can clean to the SAME display name ("…SEC 6-1" /
+    // "…SEC 6-2" both → "EDGEWOOD VILLAGE SEC 6") — duplicate list children
+    // keyed by name crash React's key contract; keep the strongest row only.
+    const seen = new Set<string>();
+    const deduped = rows.filter((r) => {
+      if (seen.has(r.name)) return false;
+      seen.add(r.name);
+      return true;
+    });
+    return deduped.slice(0, 5);
   }, [useSql, sqlAgg, metricValues, selectedIds, selectedAliasIndex, dataReady]);
 
   const yearBuiltData = useMemo(() => {
@@ -2066,6 +2075,10 @@ function MapPageInner() {
       if (activeWindows.length === 0) {
         setActiveWindows(['quick-stats', 'market-health']);
       }
+      // BRING THE REPORT INTO VIEW (it lives below the map): without this the
+      // freshly generated report sits a screen away and looks like nothing
+      // happened. The map data/position itself never changes.
+      setTimeout(() => reportRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 250);
       return;
     }
     setDataLoadKind('report');
@@ -2080,6 +2093,7 @@ function MapPageInner() {
           setReportPhase('ready');
           setReportGeneration((g) => g + 1);
           setReportGenerated(true);
+          setTimeout(() => reportRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 250);
         } else {
           setReportPhase('error');
           setReportError(result.error || 'Could not load report data.');
@@ -3138,6 +3152,10 @@ function MapPageInner() {
               )}
             </AnimatePresence>
 
+            {/* REPORT — below the map, as before (owner: "lo dejaras debajo
+                igual"). 'Auto-scroll on generate' brings it into view the
+                moment the report is ready, so 'the report follows your
+                current position' — the map itself never moves. */}
             {reportGenerated && selectedIds.length > 0 && (
               <div data-tour="report" ref={reportRef} className="mt-6 scroll-mt-6 analysis-panel">
                 <ReportPanel
@@ -3145,6 +3163,7 @@ function MapPageInner() {
                   metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
                   selectedNames={selectedNames}
                   reportStats={reportStats}
+                  realRent={sqlAgg?.rentStats ?? null}
                   marketHealth={marketHealth}
                   timeSeries={timeSeries}
                   forecast={forecast}
