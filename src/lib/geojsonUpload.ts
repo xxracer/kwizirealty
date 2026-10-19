@@ -63,26 +63,24 @@ export function normalizeGeoJsonCrs<T extends { features: any[] }>(collection: T
     for (const c of coords as unknown[]) visitCoords(c, fn);
   };
 
-  // Detect: a single out-of-range coordinate marks the whole file as projected
-  // (a CRS applies to every feature equally — never mixed within one file).
-  let projected = false;
-  for (const feature of features) {
-    const coords = feature?.geometry?.coordinates;
-    if (!coords) continue;
-    visitCoords(coords, (pt) => {
-      if (Math.abs(pt[0]) > 180 || Math.abs(pt[1]) > 90) projected = true;
-    });
-    if (projected) break;
-  }
-  if (!projected) return collection;
-
   // Inverse spherical Web Mercator (EPSG:3857 → EPSG:4326), the standard
   // projected export from ArcGIS/QGIS. Lossless for this projection.
   const R = 6378137;
   const toDeg = 180 / Math.PI;
+
+  // PER-FEATURE detection (not file-wide): real exports DO mix CRS types —
+  // some features already ship lon/lat degrees while others carry Mercator
+  // meters. A file-wide convert re-projected the degree features into ~8-meter
+  // slivers near (0,0), blanking whole areas on the map. Each feature is
+  // converted only when ITS own coordinates fall outside the lon/lat range.
   for (const feature of features) {
     const coords = feature?.geometry?.coordinates;
     if (!coords) continue;
+    let projected = false;
+    visitCoords(coords, (pt) => {
+      if (Math.abs(pt[0]) > 180 || Math.abs(pt[1]) > 90) projected = true;
+    });
+    if (!projected) continue;
     visitCoords(coords, (pt) => {
       const x = pt[0];
       const y = pt[1];
@@ -91,6 +89,122 @@ export function normalizeGeoJsonCrs<T extends { features: any[] }>(collection: T
     });
   }
   return collection;
+}
+
+/**
+ * LIGHTEN a GeoJSON text for CMS upload (the map's speed, owner rule 2026-10-18:
+ * "que vuele" — every visitor downloads and decodes each boundary file).
+ * Pipeline: per-feature CRS normalize → adaptive Douglas–Peucker simplify →
+ * drop the Z/extra dims → round coordinates to 6 decimals (≈0.1 m) →
+ * re-serialize. All features survive (names keep their identity); only
+ * redundant vertices go away. Returns null for input it cannot parse or
+ * safely transform — the caller then uploads the original bytes unmodified.
+ */
+export function lightenGeoJsonText(text: string, sizeBytes: number): string | null {
+  let collection: { features?: GeoJsonFeature[] };
+  try {
+    collection = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const features = (collection as { features?: GeoJsonFeature[] })?.features;
+  if (!Array.isArray(features) || features.length === 0) return null;
+
+  // Adaptive tolerance: ~11m at the cap (calibrated on Mapped Subdivisions —
+  // 65MB/1.06M vertices → 3.6MB text / 0.85MB gzip at 127k vertices, shapes
+  // intact on screen) growing smaller only for tiny files.
+  const sizeMB = Math.max(sizeBytes, 1) / 1e6;
+  const tol = Math.max(0.00002, Math.min(0.0001, sizeMB * 0.05));
+
+  const visitCoords = (coords: unknown, fn: (pt: number[]) => void): void => {
+    if (!Array.isArray(coords) || coords.length === 0) return;
+    if (typeof coords[0] === 'number') {
+      fn(coords as number[]);
+      return;
+    }
+    for (const c of coords as unknown[]) visitCoords(c, fn);
+  };
+
+  // Douglas–Peucker on a ring treated as a polyline (first==last kept).
+  const dpSimplify = (pts: number[][]): number[][] => {
+    const n = pts.length;
+    if (n <= 4) return pts;
+    const keep = new Uint8Array(n);
+    keep[0] = 1;
+    keep[n - 1] = 1;
+    const stack: Array<[number, number]> = [[0, n - 1]];
+    while (stack.length) {
+      const [s, e] = stack.pop()!;
+      const p1 = pts[s];
+      const p2 = pts[e];
+      const dx = p2[0] - p1[0];
+      const dy = p2[1] - p1[1];
+      const len2 = dx * dx + dy * dy;
+      let maxD = -1;
+      let maxI = -1;
+      for (let i = s + 1; i < e; i++) {
+        const p = pts[i];
+        let d: number;
+        if (len2 === 0) {
+          const ex = p[0] - p1[0];
+          const ey = p[1] - p1[1];
+          d = ex * ex + ey * ey;
+        } else {
+          const t = ((p[0] - p1[0]) * dx + (p[1] - p1[1]) * dy) / len2;
+          const tt = t < 0 ? 0 : t > 1 ? 1 : t;
+          const ex = p[0] - (p1[0] + tt * dx);
+          const ey = p[1] - (p1[1] + tt * dy);
+          d = ex * ex + ey * ey;
+        }
+        if (d > maxD) {
+          maxD = d;
+          maxI = i;
+        }
+      }
+      if (maxI >= 0 && Math.sqrt(maxD) > tol) {
+        keep[maxI] = 1;
+        stack.push([s, maxI], [maxI, e]);
+      }
+    }
+    const out: number[][] = [];
+    for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i]);
+    return out;
+  };
+
+  const simplifyRings = (coords: any): any => {
+    // Polygon: [outer, holes]; MultiPolygon: [polygon, polygon, ...]
+    const isPolygonRings = typeof coords?.[0]?.[0]?.[0] === 'number';
+    if (isPolygonRings) return coords.map((ring: number[][]) => dpSimplify(ring));
+    return coords.map((poly: number[][][]) => simplifyRings(poly));
+  };
+
+  const R = 6378137;
+  const toDeg = 180 / Math.PI;
+  for (const feature of features) {
+    const coords = feature?.geometry?.coordinates;
+    if (!coords) continue;
+    // per-feature CRS normalize (same rule as normalizeGeoJsonCrs)
+    let projected = false;
+    visitCoords(coords, (pt) => {
+      if (Math.abs(pt[0]) > 180 || Math.abs(pt[1]) > 90) projected = true;
+    });
+    if (projected) {
+      visitCoords(coords, (pt) => {
+        pt[0] = (pt[0] / R) * toDeg;
+        pt[1] = (Math.atan(Math.exp(pt[1] / R)) * 2 - Math.PI / 2) * toDeg;
+      });
+    }
+    if (feature.geometry?.type === 'Polygon' || feature.geometry?.type === 'MultiPolygon') {
+      feature.geometry.coordinates = simplifyRings(coords);
+    }
+    // strip extra dims (Z/M) + round to 6 decimals
+    visitCoords(feature.geometry.coordinates, (pt) => {
+      if (pt.length > 2) pt.length = 2;
+      pt[0] = Math.round(pt[0] * 1e6) / 1e6;
+      pt[1] = Math.round(pt[1] * 1e6) / 1e6;
+    });
+  }
+  return JSON.stringify(collection);
 }
 
 /**

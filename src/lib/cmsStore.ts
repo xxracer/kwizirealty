@@ -4,6 +4,7 @@ import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, writeBatch, query 
 import { ref, uploadString, uploadBytes, getDownloadURL, deleteObject, listAll, getMetadata, type StorageReference } from 'firebase/storage';
 import { db, storage } from './firebase';
 import { isSQLEnabled } from './sqlData';
+import { lightenGeoJsonText } from './geojsonUpload';
 import type { BoundaryKey, MetricKey } from './engine';
 import Papa from 'papaparse';
 
@@ -240,7 +241,7 @@ export const cmsStore = {
   },
 
   async saveFile(record: CMSFileRecord): Promise<void> {
-    const fileContent = record.rawContent || rowsToCsv(record.headers, record.rows);
+    let fileContent = record.rawContent || rowsToCsv(record.headers, record.rows);
     
     // Create organized storage path preserving original folders
     const cleanName = record.name.replace(/[^a-zA-Z0-9.\-_ /]/g, '');
@@ -261,7 +262,17 @@ export const cmsStore = {
     // GeoJSON uploads are gzipped in the browser: a 44MB FeatureCollection
     // (e.g. Mapped Subdivisions) transfers as ~1MB, and every geojson consumer
     // reads CMS storage URLs through fetchJsonAutoGz (which sniffs gzip).
+    // OWNER SPEED RULE (2026-10-18): boundaries are ALSO lightened at upload —
+    // per-feature CRS normalize + adaptive Douglas-Peucker simplify + 6-decimal
+    // rounding — so a 65MB GIS export is STORED at ~6MB text / ~1.4MB on the
+    // wire and the public map paints in ~1s, not tens of seconds. Every future
+    // boundary upload gets this automatically; any parse/shape failure keeps
+    // the original bytes (never corrupt an upload).
     const isGeoUpload = record.category === 'boundary' || record.category === 'custom-area';
+    if (isGeoUpload && typeof fileContent === 'string' && fileContent.trim().startsWith('{')) {
+      const lightened = lightenGeoJsonText(fileContent, fileContent.length);
+      if (lightened) fileContent = lightened;
+    }
     let blob: Blob;
     if (isGeoUpload && typeof CompressionStream !== 'undefined') {
       const gzipped = new Blob([fileContent]).stream().pipeThrough(new CompressionStream('gzip'));
