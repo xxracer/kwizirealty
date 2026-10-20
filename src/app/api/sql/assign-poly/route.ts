@@ -52,15 +52,18 @@ const geoCache = new Map<string, string>(); // cache key → raw geojson text
 
 async function loadBoundaryText(cls: PolyAssignClass): Promise<string> {
   const fileName = BOUNDARY_SOURCES[cls];
+  // Equality-only query: (name == file) needs NO composite index. Sort by
+  // uploadedAt here — Firebase requires a composite index for orderBy on a
+  // filtered group, and a manual index is a step this job should never need.
   const snap = await getAdminFirestore()
     .collection('cms_files')
     .where('name', '==', fileName)
-    .orderBy('uploadedAt', 'desc')
-    .limit(1)
     .get();
-  const record = snap.docs[0]?.data() as
-    | { storageUrl?: string; uploadedAt?: number; size?: number }
-    | undefined;
+  const records = snap.docs
+    .map((d) => d.data())
+    .filter(Boolean) as { storageUrl?: string; uploadedAt?: number; size?: number }[];
+  const record = records
+    .sort((a, b) => (b.uploadedAt ?? 0) - (a.uploadedAt ?? 0))[0];
   if (!record?.storageUrl) throw new Error(`No boundary file record for ${fileName} (upload it first)`);
   // Cache per storage URL; refuse to cache records missing size/uploadedAt —
   // a metadata-poor record could otherwise serve stale geometry after a
