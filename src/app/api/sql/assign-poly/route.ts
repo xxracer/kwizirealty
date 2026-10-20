@@ -90,8 +90,10 @@ async function downloadDecompressed(url: string): Promise<string> {
       controller.close();
     },
   });
+  // DecompressionStream (DECODES gzip) — CompressionStream would try to
+  // compress the already-gzipped body and hand JSON.parse a garbage stream.
   const streamPipe = stream.pipeThrough(
-    new CompressionStream('gzip') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>,
+    new DecompressionStream('gzip') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>,
   );
   const text = await new Response(streamPipe).text();
   return text;
