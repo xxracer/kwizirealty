@@ -22,6 +22,12 @@ const DEVICE_MEM_GB: number =
   typeof navigator !== 'undefined' ? (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8 : 8;
 export const LOW_MEMORY_DEVICE = DEVICE_MEM_GB <= 4;
 
+// The whole Houston metro. The map is locked to this frame: panning clamps
+// against it with full viscosity (maxBoundsViscosity) and zooming out stops
+// at HOUSTON_METRO_MIN_ZOOM, so the view can never leave the metro area.
+const HOUSTON_METRO_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
+const HOUSTON_METRO_MIN_ZOOM = 9;
+
 function LassoIcon({ className = 'w-4 h-4' }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -335,14 +341,13 @@ export default function MapComponent({
     if (!map) return;
     if (boundsSetRef.current && map.getZoom() > 3) return;
 
-    const HOUSTON_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
     map.invalidateSize();
     const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
 
     if (!bounds) {
-      map.fitBounds(HOUSTON_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
+      map.fitBounds(HOUSTON_METRO_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
       if (map.getZoom() <= 3) {
-        map.setView(HOUSTON_BOUNDS.getCenter(), 10, { animate: false });
+        map.setView(HOUSTON_METRO_BOUNDS.getCenter(), 10, { animate: false });
       }
       if (map.getZoom() > 3) boundsSetRef.current = true;
       return;
@@ -693,6 +698,11 @@ export default function MapComponent({
       // memory; the canvas renderer draws them into a single bitmap and keeps
       // pan/zoom smooth. Hover/click still work on canvas layers.
       preferCanvas: true,
+      // Lock the map to the Houston metro: dragging clamps inside
+      // HOUSTON_METRO_BOUNDS and zoom-out stops at the metro framing.
+      maxBounds: HOUSTON_METRO_BOUNDS,
+      maxBoundsViscosity: 1.0,
+      minZoom: HOUSTON_METRO_MIN_ZOOM,
     }).setView([29.76, -95.37], 10);
 
     // HOVER-POPUP SUPPRESSION WHILE MOVING (user feedback 2026-10-18: simply
@@ -709,27 +719,13 @@ export default function MapComponent({
       setTimeout(() => { suppressHoverPopupRef.current = false; }, 250);
     });
 
-    // CARTO now enforces API keys on production domains (tiles come back as an
-    // "api key required" placeholder image — see carto.com/basemaps/apikey),
-    // so only use them when a key is provided; otherwise fall back to Esri's
-    // keyless Light Gray canvas, which looks very similar.
-    const cartoKey = process.env.NEXT_PUBLIC_CARTO_API_KEY;
-    if (cartoKey) {
-      L.tileLayer(`https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?apikey=${cartoKey}`, {
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        subdomains: 'abcd',
-        maxZoom: 19,
-      }).addTo(map);
-    } else {
-      L.tileLayer(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-        {
-          attribution: 'Tiles &copy; Esri — Source: Esri, HERE, Garmin, USGS, NGA',
-          maxZoom: 19,
-        }
-      ).addTo(map);
-    }
+    // Standard OpenStreetMap tiles (owner's explicit pick — full street and
+    // neighborhood labels instead of Esri's blank Light Gray canvas).
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19,
+    }).addTo(map);
 
     mapRef.current = map;
     // Set in cleanup — every async callback (RAF frames, timers) checks this so
@@ -1609,7 +1605,6 @@ export default function MapComponent({
     const map = mapRef.current;
     if (!map) return;
     let attempts = 0;
-    const HOUSTON_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
     const tryFit = () => {
       const bounds = geoJsonData?.features?.length ? computeGeoJSONBounds(geoJsonData) : null;
       if (bounds) {
@@ -1627,7 +1622,7 @@ export default function MapComponent({
       if (attempts++ > 8) {
         clearInterval(timer);
         map.invalidateSize();
-        map.fitBounds(HOUSTON_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
+        map.fitBounds(HOUSTON_METRO_BOUNDS, { padding: [16, 16], maxZoom: 12, animate: false });
       }
     }, 150);
     return () => clearInterval(timer);
