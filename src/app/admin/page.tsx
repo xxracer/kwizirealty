@@ -35,6 +35,13 @@ import {
   type GeoJsonFeature,
   type GeoJsonFeatureCollection,
 } from '@/lib/geojsonUpload';
+import {
+  BOUNDARY_SOURCES,
+  POLY_ASSIGN_CLASSES,
+  polyClassForFile,
+  type PolyAssignClass,
+} from '@/lib/boundaryFiles';
+import { runPolyAssignment, type PolyAssignAudit } from '@/lib/polyAssignClient';
 import { AdminAds } from '@/components/admin/AdminAds';
 import { AdminUsers } from '@/components/admin/AdminUsers';
 import { RequireAdmin } from '@/components/RequireAuth';
@@ -1263,6 +1270,13 @@ function AdminPageInner() {
   /** Rows of the report card whose detail ("visualizar") is expanded. */
   const [reportExpanded, setReportExpanded] = useState<Set<number>>(new Set());
 
+  /** Polygon assignment job (row lat/lng → their Subdivisions/Zip/school
+   *  polygon): progress + the per-polygon audit modal both live here. */
+  const [polyAudit, setPolyAudit] = useState<PolyAssignAudit[] | null>(null);
+  const [polyRunning, setPolyRunning] = useState(false);
+  const [polyProgress, setPolyProgress] = useState('');
+  const polyAbortRef = useRef<AbortController | null>(null);
+
   const [confirmAll, setConfirmAll] = useState<ConfirmAllState>({
     open: false,
     totalFiles: 0,
@@ -2183,6 +2197,53 @@ function AdminPageInner() {
     await runSqlStaging(stagedId, staged.record.rows, staged.record.category as any, staged.sessionId, staged.record.year);
   };
 
+  /** Polygon assignment runner (button + auto-hooks). Never blocks the
+   *  upload confirm flow: runs in the background, opens the audit modal when
+   *  it finishes, error toast only. */
+  const runPolyJob = (
+    classes: readonly PolyAssignClass[],
+    onlyUnassigned: boolean,
+  ) => {
+    if (polyRunning) return;
+    const controller = new AbortController();
+    polyAbortRef.current = controller;
+    setPolyRunning(true);
+    setPolyAudit(null);
+    setPolyProgress('Asignando polígonos…');
+    void (async () => {
+      try {
+        const audits = await runPolyAssignment(classes, {
+          onlyUnassigned,
+          signal: controller.signal,
+          onProgress: (p) => setPolyProgress(`Asignado: ${p.assigned.toLocaleString()} filas (${p.classKey})`),
+        });
+        setPolyProgress('');
+        setPolyAudit(audits);
+        if (audits.some((a) => a.assigned > 0)) {
+          setToast({ type: 'success', message: 'Polígonos asignados — revisa el informe.' });
+        }
+      } catch (err) {
+        if ((err as Error).message !== 'Polygon assignment canceled') {
+          setToast({ type: 'error', message: `Polygon re-assignment failed: ${(err as Error).message}` });
+        }
+      } finally {
+        setPolyRunning(false);
+        setPolyProgress('');
+        polyAbortRef.current = null;
+      }
+    })();
+  };
+
+  /** Auto-hook: only for files the map actually uses (BOUNDARY_SOURCES). */
+  const firePolyAssignmentFor = (fileName: string) => {
+    if (fileName === BOUNDARY_SOURCES.subdivisions) {
+      runPolyJob(['subdivisions'], false);
+    } else {
+      const cls = polyClassForFile(fileName);
+      if (cls) runPolyJob([cls], false);
+    }
+  };
+
   const handleConfirmUpload = async (stagedId: string, mode: 'new' | 'replace' = 'new') => {
     const staged = stagedFiles.find((s) => s.id === stagedId);
     if (!staged) return;
@@ -2296,6 +2357,9 @@ function AdminPageInner() {
           type: 'success',
           message: `${staged.record.name} uploaded and map data is now available (${combined.features.length.toLocaleString()} areas).`,
         });
+        // A boundary file just changed on the map — re-assign that class's
+        // rows (all of them; borders may have moved).
+        firePolyAssignmentFor(staged.record.name);
       } catch (err) {
         console.error('Upload error', err);
         setToast({ type: 'error', message: `Error uploading ${staged.record.name}` });
@@ -2385,6 +2449,10 @@ function AdminPageInner() {
           type: 'success',
           message: `${staged.record.name} confirmed (${rowsToSave.length.toLocaleString()} rows, ${totalRows.toLocaleString()} total). The map will refresh automatically.`,
         });
+        // Committed rows are live now: fill the lazily-assigned classes
+        // (subdivisions was already set at staging time) for the NEW rows
+        // only — cheap when little is new, one pass the first time ever.
+        runPolyJob(['zipcodes', 'highschools', 'elementary', 'middle'], true);
       } else {
         // GeoJSON: keep the Storage + Firestore flow.
         await cmsStore.saveFile(recordToSave);
@@ -2405,6 +2473,9 @@ function AdminPageInner() {
           type: 'success',
           message: `${staged.record.name} added successfully and map data is now available (${rowsToSave.length.toLocaleString()} rows).`,
         });
+        // Same rule as the boundaries section: a map-used boundary file just
+        // landed (geo files can also arrive through the generic flow).
+        firePolyAssignmentFor(staged.record.name);
       }
     } catch (err) {
       console.error('Upload error', err);
@@ -3836,6 +3907,16 @@ function AdminPageInner() {
               >
                 <Pencil className="w-3 h-3" /> Edit Manually
               </button>
+              {(key === 'boundaries' || key === 'areas') && (
+                <button
+                  onClick={() => runPolyJob(POLY_ASSIGN_CLASSES, false)}
+                  disabled={polyRunning}
+                  title="Re-assign every property row to the boundary polygon containing its coordinates"
+                  className="ml-1 mr-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-colors"
+                >
+                  {polyRunning ? 'Asignando…' : 'Re-asignar polígonos'}
+                </button>
+              )}
             </div>
           </div>
 
@@ -5064,6 +5145,84 @@ function AdminPageInner() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {polyAudit && polyAudit.length > 0 && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/70">
+          <div className="bg-surface border border-emerald-500/40 rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-border-subtle shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-base font-bold text-white leading-tight">Polygon assignment report</p>
+                  <p className="text-[11px] text-gray-400">
+                    Every property row is now assigned to the boundary polygon that contains its coordinates — the map&apos;s numbers come straight from the CSV data.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setPolyAudit(null)}
+                className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white shrink-0"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto p-5 space-y-3">
+              {polyAudit.map((a) => (
+                <div key={a.classKey} className="bg-background border border-border-subtle rounded-xl px-4 py-3">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <p className="text-sm font-semibold text-white">{a.classKey}</p>
+                    <p className="text-xs text-gray-400">
+                      {a.assigned.toLocaleString()} assigned · {a.distinctPoly.toLocaleString()} polygons
+                      {a.unassigned > 0 ? ` · ${a.unassigned.toLocaleString()} without polygon` : ''}
+                    </p>
+                  </div>
+                  {a.perPoly.length > 0 ? (
+                    <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-border-subtle divide-y divide-border-subtle">
+                      {a.perPoly.slice(0, 200).map((p) => (
+                        <div key={`${a.classKey}-${p.name}`} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[11px]">
+                          <span className="text-gray-300 break-all">{p.name}</span>
+                          <span className="text-white whitespace-nowrap">
+                            {p.count.toLocaleString()}{p.median != null ? ` · $${p.median.toLocaleString()}` : ''}
+                          </span>
+                        </div>
+                      ))}
+                      {a.perPoly.length > 200 && (
+                        <div className="px-3 py-1.5 text-[11px] text-gray-400">
+                          +{(a.perPoly.length - 200).toLocaleString()} more polygons — same data.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-[11px] text-gray-400">
+                      {a.assigned > 0
+                        ? `${a.assigned.toLocaleString()} rows assigned — detail not available for this class.`
+                        : 'Nothing to assign for this class (no boundary file uploaded, no rows with coordinates, or nothing new).'}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-border-subtle shrink-0">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPolyAudit(null)}
+                  className="flex-1 px-4 py-2.5 rounded-xl text-sm font-bold bg-emerald-500 hover:bg-emerald-400 text-black transition-colors"
+                >
+                  Got it
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {polyRunning && (
+        <div className="fixed inset-x-0 bottom-0 z-[900] px-4 py-2 bg-blue-900/90 border-t border-blue-500/40 text-center">
+          <p className="text-xs text-blue-100">{polyProgress || 'Asignando polígonos…'}</p>
         </div>
       )}
 
