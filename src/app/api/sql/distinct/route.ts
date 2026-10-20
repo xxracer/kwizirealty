@@ -13,7 +13,7 @@
  * once and hold the result.
  */
 import { NextResponse } from 'next/server';
-import { getAdminAuth, getAdminDataConnect } from '@/lib/firebaseAdmin';
+import { getAdminAuth, getAdminDataConnect, getAdminStorageBucket, storageWithTimeout } from '@/lib/firebaseAdmin';
 import { getDatasetVersionTag } from '@/lib/server/datasetVersion';
 import { guardPublicRead } from '@/lib/server/requestGuard';
 import type { DatasetUniqueValues } from '@/lib/engineWorker/protocol';
@@ -27,6 +27,38 @@ interface DistinctCacheEntry {
 let memCache: Map<string, DistinctCacheEntry> = new Map();
 const MEM_TTL_MS = 10 * 60_000;
 let memAt = 0;
+
+/** Durable tier (owner's <2s load rule): a cold Vercel instance pays the
+ *  ~4s distinctValues aggregate instead of reading a cached list. Persist the
+ *  built lists to Storage keyed by dataset version — cold instances read a
+ *  ~10KB object (~100ms) instead of running the aggregate. Written on every
+ *  real compute (write-through); never trusted for a different version. */
+const STORAGE_KEY = 'map_cache/distinct-latest.json';
+
+async function readStorageDistinct(version: string): Promise<DistinctCacheEntry | null> {
+  try {
+    const [buf] = await storageWithTimeout(
+      getAdminStorageBucket().file(STORAGE_KEY).download(),
+      10_000,
+    );
+    const parsed = JSON.parse(buf.toString('utf8')) as DistinctCacheEntry;
+    if (parsed?.version === version && parsed.body) return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeStorageDistinct(entry: DistinctCacheEntry): Promise<void> {
+  try {
+    await getAdminStorageBucket()
+      .file(STORAGE_KEY)
+      .save(JSON.stringify(entry), { contentType: 'application/json', resumable: false });
+  } catch {
+    // Durable tier is an accelerator only — a failed write just means the
+    // next cold instance recomputes.
+  }
+}
 
 export async function POST(req: Request) {
   // The map is open to signed-out visitors, so the token is optional —
@@ -48,6 +80,13 @@ export async function POST(req: Request) {
     const hit = memCache.get(version);
     if (hit && Date.now() - memAt < MEM_TTL_MS) {
       return NextResponse.json(hit.body);
+    }
+    // Cold instance: try the durable tier BEFORE the ~4s aggregate.
+    const durable = await readStorageDistinct(version);
+    if (durable) {
+      memCache.set(version, durable);
+      memAt = Date.now();
+      return NextResponse.json(durable.body);
     }
     const dc = getAdminDataConnect();
     const res = await dc.executeQuery('distinctValues', {});
@@ -79,10 +118,12 @@ export async function POST(req: Request) {
     const zipcodes: string[] = row.zipcodes ?? [];
     const body = { uniqueValues, zipcodes, totalRows: Number(row.total_rows ?? 0) };
     // one entry per dataset version; drop stale versions
-    const fresh: Map<string, DistinctCacheEntry> = new Map([[version, { version, body }]]);
+    const entry: DistinctCacheEntry = { version, body };
+    const fresh: Map<string, DistinctCacheEntry> = new Map([[version, entry]]);
     if (hit) fresh.set(hit.version, hit);
     memCache = fresh;
     memAt = Date.now();
+    void writeStorageDistinct(entry);
     return NextResponse.json(body);
   } catch (err) {
     console.error('[api/sql/distinct] failed:', err);
