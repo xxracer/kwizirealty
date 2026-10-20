@@ -562,6 +562,8 @@ mutation backfillPolyColumns($rows: String!) @auth(level: NO_ACCESS) {
 # $onlyUnassigned=true limits to rows the class hasn't filled (the
 # after-commit hook); =false re-assigns ALL live rows (boundary re-upload /
 # manual run). One op per class — static SQL, no CASE cleverness.
+# NOTE: Data Connect's SQL validator rejects row-tuple comparisons
+# ((a,b) > (c,d)) — the keyset is spelled with plain per-column conditions.
 query polyBackfillPageSubdivisions($afterMls: String!, $afterYear: Int!, $limit: Int!, $onlyUnassigned: Boolean!) @auth(level: NO_ACCESS) {
   rows: _select(
     sql: """
@@ -570,7 +572,7 @@ query polyBackfillPageSubdivisions($afterMls: String!, $afterYear: Int!, $limit:
     WHERE upload_session_id IS NULL
       AND lat IS NOT NULL AND lng IS NOT NULL
       AND (NOT $4::bool OR poly_id_subdivisions IS NULL OR poly_id_subdivisions = '')
-      AND (mls_number, dataset_year) > ($1::text, $2::int)
+      AND (mls_number > $1::text OR (mls_number = $1::text AND dataset_year > $2::int))
     ORDER BY mls_number, dataset_year
     LIMIT $3::int
     """,
@@ -586,7 +588,7 @@ query polyBackfillPageZipcodes($afterMls: String!, $afterYear: Int!, $limit: Int
     WHERE upload_session_id IS NULL
       AND lat IS NOT NULL AND lng IS NOT NULL
       AND (NOT $4::bool OR poly_id_zipcodes IS NULL OR poly_id_zipcodes = '')
-      AND (mls_number, dataset_year) > ($1::text, $2::int)
+      AND (mls_number > $1::text OR (mls_number = $1::text AND dataset_year > $2::int))
     ORDER BY mls_number, dataset_year
     LIMIT $3::int
     """,
@@ -602,7 +604,7 @@ query polyBackfillPageHighschools($afterMls: String!, $afterYear: Int!, $limit: 
     WHERE upload_session_id IS NULL
       AND lat IS NOT NULL AND lng IS NOT NULL
       AND (NOT $4::bool OR poly_id_highschools IS NULL OR poly_id_highschools = '')
-      AND (mls_number, dataset_year) > ($1::text, $2::int)
+      AND (mls_number > $1::text OR (mls_number = $1::text AND dataset_year > $2::int))
     ORDER BY mls_number, dataset_year
     LIMIT $3::int
     """,
@@ -618,7 +620,7 @@ query polyBackfillPageElementary($afterMls: String!, $afterYear: Int!, $limit: I
     WHERE upload_session_id IS NULL
       AND lat IS NOT NULL AND lng IS NOT NULL
       AND (NOT $4::bool OR poly_id_elementary IS NULL OR poly_id_elementary = '')
-      AND (mls_number, dataset_year) > ($1::text, $2::int)
+      AND (mls_number > $1::text OR (mls_number = $1::text AND dataset_year > $2::int))
     ORDER BY mls_number, dataset_year
     LIMIT $3::int
     """,
@@ -634,7 +636,7 @@ query polyBackfillPageMiddle($afterMls: String!, $afterYear: Int!, $limit: Int!,
     WHERE upload_session_id IS NULL
       AND lat IS NOT NULL AND lng IS NOT NULL
       AND (NOT $4::bool OR poly_id_middle IS NULL OR poly_id_middle = '')
-      AND (mls_number, dataset_year) > ($1::text, $2::int)
+      AND (mls_number > $1::text OR (mls_number = $1::text AND dataset_year > $2::int))
     ORDER BY mls_number, dataset_year
     LIMIT $3::int
     """,
@@ -643,16 +645,18 @@ query polyBackfillPageMiddle($afterMls: String!, $afterYear: Int!, $limit: Int!,
 }
 
 # Deployment/audit probe: how far along the polygon assignment is.
+# CASE-aggregate form: Data Connect's validator rejects the aggregate-FILTER
+# construct, so conditional counts are written as SUM(CASE ... END)::int.
 query polyAssignmentStatus @auth(level: NO_ACCESS) {
   status: _selectFirst(
     sql: """
     SELECT COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE lat IS NOT NULL AND lng IS NOT NULL)::int AS with_coords,
-      COUNT(*) FILTER (WHERE poly_id_subdivisions IS NOT NULL AND poly_id_subdivisions <> '')::int AS assigned_subdivisions,
-      COUNT(*) FILTER (WHERE poly_id_zipcodes IS NOT NULL AND poly_id_zipcodes <> '')::int AS assigned_zipcodes,
-      COUNT(*) FILTER (WHERE poly_id_highschools IS NOT NULL AND poly_id_highschools <> '')::int AS assigned_highschools,
-      COUNT(*) FILTER (WHERE poly_id_elementary IS NOT NULL AND poly_id_elementary <> '')::int AS assigned_elementary,
-      COUNT(*) FILTER (WHERE poly_id_middle IS NOT NULL AND poly_id_middle <> '')::int AS assigned_middle
+      SUM(CASE WHEN lat IS NOT NULL AND lng IS NOT NULL THEN 1 ELSE 0 END)::int AS with_coords,
+      SUM(CASE WHEN poly_id_subdivisions IS NOT NULL AND poly_id_subdivisions <> '' THEN 1 ELSE 0 END)::int AS assigned_subdivisions,
+      SUM(CASE WHEN poly_id_zipcodes IS NOT NULL AND poly_id_zipcodes <> '' THEN 1 ELSE 0 END)::int AS assigned_zipcodes,
+      SUM(CASE WHEN poly_id_highschools IS NOT NULL AND poly_id_highschools <> '' THEN 1 ELSE 0 END)::int AS assigned_highschools,
+      SUM(CASE WHEN poly_id_elementary IS NOT NULL AND poly_id_elementary <> '' THEN 1 ELSE 0 END)::int AS assigned_elementary,
+      SUM(CASE WHEN poly_id_middle IS NOT NULL AND poly_id_middle <> '' THEN 1 ELSE 0 END)::int AS assigned_middle
     FROM properties
     WHERE upload_session_id IS NULL
     """,
