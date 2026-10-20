@@ -162,14 +162,14 @@ query filteredPropertiesForSelection(
       AND (COALESCE(cardinality($31::text[]), 0) = 0 OR highschools = ANY($31::text[]))
       AND (COALESCE(cardinality($32::text[]), 0) = 0 OR highschool_name = ANY($32::text[]))
       AND CASE $34
-        WHEN 'subdivisions' THEN subdivisions
-        WHEN 'neighborhoods' THEN subdivisions
-        WHEN 'zipcodes' THEN zipcodes
-        WHEN 'highschools' THEN highschools
-        WHEN 'elementary' THEN elementary
-        WHEN 'middle' THEN middle
+        WHEN 'subdivisions' THEN poly_id_subdivisions
+        WHEN 'neighborhoods' THEN poly_id_subdivisions
+        WHEN 'zipcodes' THEN poly_id_zipcodes
+        WHEN 'highschools' THEN poly_id_highschools
+        WHEN 'elementary' THEN poly_id_elementary
+        WHEN 'middle' THEN poly_id_middle
         WHEN 'areas' THEN area
-        ELSE subdivisions
+        ELSE poly_id_subdivisions
       END = ANY($33::text[])
       AND (
         $35 = 'both'
@@ -822,14 +822,14 @@ query areaMapValues(
     sql: """
     SELECT
       CASE $1::text
-        WHEN 'subdivisions' THEN subdivisions
-        WHEN 'neighborhoods' THEN subdivisions
-        WHEN 'zipcodes' THEN zipcodes
-        WHEN 'highschools' THEN highschools
-        WHEN 'elementary' THEN elementary
-        WHEN 'middle' THEN middle
+        WHEN 'subdivisions' THEN poly_id_subdivisions
+        WHEN 'neighborhoods' THEN poly_id_subdivisions
+        WHEN 'zipcodes' THEN poly_id_zipcodes
+        WHEN 'highschools' THEN poly_id_highschools
+        WHEN 'elementary' THEN poly_id_elementary
+        WHEN 'middle' THEN poly_id_middle
         WHEN 'areas' THEN area
-        ELSE subdivisions
+        ELSE poly_id_subdivisions
       END AS key,
       COUNT(*)::int AS n,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY close_price) FILTER (WHERE close_price > 0) AS med_close_price,
@@ -869,24 +869,24 @@ query areaMapValues(
       AND (COALESCE(cardinality($32::text[]), 0) = 0 OR highschools = ANY($32::text[]))
       AND (COALESCE(cardinality($33::text[]), 0) = 0 OR highschool_name = ANY($33::text[]))
       AND (CASE $1::text
-        WHEN 'subdivisions' THEN subdivisions
-        WHEN 'neighborhoods' THEN subdivisions
-        WHEN 'zipcodes' THEN zipcodes
-        WHEN 'highschools' THEN highschools
-        WHEN 'elementary' THEN elementary
-        WHEN 'middle' THEN middle
+        WHEN 'subdivisions' THEN poly_id_subdivisions
+        WHEN 'neighborhoods' THEN poly_id_subdivisions
+        WHEN 'zipcodes' THEN poly_id_zipcodes
+        WHEN 'highschools' THEN poly_id_highschools
+        WHEN 'elementary' THEN poly_id_elementary
+        WHEN 'middle' THEN poly_id_middle
         WHEN 'areas' THEN area
-        ELSE subdivisions
+        ELSE poly_id_subdivisions
       END) <> ''
       AND (CASE $1::text
-        WHEN 'subdivisions' THEN subdivisions
-        WHEN 'neighborhoods' THEN subdivisions
-        WHEN 'zipcodes' THEN zipcodes
-        WHEN 'highschools' THEN highschools
-        WHEN 'elementary' THEN elementary
-        WHEN 'middle' THEN middle
+        WHEN 'subdivisions' THEN poly_id_subdivisions
+        WHEN 'neighborhoods' THEN poly_id_subdivisions
+        WHEN 'zipcodes' THEN poly_id_zipcodes
+        WHEN 'highschools' THEN poly_id_highschools
+        WHEN 'elementary' THEN poly_id_elementary
+        WHEN 'middle' THEN poly_id_middle
         WHEN 'areas' THEN area
-        ELSE subdivisions
+        ELSE poly_id_subdivisions
       END) NOT IN ('NA', 'N/A', 'NONE', 'NULL', 'UNKNOWN', 'UNINCORPORATED')
       AND (
         $34 = 'both'
