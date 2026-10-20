@@ -315,6 +315,36 @@ const EXPAND_WORDS: Record<string, string> = {
   '@': 'AT',
 };
 
+/** How many filters differ from their no-op defaults — the badge on the
+ *  map's "Show filters" chip, so a collapsed sidebar still communicates
+ *  why the visible data is what it is. */
+export function activeFilterCount(f: PropertyFilters): number {
+  let n = 0;
+  const d = DEFAULT_FILTERS;
+  if (f.period !== d.period) n++;
+  if (f.bedsMin > d.bedsMin || f.bedsMax < d.bedsMax) n++;
+  if (f.bathsMin > d.bathsMin || f.bathsMax < d.bathsMax) n++;
+  if (f.sqftMin > d.sqftMin || f.sqftMax < d.sqftMax) n++;
+  if (f.saleMin > d.saleMin || f.saleMax < d.saleMax) n++;
+  if (f.rentMin > d.rentMin || f.rentMax < d.rentMax) n++;
+  if (f.pricePerSqftMin > d.pricePerSqftMin || f.pricePerSqftMax < d.pricePerSqftMax) n++;
+  if (f.lotSizeMin > d.lotSizeMin || f.lotSizeMax < d.lotSizeMax) n++;
+  if (f.domMin > d.domMin || f.domMax < d.domMax) n++;
+  if (f.l2sMin > d.l2sMin || f.l2sMax < d.l2sMax) n++;
+  if (f.yearMin > d.yearMin || f.yearMax < d.yearMax) n++;
+  n += f.propertyTypes.length > 0 ? 1 : 0;
+  if (f.pool !== d.pool) n++;
+  n += f.schoolDistricts.length > 0 ? 1 : 0;
+  n += f.cities.length > 0 ? 1 : 0;
+  n += f.elementary.length > 0 ? 1 : 0;
+  n += f.middle.length > 0 ? 1 : 0;
+  n += f.highschools.length > 0 ? 1 : 0;
+  n += f.elementaryRating.length > 0 ? 1 : 0;
+  n += f.middleRating.length > 0 ? 1 : 0;
+  n += f.highRating.length > 0 ? 1 : 0;
+  return n;
+}
+
 export function expandBoundaryName(raw: unknown): string {
   const v = String(raw || '').trim();
   if (!v) return '';

@@ -1482,7 +1482,11 @@ export default function MapComponent({
       areaLayerRef.current = null;
     }
 
-    const RENDER_BATCH = areaFeatures.length > 10000 ? 600 : 350;
+    // OWNER'S ≤2s MAP-LOAD RULE (measured 2026-10-20: 350/batch × 15 RAF
+    // frames = ~3.5s of drawing on desktop, ~20s on a phone). 2,500/batch
+    // draws the same 4,979 areas in 2 frames; the canvas renderer handles it
+    // and the progress counter (only shown >2,000 areas) just ticks once.
+    const RENDER_BATCH = areaFeatures.length > 10000 ? 1500 : 2500;
     const groups = L.layerGroup().addTo(map);
     areaLayerRef.current = groups as unknown as typeof areaLayerRef.current;
 

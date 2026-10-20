@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPolyIndex, assignPoly, indexPolygonCount } from './polyMatch';
-import { cleanBoundaryName, cleanSchoolName, expandBoundaryName } from './engineCore';
+import { cleanBoundaryName, cleanSchoolName, expandBoundaryName, activeFilterCount, DEFAULT_FILTERS } from './engineCore';
 
 function square(lng0: number, lat0: number, lng1: number, lat1: number, name: string): GeoJSON.Feature {
   return {
@@ -96,4 +96,15 @@ test('compound directions and acronyms expand', () => {
 test('matching-only tokens stay intact where the owner kept them (SEC, R/P)', () => {
   assert.equal(expandBoundaryName('W MEMORIAL SEC 01 R/P'), 'WEST MEMORIAL SEC 01 R/P');
   assert.equal(expandBoundaryName('ESTATES @ MONTROSE'), 'ESTATES AT MONTROSE');
+});
+
+// ── activeFilterCount (filters chip on the map's Show filters button) ──────
+
+test('activeFilterCount counts non-default filters', () => {
+  assert.equal(activeFilterCount({ ...DEFAULT_FILTERS }), 0);
+  assert.equal(activeFilterCount({ ...DEFAULT_FILTERS, period: '1y' }), 1);
+  assert.equal(
+    activeFilterCount({ ...DEFAULT_FILTERS, saleMin: 100000, cities: ['Houston'], pool: 'yes' }),
+    3
+  );
 });

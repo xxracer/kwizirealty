@@ -19,6 +19,7 @@ import {
   MetricKey,
   PropertyFilters,
   DEFAULT_FILTERS,
+  activeFilterCount,
   engine,
   cleanBoundaryName,
 } from '@/lib/engine';
@@ -2375,13 +2376,19 @@ function MapPageInner() {
 
       {/* Main workspace */}
       <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
-        {/* Sidebar toggle (mobile) */}
+        {/* Sidebar toggle (mobile/tablet): with an ACTIVE-FILTERS badge so the
+            collapsed state still tells the visitor why the map looks filtered. */}
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
           className="lg:hidden m-3 mb-0 flex items-center gap-2 px-3 py-2 rounded-xl bg-[#121620] border border-white/[0.06] text-sm font-semibold text-gray-300 print:hidden"
         >
           <PanelLeft className="w-4 h-4" />
           {sidebarOpen ? 'Hide filters' : 'Show filters'}
+          {activeFilterCount(appliedFilters) > 0 && !sidebarOpen && (
+            <span className="ml-auto inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-white text-[10px] font-bold">
+              {activeFilterCount(appliedFilters)}
+            </span>
+          )}
         </button>
 
         {/* Mobile backdrop: tapping outside the filter drawer closes it */}
@@ -2393,12 +2400,35 @@ function MapPageInner() {
           />
         )}
 
-        {/* Left sidebar — slide-over drawer on mobile, static column on desktop */}
+        {/* Left sidebar — slide-over sheet on mobile/tablet, static column on
+            desktop. The sheet NEVER squeezes the map (it's an overlay) and on
+            ≤1024px it leads with a sticky header: title + active count + a
+            real close button, so long scroll sessions stay oriented. */}
         <aside
           className={`${
             sidebarOpen ? 'flex' : 'hidden'
-          } lg:flex fixed lg:static inset-y-0 left-0 z-40 flex-col gap-4 w-[85vw] max-w-sm lg:w-80 xl:w-88 shrink-0 bg-[#0a0c10] border-r border-white/[0.06] p-4 overflow-y-auto print:hidden`}
+          } lg:flex fixed lg:static inset-y-0 left-0 z-40 flex-col gap-4 w-[92vw] max-w-md lg:w-80 xl:w-88 shrink-0 bg-[#0a0c10] border-r border-white/[0.06] p-4 overflow-y-auto print:hidden`}
         >
+          {/* Sticky sheet header (mobile/tablet only) */}
+          <div className="lg:hidden sticky top-0 z-10 -mx-4 px-4 pt-1 pb-3 bg-[#0a0c10] border-b border-white/[0.06] flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <PanelLeft className="w-4 h-4 text-blue-400 shrink-0" />
+              <span className="text-sm font-bold text-white">Filters</span>
+              {activeFilterCount(appliedFilters) > 0 && (
+                <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-white text-[10px] font-bold">
+                  {activeFilterCount(appliedFilters)}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors shrink-0"
+              aria-label="Close filters"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
           {/* Search */}
           <FilterSection icon={<Search className="w-4 h-4" />} title="Search" defaultOpen={false} dataTour="search">
             <div className="flex items-center gap-2 bg-white/5 border border-white/[0.06] rounded-xl px-3 py-2 focus-within:border-blue-500/40 transition-colors">
@@ -3026,7 +3056,11 @@ function MapPageInner() {
                   </div>
                 </div>
 
-                <div data-tour="map" className="flex-1 relative rounded-xl overflow-hidden border border-white/[0.06] min-h-0">
+                <div data-tour="map" className="flex-1 relative isolate rounded-xl overflow-hidden border border-white/[0.06] min-h-0">
+                  {/* isolate: Leaflet paints map panes at z 400-1000; without a
+                      stacking context here they escape this card and float ABOVE
+                      the mobile filter drawer (z-40) — the owner's broken phone
+                      screenshot. isolate binds every Leaflet z to this card. */}
                   <DraggableMapWindows
                     metric={metric}
                     metricLabel={METRICS.find((m) => m.key === metric)?.label || metric}
