@@ -418,7 +418,7 @@ export function SalesTaxRentCard({
             <div className="bg-[#0b0e14] border border-white/[0.06] rounded-xl p-3">
               <div className={`uppercase font-bold tracking-wider mb-2 text-amber-400 ${compact ? 'text-[9px]' : 'text-[10px]'}`}>Tax</div>
               <div className={`text-gray-500 ${compact ? 'text-[9px]' : 'text-[11px]'}`}>
-                No tax data yet. Upload Tax Data CSVs in the Admin panel — they merge into the map automatically by MLS number.
+                No tax records in this selection yet.
               </div>
             </div>
           )}
@@ -435,14 +435,14 @@ export function SalesTaxRentCard({
             <div className="bg-[#0b0e14] border border-white/[0.06] rounded-xl p-3">
               <div className={`uppercase font-bold tracking-wider mb-2 text-orange-400 ${compact ? 'text-[9px]' : 'text-[10px]'}`}>Rent</div>
               <div className={`text-gray-500 ${compact ? 'text-[9px]' : 'text-[11px]'}`}>
-                No rental data in this selection yet. Upload Rent Data CSVs in the Admin panel — the report shows real rental medians from those files.
+                No rental records in this selection yet.
               </div>
             </div>
           )}
         </div>
       )}
       <div className={`mt-2 text-gray-600 ${compact ? 'text-[8px]' : 'text-[9px]'}`}>
-        Rent values are REAL rental medians from the uploaded Rent CSVs — never estimates. Tax figures come from Tax Data CSVs merged by MLS number.
+        Rent values are REAL rental medians — never estimates. Tax figures are merged by MLS number.
       </div>
     </CardShell>
   );
@@ -1190,7 +1190,7 @@ export function ForecastComparisonCard({
               disabled={!forecastComparison.length}
               className="flex items-center gap-1 text-[10px] bg-white/5 hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-white/5 px-2 py-1 rounded-md transition-colors"
             >
-              <Download className="w-3 h-3" /> CSV
+              <Download className="w-3 h-3" /> Export
             </button>
           )}
           {headerExtra}

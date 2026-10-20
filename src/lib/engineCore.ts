@@ -291,6 +291,43 @@ export function getFeatureName(
   return '';
 }
 
+/**
+ * Display-only: expands the abbreviations `cleanBoundaryName` folds for DATA
+ * matching back into readable full words. The matching keys stay abbreviated
+ * in SQL — this is purely how names show on screen (owner 2026-10-19:
+ * "W MEMORIAL" must display as "WEST MEMORIAL"). SEC and R/P stay as-is:
+ * the reference app displays them exactly that way.
+ */
+const EXPAND_WORDS: Record<string, string> = {
+  W: 'WEST',
+  E: 'EAST',
+  N: 'NORTH',
+  S: 'SOUTH',
+  NW: 'NORTHWEST',
+  NE: 'NORTHEAST',
+  SW: 'SOUTHWEST',
+  SE: 'SOUTHEAST',
+  HTS: 'HEIGHTS',
+  MDW: 'MEADOWS',
+  GRV: 'GROVE',
+  STA: 'STATION',
+  RNCH: 'RANCH',
+  '@': 'AT',
+};
+
+export function expandBoundaryName(raw: unknown): string {
+  const v = String(raw || '').trim();
+  if (!v) return '';
+  // Token-by-token on spaces only. Fully-folded compact keys (no spaces,
+  // e.g. "WMEMORIAL") are left untouched — guessing words inside a compact
+  // blob mangles real words ("MEMORIAL").
+  return v
+    .toUpperCase()
+    .split(/\s+/)
+    .map((t) => (t in EXPAND_WORDS ? EXPAND_WORDS[t] : t))
+    .join(' ');
+}
+
 export function cleanSchoolName(raw: unknown): string {
   let v = String(raw || '').toUpperCase().trim();
   if (!v || v === 'NA' || v === 'N/A' || v === 'NONE' || v === 'NULL' || v === 'UNKNOWN') return '';

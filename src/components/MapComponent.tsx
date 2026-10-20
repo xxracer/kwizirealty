@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import * as turf from '@turf/turf';
-import { PropertyData, BoundaryKey, engine, cleanBoundaryName, cleanSchoolName } from '@/lib/engine';
+import { PropertyData, BoundaryKey, engine, cleanBoundaryName, cleanSchoolName, expandBoundaryName } from '@/lib/engine';
 import type { MetricKey } from '@/lib/engineCore';
 import { formatMetricValue } from '@/lib/legendFormat';
 import { MousePointer2, Square, Trash2, BarChart3, Loader2, RotateCcw } from 'lucide-react';
@@ -23,11 +23,15 @@ const DEVICE_MEM_GB: number =
   typeof navigator !== 'undefined' ? (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8 : 8;
 export const LOW_MEMORY_DEVICE = DEVICE_MEM_GB <= 4;
 
-// The whole Houston metro. The map is locked to this frame: panning clamps
-// against it with full viscosity (maxBoundsViscosity) and zooming out stops
-// at HOUSTON_METRO_MIN_ZOOM, so the view can never leave the metro area.
+// Panning is free INSIDE TEXAS (owner 2026-10-19: must be able to pan north
+// to Conroe or wherever they want, just never leave Texas). The clamp uses
+// full viscosity and a gentle minZoom so you can zoom out to state view.
+// The initial framing still fits the Houston metro fallback.
+const TEXAS_BOUNDS = L.latLngBounds([25.7, -107.0], [36.8, -93.3]);
+// minZoom 8: at desktop widths Texas roughly FILLS the viewport at z8 —
+// you cannot zoom out far enough to see beyond the state clamped here.
+const TEXAS_MIN_ZOOM = 8;
 const HOUSTON_METRO_BOUNDS = L.latLngBounds([29.0, -96.0], [30.2, -94.6]);
-const HOUSTON_METRO_MIN_ZOOM = 9;
 
 function LassoIcon({ className = 'w-4 h-4' }: { className?: string }) {
   return (
@@ -355,7 +359,9 @@ export default function MapComponent({
       return;
     }
     map.setView(bounds.getCenter(), zoom, { animate: false });
-    map.setMaxBounds(bounds.pad(0.05));
+    // Owner rule 2026-10-19: the pan clamp is TEXAS and never shrinks to the
+    // loaded data bounds (the old setMaxBounds(data.pad()) trapped the user
+    // inside whatever area had just loaded — felt like a frozen map).
     boundsSetRef.current = true;
   }, []);
 
@@ -524,7 +530,9 @@ export default function MapComponent({
       // kept and rendered grey/opaque so boundaries are always visible.
       const hasMetric = typeof value === 'number' && isFinite(value) && count > 0;
       const color = hasMetric ? getColorForValue(value as number, colorStops) : '#374151';
-      const name = nameMap[dataId] || nameMap[key] || String(rawName || cleanedName || key);
+      // Display name: full words (WEST MEMORIAL), even though the matching
+      // key stays abbreviated in SQL.
+      const name = expandBoundaryName(nameMap[dataId] || nameMap[key] || String(rawName || cleanedName || key));
 
       // Only push if there's valid geometry
       if (feature.geometry && (feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon')) {
@@ -557,7 +565,7 @@ export default function MapComponent({
 
   const makePopupHtml = (feature: GeoJSON.Feature): string => {
     const props = (feature.properties || {}) as Record<string, any>;
-    const name = props.name ?? String(feature.id ?? props.id ?? '');
+    const name = expandBoundaryName(props.name ?? String(feature.id ?? props.id ?? ''));
     const value = Number(props.value ?? 0);
     const count = Number(props.count ?? 0);
     const hasMetric = props.hasMetric !== false;
@@ -693,11 +701,11 @@ export default function MapComponent({
       // memory; the canvas renderer draws them into a single bitmap and keeps
       // pan/zoom smooth. Hover/click still work on canvas layers.
       preferCanvas: true,
-      // Lock the map to the Houston metro: dragging clamps inside
-      // HOUSTON_METRO_BOUNDS and zoom-out stops at the metro framing.
-      maxBounds: HOUSTON_METRO_BOUNDS,
+      // Free panning inside Texas: dragging clamps against TEXAS_BOUNDS and
+      // zoom-out stops gently at the state view (minZoom 6).
+      maxBounds: TEXAS_BOUNDS,
       maxBoundsViscosity: 1.0,
-      minZoom: HOUSTON_METRO_MIN_ZOOM,
+      minZoom: TEXAS_MIN_ZOOM,
     }).setView([29.76, -95.37], 10);
 
     // HOVER-POPUP SUPPRESSION WHILE MOVING (user feedback 2026-10-18: simply
@@ -716,10 +724,15 @@ export default function MapComponent({
 
     // Standard OpenStreetMap tiles (owner's explicit pick — full street and
     // neighborhood labels instead of Esri's blank Light Gray canvas).
+    // Slow-link tuning: load tiles AFTER the pan settles (no request bursts —
+    // that is what littered the map with broken-image chips and gray gaps on
+    // the owner's unstable connection) and keep a bigger offscreen buffer.
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
+      updateWhenIdle: true,
+      keepBuffer: 3,
     }).addTo(map);
 
     mapRef.current = map;

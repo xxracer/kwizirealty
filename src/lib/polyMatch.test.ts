@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPolyIndex, assignPoly, indexPolygonCount } from './polyMatch';
-import { cleanBoundaryName, cleanSchoolName } from './engineCore';
+import { cleanBoundaryName, cleanSchoolName, expandBoundaryName } from './engineCore';
 
 function square(lng0: number, lat0: number, lng1: number, lat1: number, name: string): GeoJSON.Feature {
   return {
@@ -77,4 +77,23 @@ test('school classes clean with cleanSchoolName', () => {
     clean: cleanSchoolName,
   });
   assert.equal(assignPoly(29.75, -95.55, idx), cleanSchoolName('Rogers Middle School'));
+});
+// ── expandBoundaryName (display-only full names; owner 2026-10-19) ─────────
+
+test('direction letters expand back to full words on display', () => {
+  assert.equal(expandBoundaryName('W MEMORIAL'), 'WEST MEMORIAL');
+  assert.equal(expandBoundaryName('N HOUSTON'), 'NORTH HOUSTON');
+  assert.equal(expandBoundaryName('E 43RD'), 'EAST 43RD');
+});
+
+test('compound directions and acronyms expand', () => {
+  assert.equal(expandBoundaryName('NW 07 R/P'), 'NORTHWEST 07 R/P');
+  assert.equal(expandBoundaryName('MEMORIAL HTS'), 'MEMORIAL HEIGHTS');
+  assert.equal(expandBoundaryName('PINE MDW'), 'PINE MEADOWS');
+  assert.equal(expandBoundaryName('OAK GRV'), 'OAK GROVE');
+});
+
+test('matching-only tokens stay intact where the owner kept them (SEC, R/P)', () => {
+  assert.equal(expandBoundaryName('W MEMORIAL SEC 01 R/P'), 'WEST MEMORIAL SEC 01 R/P');
+  assert.equal(expandBoundaryName('ESTATES @ MONTROSE'), 'ESTATES AT MONTROSE');
 });
