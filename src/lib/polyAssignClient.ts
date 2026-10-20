@@ -121,7 +121,7 @@ async function assignOneClass(
 }
 
 export async function runPolyAssignment(
-  classes: PolyAssignClass[],
+  classes: readonly PolyAssignClass[],
   opts: {
     onlyUnassigned?: boolean;
     onProgress?: (p: PolyAssignProgress) => void;
