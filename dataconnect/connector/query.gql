@@ -457,6 +457,7 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
         r->>'area' AS area,
         NULLIF(r->>'lat', '')::float AS lat,
         NULLIF(r->>'lng', '')::float AS lng,
+        r->>'polyIdSubdivisions' AS poly_id_subdivisions,
         r->>'propertyType' AS property_type,
         (r->>'pool')::boolean AS pool,
         r->>'listingType' AS listing_type,
@@ -471,7 +472,7 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
       close_date, close_year, close_date_ts, maint_fee, maint_fee_schedule,
       tax_rate, tax_year, tax_amount, subdivisions, zipcodes, highschools,
       highschool_name, elementary, middle, school_district, market_area, area,
-      lat, lng, property_type, pool, listing_type, dataset_year, upload_session_id, updated_at
+      lat, lng, poly_id_subdivisions, property_type, pool, listing_type, dataset_year, upload_session_id, updated_at
     )
     SELECT
       mls_number, address, city, state, zip, close_price, list_price,
@@ -479,7 +480,7 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
       close_date, close_year, close_date_ts, maint_fee, maint_fee_schedule,
       tax_rate, tax_year, tax_amount, subdivisions, zipcodes, highschools,
       highschool_name, elementary, middle, school_district, market_area, area,
-      lat, lng, property_type, pool, listing_type, dataset_year, upload_session_id, updated_at
+      lat, lng, poly_id_subdivisions, property_type, pool, listing_type, dataset_year, upload_session_id, updated_at
     FROM batch
     ON CONFLICT (mls_number, dataset_year) DO UPDATE SET
       address = EXCLUDED.address,
@@ -515,12 +516,148 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
       area = EXCLUDED.area,
       lat = EXCLUDED.lat,
       lng = EXCLUDED.lng,
+      poly_id_subdivisions = COALESCE(EXCLUDED.poly_id_subdivisions, properties.poly_id_subdivisions),
       property_type = EXCLUDED.property_type,
       pool = EXCLUDED.pool,
       listing_type = EXCLUDED.listing_type,
       upload_session_id = EXCLUDED.upload_session_id,
       updated_at = EXCLUDED.updated_at
   """, params: [$rows])
+}
+
+# Polygon-id backfill: sets ONLY the five polygon columns for the exact
+# (mls_number,dataset_year) keys the server route sends — never other
+# columns, never staged rows. COALESCE keeps a class's existing value when
+# this batch doesn't target that class, so one class's update never nulls
+# another's (json keys: s=subdivisions, z=zipcodes, h=highschools,
+# e=elementary, d=middle).
+mutation backfillPolyColumns($rows: String!) @auth(level: NO_ACCESS) {
+  _execute(sql: """
+    WITH batch AS (
+      SELECT
+        r->>'m' AS m,
+        (r->>'y')::int AS y,
+        r->>'s' AS s,
+        r->>'z' AS z,
+        r->>'h' AS h,
+        r->>'e' AS e,
+        r->>'d' AS d
+      FROM jsonb_array_elements($1::jsonb) AS r
+    )
+    UPDATE properties p2
+    SET
+      poly_id_subdivisions = COALESCE(b.s, p2.poly_id_subdivisions),
+      poly_id_zipcodes     = COALESCE(b.z, p2.poly_id_zipcodes),
+      poly_id_highschools  = COALESCE(b.h, p2.poly_id_highschools),
+      poly_id_elementary   = COALESCE(b.e, p2.poly_id_elementary),
+      poly_id_middle       = COALESCE(b.d, p2.poly_id_middle),
+      updated_at = now()
+    FROM batch b
+    WHERE p2.mls_number = b.m AND p2.dataset_year = b.y
+      AND p2.upload_session_id IS NULL
+  """, params: [$rows])
+}
+
+# Keyset-paged rows for one boundary class's polygon assignment.
+# $onlyUnassigned=true limits to rows the class hasn't filled (the
+# after-commit hook); =false re-assigns ALL live rows (boundary re-upload /
+# manual run). One op per class — static SQL, no CASE cleverness.
+query polyBackfillPageSubdivisions($afterMls: String!, $afterYear: Int!, $limit: Int!, $onlyUnassigned: Boolean!) @auth(level: NO_ACCESS) {
+  rows: _select(
+    sql: """
+    SELECT mls_number, dataset_year, lat, lng, close_price
+    FROM properties
+    WHERE upload_session_id IS NULL
+      AND lat IS NOT NULL AND lng IS NOT NULL
+      AND (NOT $4::bool OR poly_id_subdivisions IS NULL OR poly_id_subdivisions = '')
+      AND (mls_number, dataset_year) > ($1::text, $2::int)
+    ORDER BY mls_number, dataset_year
+    LIMIT $3::int
+    """,
+    params: [$afterMls, $afterYear, $limit, $onlyUnassigned]
+  )
+}
+
+query polyBackfillPageZipcodes($afterMls: String!, $afterYear: Int!, $limit: Int!, $onlyUnassigned: Boolean!) @auth(level: NO_ACCESS) {
+  rows: _select(
+    sql: """
+    SELECT mls_number, dataset_year, lat, lng, close_price
+    FROM properties
+    WHERE upload_session_id IS NULL
+      AND lat IS NOT NULL AND lng IS NOT NULL
+      AND (NOT $4::bool OR poly_id_zipcodes IS NULL OR poly_id_zipcodes = '')
+      AND (mls_number, dataset_year) > ($1::text, $2::int)
+    ORDER BY mls_number, dataset_year
+    LIMIT $3::int
+    """,
+    params: [$afterMls, $afterYear, $limit, $onlyUnassigned]
+  )
+}
+
+query polyBackfillPageHighschools($afterMls: String!, $afterYear: Int!, $limit: Int!, $onlyUnassigned: Boolean!) @auth(level: NO_ACCESS) {
+  rows: _select(
+    sql: """
+    SELECT mls_number, dataset_year, lat, lng, close_price
+    FROM properties
+    WHERE upload_session_id IS NULL
+      AND lat IS NOT NULL AND lng IS NOT NULL
+      AND (NOT $4::bool OR poly_id_highschools IS NULL OR poly_id_highschools = '')
+      AND (mls_number, dataset_year) > ($1::text, $2::int)
+    ORDER BY mls_number, dataset_year
+    LIMIT $3::int
+    """,
+    params: [$afterMls, $afterYear, $limit, $onlyUnassigned]
+  )
+}
+
+query polyBackfillPageElementary($afterMls: String!, $afterYear: Int!, $limit: Int!, $onlyUnassigned: Boolean!) @auth(level: NO_ACCESS) {
+  rows: _select(
+    sql: """
+    SELECT mls_number, dataset_year, lat, lng, close_price
+    FROM properties
+    WHERE upload_session_id IS NULL
+      AND lat IS NOT NULL AND lng IS NOT NULL
+      AND (NOT $4::bool OR poly_id_elementary IS NULL OR poly_id_elementary = '')
+      AND (mls_number, dataset_year) > ($1::text, $2::int)
+    ORDER BY mls_number, dataset_year
+    LIMIT $3::int
+    """,
+    params: [$afterMls, $afterYear, $limit, $onlyUnassigned]
+  )
+}
+
+query polyBackfillPageMiddle($afterMls: String!, $afterYear: Int!, $limit: Int!, $onlyUnassigned: Boolean!) @auth(level: NO_ACCESS) {
+  rows: _select(
+    sql: """
+    SELECT mls_number, dataset_year, lat, lng, close_price
+    FROM properties
+    WHERE upload_session_id IS NULL
+      AND lat IS NOT NULL AND lng IS NOT NULL
+      AND (NOT $4::bool OR poly_id_middle IS NULL OR poly_id_middle = '')
+      AND (mls_number, dataset_year) > ($1::text, $2::int)
+    ORDER BY mls_number, dataset_year
+    LIMIT $3::int
+    """,
+    params: [$afterMls, $afterYear, $limit, $onlyUnassigned]
+  )
+}
+
+# Deployment/audit probe: how far along the polygon assignment is.
+query polyAssignmentStatus @auth(level: NO_ACCESS) {
+  status: _selectFirst(
+    sql: """
+    SELECT COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE lat IS NOT NULL AND lng IS NOT NULL)::int AS with_coords,
+      COUNT(*) FILTER (WHERE poly_id_subdivisions IS NOT NULL AND poly_id_subdivisions <> '')::int AS assigned_subdivisions,
+      COUNT(*) FILTER (WHERE poly_id_zipcodes IS NOT NULL AND poly_id_zipcodes <> '')::int AS assigned_zipcodes,
+      COUNT(*) FILTER (WHERE poly_id_highschools IS NOT NULL AND poly_id_highschools <> '')::int AS assigned_highschools,
+      COUNT(*) FILTER (WHERE poly_id_elementary IS NOT NULL AND poly_id_elementary <> '')::int AS assigned_elementary,
+      COUNT(*) FILTER (WHERE poly_id_middle IS NOT NULL AND poly_id_middle <> '')::int AS assigned_middle
+    FROM properties
+    WHERE upload_session_id IS NULL
+    """,
+    params: []
+  )
 }
 
 # Dataset version for conditional HTTP caching. The ETag of /api/query is
