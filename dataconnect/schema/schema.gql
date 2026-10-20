@@ -19,6 +19,11 @@ type Property
   @index(fields: ["elementary", "closeDateTs"], order: [ASC, DESC])
   @index(fields: ["middle", "closeDateTs"], order: [ASC, DESC])
   @index(fields: ["area", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["polyIdSubdivisions", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["polyIdZipcodes", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["polyIdHighschools", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["polyIdElementary", "closeDateTs"], order: [ASC, DESC])
+  @index(fields: ["polyIdMiddle", "closeDateTs"], order: [ASC, DESC])
   @index(fields: ["closeDateTs"])
 {
   mlsNumber: String!
@@ -56,6 +61,17 @@ type Property
   area: String
   lat: Float
   lng: Float
+  # Subdivisions polygon this row's lat/lng falls inside, computed at CSV
+  # upload time / by the admin assignment job (Point-in-Polygon, smallest
+  # containing polygon wins). Empty = no usable coordinates or outside the
+  # metro coverage. Subdivisions/neighborhoods aggregates group by this
+  # column — NOT by the CSV "Subdivision" text. Same pattern for the other
+  # boundary classes fed from BOUNDARY_SOURCES files (zip, schools).
+  polyIdSubdivisions: String
+  polyIdZipcodes: String
+  polyIdHighschools: String
+  polyIdElementary: String
+  polyIdMiddle: String
   propertyType: String
   pool: Boolean
 
