@@ -330,7 +330,12 @@ export default function MapComponent({
   const recenterMap = useCallback(() => {
     const map = mapRef.current;
     if (!map) return;
-    if (boundsSetRef.current && map.getZoom() > 3) return;
+    // Latch on MEASURED pixels, not zoom: with minZoom 9 (metro lock) zoom can
+    // never drop to the world-view range the old `zoom > 3` retry relied on,
+    // so a hidden/zero-size container would seal bogus first-paint framing.
+    const containerNow = containerRef.current;
+    const containerHasSize = !!containerNow && containerNow.offsetWidth > 50 && containerNow.offsetHeight > 50;
+    if (boundsSetRef.current && containerHasSize) return;
 
     map.invalidateSize();
     const bounds = computeDataBounds(rawDataRef.current) || computeGeoJSONBounds(geoJsonDataRef.current);
@@ -340,13 +345,13 @@ export default function MapComponent({
       if (map.getZoom() <= 3) {
         map.setView(HOUSTON_METRO_BOUNDS.getCenter(), 10, { animate: false });
       }
-      if (map.getZoom() > 3) boundsSetRef.current = true;
+      if (containerHasSize) boundsSetRef.current = true;
       return;
     }
 
     const zoom = Math.min(12, map.getBoundsZoom(bounds, false, L.point(8, 8)));
-    if (zoom <= 3) {
-      // Container still too small; try again on the next resize/data update.
+    if (!containerHasSize) {
+      // Container still has no pixels; try again on the next resize/data update.
       return;
     }
     map.setView(bounds.getCenter(), zoom, { animate: false });
@@ -480,7 +485,6 @@ export default function MapComponent({
         const geom = feature.geometry as { type?: string; coordinates?: unknown } | null;
         key = cleanBoundaryName(
           getFeatureName({
-            type: 'Feature',
             geometry: { type: geom?.type ?? '', coordinates: (geom?.coordinates ?? []) as never },
             properties: props,
           })
@@ -730,7 +734,12 @@ export default function MapComponent({
 
     recenterMap();
     const boundsInterval = setInterval(() => {
-      if (boundsSetRef.current && map.getZoom() > 3) {
+      // Same pixel-based latch as recenterMap (zoom can never fall below the
+      // metro minZoom now, so `zoom > 3` would seal a zero-size container's
+      // first fit attempt forever).
+      const el = containerRef.current;
+      const containerHasSize = !!el && el.offsetWidth > 50 && el.offsetHeight > 50;
+      if (boundsSetRef.current && containerHasSize) {
         clearInterval(boundsInterval);
         return;
       }

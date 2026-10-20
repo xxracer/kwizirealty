@@ -516,7 +516,7 @@ mutation stagePropertyRows($rows: String!) @auth(level: PUBLIC) {
       area = EXCLUDED.area,
       lat = EXCLUDED.lat,
       lng = EXCLUDED.lng,
-      poly_id_subdivisions = COALESCE(EXCLUDED.poly_id_subdivisions, properties.poly_id_subdivisions),
+      poly_id_subdivisions = COALESCE(NULLIF(EXCLUDED.poly_id_subdivisions, ''), properties.poly_id_subdivisions),
       property_type = EXCLUDED.property_type,
       pool = EXCLUDED.pool,
       listing_type = EXCLUDED.listing_type,

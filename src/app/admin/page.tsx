@@ -2153,6 +2153,17 @@ function AdminPageInner() {
     try {
       const { csvRowsToSqlPropertyRows } = await import('@/lib/sqlImport');
       const sqlRows = csvRowsToSqlPropertyRows(rows, category, sessionId, defaultYear);
+      // Staging-time polygon assignment (subdivisions class — the file is
+      // small): every staged row learns which polygon contains it BEFORE it
+      // goes to SQL, so its "Add All" commit lands map-correct immediately.
+      // Zip/schools fill from the commit hook (their files are too big to
+      // parse per upload).
+      try {
+        const { assignStagedSubdivisions } = await import('@/lib/polyStageAssign');
+        await assignStagedSubdivisions(sqlRows as never);
+      } catch (assignErr) {
+        console.warn('[admin] staging polygon assignment skipped:', assignErr);
+      }
       await stagePropertyRows(sqlRows, (loaded) => {
         setStagedFiles((prev) =>
           prev.map((s) =>
@@ -2197,41 +2208,67 @@ function AdminPageInner() {
     await runSqlStaging(stagedId, staged.record.rows, staged.record.category as any, staged.sessionId, staged.record.year);
   };
 
-  /** Polygon assignment runner (button + auto-hooks). Never blocks the
-   *  upload confirm flow: runs in the background, opens the audit modal when
-   *  it finishes, error toast only. */
-  const runPolyJob = (
-    classes: readonly PolyAssignClass[],
-    onlyUnassigned: boolean,
-  ) => {
-    if (polyRunning) return;
-    const controller = new AbortController();
-    polyAbortRef.current = controller;
+  /** Polygon assignment queue (button + auto-hooks). A run always finishes
+   *  its class list; requests that arrive while busy are QUEUED and run in
+   *  order — a boundary re-upload during a big run must not be silently
+   *  dropped. Never blocks the confirm flow; lazy runs (onlyUnassigned) open
+   *  the audit modal only when they actually assigned rows. */
+  const polyRunningRef = useRef(false);
+  const polyQueueRef = useRef<{ classes: PolyAssignClass[]; onlyUnassigned: boolean }[]>([]);
+  const polyUnmountedRef = useRef(false);
+  useEffect(
+    () => () => {
+      polyUnmountedRef.current = true;
+      polyAbortRef.current?.abort();
+    },
+    []
+  );
+
+  const pumpPolyQueue = () => {
+    if (polyRunningRef.current) return;
+    const job = polyQueueRef.current.shift();
+    if (!job) return;
+    polyRunningRef.current = true;
     setPolyRunning(true);
     setPolyAudit(null);
     setPolyProgress('Asignando polígonos…');
+    const controller = new AbortController();
+    polyAbortRef.current = controller;
     void (async () => {
+      let audits: PolyAssignAudit[] | null = null;
       try {
-        const audits = await runPolyAssignment(classes, {
-          onlyUnassigned,
+        audits = await runPolyAssignment(job.classes, {
+          onlyUnassigned: job.onlyUnassigned,
           signal: controller.signal,
           onProgress: (p) => setPolyProgress(`Asignado: ${p.assigned.toLocaleString()} filas (${p.classKey})`),
         });
         setPolyProgress('');
-        setPolyAudit(audits);
+        if (!job.onlyUnassigned || audits.some((a) => a.assigned > 0)) {
+          setPolyAudit(audits);
+        }
         if (audits.some((a) => a.assigned > 0)) {
           setToast({ type: 'success', message: 'Polígonos asignados — revisa el informe.' });
         }
       } catch (err) {
-        if ((err as Error).message !== 'Polygon assignment canceled') {
+        const aborted = controller.signal.aborted || (err as Error).name === 'AbortError';
+        if (!aborted) {
           setToast({ type: 'error', message: `Polygon re-assignment failed: ${(err as Error).message}` });
         }
       } finally {
-        setPolyRunning(false);
-        setPolyProgress('');
-        polyAbortRef.current = null;
+        if (!polyUnmountedRef.current) {
+          polyRunningRef.current = false;
+          setPolyRunning(false);
+          setPolyProgress('');
+          polyAbortRef.current = null;
+          pumpPolyQueue();
+        }
       }
     })();
+  };
+
+  const runPolyJob = (classes: readonly PolyAssignClass[], onlyUnassigned: boolean) => {
+    polyQueueRef.current.push({ classes: [...classes], onlyUnassigned });
+    pumpPolyQueue();
   };
 
   /** Auto-hook: only for files the map actually uses (BOUNDARY_SOURCES). */
@@ -2583,6 +2620,9 @@ function AdminPageInner() {
         type: 'success',
         message: `Confirmed ${readySqlStaged.length.toLocaleString()} SQL file(s). Database now has ${totalRows.toLocaleString()} committed properties.`,
       });
+      // Bulk "Add All" committed rows too: fill the lazily-assigned classes
+      // for the NEW rows (same as the single-file confirm path).
+      runPolyJob(['zipcodes', 'highschools', 'elementary', 'middle'], true);
     }
 
     // Process GeoJSON / non-SQL files one by one (Storage + dataset rebuild).

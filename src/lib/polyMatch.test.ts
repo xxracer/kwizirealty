@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPolyIndex, assignPoly, indexPolygonCount } from './polyMatch';
-import { cleanBoundaryName } from './engineCore';
+import { cleanBoundaryName, cleanSchoolName } from './engineCore';
 
 function square(lng0: number, lat0: number, lng1: number, lat1: number, name: string): GeoJSON.Feature {
   return {
@@ -50,4 +50,31 @@ test('indexes stay isolated per class', () => {
   const subs = buildPolyIndex([square(-95.6, 29.7, -95.5, 29.8, 'W MEMORIAL')]);
   assert.equal(assignPoly(29.75, -95.55, zips), '77024');
   assert.equal(assignPoly(29.75, -95.55, subs), 'W MEMORIAL');
+});
+
+test('NAME-only GeoJSON resolves via nameProps (highschools style)', () => {
+  // Houston_ISD features carry only `NAME` — the map reads props['NAME'].
+  const feature = square(-95.6, 29.7, -95.5, 29.8, 'Pearland ISD'); // Name key
+  const named = { ...feature, properties: { NAME: 'Pearland ISD' } } as GeoJSON.Feature;
+  const idx = buildPolyIndex([named], { nameProps: ['NAME'] });
+  assert.equal(assignPoly(29.75, -95.55, idx), cleanBoundaryName('Pearland ISD'));
+});
+
+test('empty-named features fall back like the map (generic name then Area N)', () => {
+  const feature: GeoJSON.Feature = {
+    type: 'Feature',
+    properties: {},
+    geometry: square(-95.6, 29.7, -95.5, 29.8, '').geometry,
+  };
+  const idx = buildPolyIndex([feature], { nameProps: ['NAME'] });
+  // Synthetic 'Area 1' key keeps the polygon assignable and countable.
+  assert.equal(assignPoly(29.75, -95.55, idx), cleanBoundaryName('Area 1'));
+});
+
+test('school classes clean with cleanSchoolName', () => {
+  const idx = buildPolyIndex([square(-95.6, 29.7, -95.5, 29.8, 'Rogers Middle School')], {
+    nameProps: ['Name', 'NAME'],
+    clean: cleanSchoolName,
+  });
+  assert.equal(assignPoly(29.75, -95.55, idx), cleanSchoolName('Rogers Middle School'));
 });

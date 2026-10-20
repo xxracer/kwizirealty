@@ -13,7 +13,7 @@
  * GeoJSON has 99 names shared by more than one feature — they share one key
  * and one aggregate (accepted decision, documented in the spec).
  */
-import { cleanBoundaryName, type BoundaryKey } from './engineCore';
+import { cleanBoundaryName, cleanSchoolName, getFeatureName, type BoundaryKey } from './engineCore';
 
 /** Cell size in degrees (~5.5km N-S at Houston's latitude). */
 const CELL = 0.05;
@@ -32,6 +32,16 @@ export interface PolyIndex {
   cells: Map<string, PolyEntry[]>;
   /** Every ring entry exactly once (cells hold references; this is the count). */
   entries: PolyEntry[];
+}
+
+export interface PolyIndexOptions {
+  /** The EXACT property keys the map reads for this class, in order —
+   *  e.g. zipcodes reads Zip_Code, highschools reads NAME (getGeoProp is a
+   *  case-SENSITIVE `in` check, so order and casing matter). */
+  nameProps?: string[];
+  /** The cleaner the map applies to this class's names (cleanBoundaryName
+   *  everywhere except elementary/middle, which use cleanSchoolName). */
+  clean?: (raw: unknown) => string;
 }
 
 /** Ring area |T| — sign ignored; small-enough numbers for comparisons. */
@@ -82,12 +92,37 @@ function collectOuterRings(geometry: GeoJSON.Geometry | undefined): number[][][]
   return [];
 }
 
-export function buildPolyIndex(features: GeoJSON.Feature[]): PolyIndex {
+export function buildPolyIndex(features: GeoJSON.Feature[], opts: PolyIndexOptions = {}): PolyIndex {
+  const nameProps = opts.nameProps ?? ['Name', 'name'];
+  const clean = opts.clean ?? cleanBoundaryName;
   const entries: PolyEntry[] = [];
   const cells = new Map<string, PolyEntry[]>();
-  for (const feature of features) {
+  for (let index = 0; index < features.length; index++) {
+    const feature = features[index];
     const props = (feature.properties ?? {}) as Record<string, unknown>;
-    const name = cleanBoundaryName(props.Name ?? props.name);
+    // Mirror MapComponent's buildAreaFeatures exactly: pick the class's own
+    // property (case-SENSITIVE, same `in` check), clean with the class's
+    // cleaner, and for empty names fall back to the SAME generic resolver and
+    // the SAME synthetic 'Area N' key the map renders — so the stored polygon
+    // id always equals the feature identity the user hovers.
+    let rawName: unknown = '';
+    for (const n of nameProps) {
+      if (n in props) {
+        rawName = props[n];
+        break;
+      }
+    }
+    let name = clean(rawName);
+    if (!name) {
+      const geom = feature.geometry as { type?: string; coordinates?: unknown } | null;
+      name = clean(
+        getFeatureName({
+          geometry: { type: geom?.type ?? '', coordinates: (geom?.coordinates ?? []) as never },
+          properties: props,
+        })
+      );
+    }
+    if (!name) name = cleanBoundaryName(`Area ${index + 1}`); // map parity: synthetic keys always use cleanBoundaryName
     if (!name) continue;
     for (const ring of collectOuterRings(feature.geometry)) {
       if (ring.length < 4) continue; // a ring must close

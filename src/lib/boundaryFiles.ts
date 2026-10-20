@@ -8,6 +8,7 @@
  * aggregate layers and stay untouched.
  */
 import type { BoundaryKey } from '@/lib/engine';
+import { cleanBoundaryName, cleanSchoolName } from '@/lib/engineCore';
 
 export const BOUNDARY_SOURCES: Record<BoundaryKey, string> = {
   subdivisions: 'Mapped Subdivisions.geojson',
@@ -37,3 +38,15 @@ export function polyClassForFile(name: string): PolyAssignClass | null {
   }
   return null;
 }
+
+/** How the MAP resolves each class's feature name (MapComponent
+ *  buildAreaFeatures) — the assignment must produce IDENTICAL keys:
+ *  case-SENSITIVE first-hit property, and elementary/middle clean with
+ *  cleanSchoolName while everything else uses cleanBoundaryName. */
+export const POLY_NAME_SPECS: Record<PolyAssignClass, { nameProps: string[]; clean: (raw: unknown) => string }> = {
+  subdivisions: { nameProps: ['NAME', 'Name', 'Subdivision', 'id'], clean: cleanBoundaryName },
+  zipcodes: { nameProps: ['Zip_Code'], clean: cleanBoundaryName },
+  highschools: { nameProps: ['NAME'], clean: cleanBoundaryName },
+  elementary: { nameProps: ['Name', 'NAME'], clean: cleanSchoolName },
+  middle: { nameProps: ['Name', 'NAME'], clean: cleanSchoolName },
+};

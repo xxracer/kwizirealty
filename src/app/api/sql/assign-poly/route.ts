@@ -13,7 +13,7 @@ import { NextResponse } from 'next/server';
 import { getAdminDataConnect, getAdminFirestore, dcWithTimeout } from '@/lib/firebaseAdmin';
 import { guardPublicRead } from '@/lib/server/requestGuard';
 import { buildPolyIndex, assignPoly, type PolyIndex } from '@/lib/polyMatch';
-import { BOUNDARY_SOURCES, POLY_ASSIGN_CLASSES, type PolyAssignClass } from '@/lib/boundaryFiles';
+import { BOUNDARY_SOURCES, POLY_ASSIGN_CLASSES, POLY_NAME_SPECS, type PolyAssignClass } from '@/lib/boundaryFiles';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -62,12 +62,15 @@ async function loadBoundaryText(cls: PolyAssignClass): Promise<string> {
     | { storageUrl?: string; uploadedAt?: number; size?: number }
     | undefined;
   if (!record?.storageUrl) throw new Error(`No boundary file record for ${fileName} (upload it first)`);
-  const cacheKey = `${cls}:${record.uploadedAt ?? 0}:${record.size ?? 0}`;
-  const cached = geoCache.get(cacheKey);
+  // Cache per storage URL; refuse to cache records missing size/uploadedAt —
+  // a metadata-poor record could otherwise serve stale geometry after a
+  // re-upload (warm container keeps tmp alive across calls).
+  const cacheKey = `${record.uploadedAt ?? 0}:${record.size ?? 0}:${record.storageUrl}`;
+  const cached = record.uploadedAt != null && record.size != null ? geoCache.get(cacheKey) : undefined;
   if (cached !== undefined) return cached;
   const text = await downloadDecompressed(record.storageUrl);
   if (geoCache.size > 8) geoCache.clear(); // tiny LRU — five classes max
-  geoCache.set(cacheKey, text);
+  if (record.uploadedAt != null && record.size != null) geoCache.set(cacheKey, text);
   return text;
 }
 
@@ -139,12 +142,14 @@ export async function POST(req: Request) {
   try {
     const dc = getAdminDataConnect();
     const features = parseFeatures(await loadBoundaryText(cls));
-    if (features.length === 0) {
-      // e.g. Zip.geojson currently sits at 42 bytes (empty upload) — the
-      // class has nothing to assign against; done immediately, no hang.
+    const index: PolyIndex = buildPolyIndex(features, POLY_NAME_SPECS[cls]);
+    if (index.entries.length === 0) {
+      // Empty upload (e.g. Zip.geojson currently sits at 42 bytes) OR the
+      // file's features carry no usable name property for this class — the
+      // class has nothing to assign against; done immediately, no hang, no
+      // 140-page silent walk.
       return NextResponse.json({ pagesDone: 0, assigned: 0, nextCursor: null, perPoly: {} });
     }
-    const index: PolyIndex = buildPolyIndex(features);
 
     const page = await dcWithTimeout(
       dc.executeQuery(PAGE_OP[cls], {
@@ -160,26 +165,31 @@ export async function POST(req: Request) {
     }
 
     // Assign + collect this page's per-polygon tallies (client sums pages
-    // into the audit). Unassigned rows write NO class key — backfillPolyColumns
-    // then leaves that class's column untouched via COALESCE.
+    // into the audit).
+    // - onlyUnassigned mode: rows with no polygon keep their column untouched
+    //   (they're the unassigned pool) — write ONLY assigned rows, so the run
+    //   doesn't churn every row's updated_at (ETag storms for every visitor).
+    // - full mode (boundary re-uploaded / manual re-run): write '' for rows
+    //   the NEW geometry no longer contains — a re-assignment must be able to
+    //   CLEAR stale ids; '' passes COALESCE and resets the column.
     const perPoly: Record<string, { count: number; prices: number[] }> = {};
-    const batchRows = rows.map((row) => {
+    const batchRows: { m: string; y: number; [k: string]: string | number }[] = [];
+    for (const row of rows) {
       const name = Number.isFinite(row.lat) && Number.isFinite(row.lng)
         ? assignPoly(row.lat, row.lng, index)
         : '';
+      const base = { m: row.mls_number, y: Number(row.dataset_year) };
       if (name) {
         const agg = (perPoly[name] ?? (perPoly[name] = { count: 0, prices: [] }));
         agg.count++;
         if ((row.close_price ?? 0) > 0) agg.prices.push(row.close_price as number);
+        batchRows.push({ ...base, [COLUMN_KEY[cls]]: name });
+      } else if (!onlyUnassigned) {
+        batchRows.push({ ...base, [COLUMN_KEY[cls]]: '' });
       }
-      return name
-        ? { m: row.mls_number, y: Number(row.dataset_year), [COLUMN_KEY[cls]]: name }
-        : { m: row.mls_number, y: Number(row.dataset_year) };
-    });
-    const assignedCount = batchRows.reduce(
-      (n, r) => n + (Object.keys(r).length > 2 ? 1 : 0),
-      0,
-    );
+      // onlyUnassigned && !name → skip entirely (no UPDATE, no ETag churn).
+    }
+    const assignedCount = batchRows.filter((r) => r[COLUMN_KEY[cls]] !== '').length;
 
     for (let i = 0; i < batchRows.length; i += CHUNK) {
       await dc.executeMutation('backfillPolyColumns', {

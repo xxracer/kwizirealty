@@ -16,27 +16,10 @@ export interface GeoJsonFeatureCollection {
  * Pull a human-readable area name from a GeoJSON feature. Tries common property
  * keys first, then falls back to any property that looks like a name.
  */
-export function getFeatureName(feature: GeoJsonFeature): string {
-  const props = feature?.properties || {};
-  const candidates = [
-    props.name,
-    props.NAME,
-    props.area,
-    props.AREA,
-    props.area_name,
-    props.subdivision,
-    props.SUB_NAME,
-    props.title,
-    props.id,
-  ];
-  for (const candidate of candidates) {
-    if (candidate != null && String(candidate).trim()) return String(candidate);
-  }
-  for (const value of Object.values(props)) {
-    if (value != null && typeof value === 'string' && value.trim()) return value;
-  }
-  return '';
-}
+// Re-exported from the pure core (only normalizer in the project; polyMatch
+// needs it without dragging Firebase into bundles).
+import { getFeatureName } from './engineCore';
+export { getFeatureName };
 
 export function normalizeFeatureName(name: string): string {
   return cleanBoundaryName(name || '');

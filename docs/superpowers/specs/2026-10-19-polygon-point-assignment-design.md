@@ -182,12 +182,17 @@ flows).
 8. **Staged-but-uncommitted rows are NOT backfilled** (ephemeral by design);
    the backfill only touches `upload_session_id IS NULL` rows. Upload-time
    assignment covers future staged rows as they are committed.
-9. **Deploy sequence (no broken transitional state):**
-   1) owner deploys the *schema* (adds the column; nothing reads it yet),
-   2) backfill fills the column + audit report,
-   3) owner deploys the *connector* change (GROUP BY polygon key / selection
-      ops). Before step 3 the map keeps today's behavior — no silent flip to
-      empty aggregates.
+9. **Deploy sequence (reviewer-corrected 2026-10-19):**
+   1) owner deploys the *schema* (adds the columns; nothing reads them yet),
+   2) owner deploys the *connector* (the backfill ops AND the GROUP BY swap
+      ship in the one connector unit — from this moment polygons whose rows
+      are not yet assigned show grey/empty counts; LOUD and expected, not a
+      silent wrong number),
+   3) immediately run `Re-asignar polígonos` in the CMS — the map refills
+      with exact numbers class by class as the pages commit,
+   4) verify hover values vs the audit report.
+   Note: future CSV uploads assign `subdivisions` at staging time and fill
+   zip/schools right after each commit, so step 3 is a one-time wait.
 
 ## Architecture (the how, as decided)
 

@@ -258,6 +258,39 @@ export function cleanBoundaryName(raw: unknown): string {
     .trim();
 }
 
+/**
+ * The map's generic feature-name resolver (moved here from geojsonUpload so
+ * the pure core stays the ONLY normalizer — polyMatch's point-in-polygon
+ * assignment must produce the exact same keys without dragging Firebase into
+ * a node bundle). Candidates first, then any non-empty string property.
+ */
+export function getFeatureName(
+  feature?: {
+    properties?: Record<string, unknown> | null;
+    geometry?: unknown;
+  } | null
+): string {
+  const props = feature?.properties || {};
+  const candidates = [
+    props.name,
+    props.NAME,
+    props.area,
+    props.AREA,
+    props.area_name,
+    props.subdivision,
+    props.SUB_NAME,
+    props.title,
+    props.id,
+  ];
+  for (const candidate of candidates) {
+    if (candidate != null && String(candidate).trim()) return String(candidate);
+  }
+  for (const value of Object.values(props)) {
+    if (value != null && typeof value === 'string' && value.trim()) return value;
+  }
+  return '';
+}
+
 export function cleanSchoolName(raw: unknown): string {
   let v = String(raw || '').toUpperCase().trim();
   if (!v || v === 'NA' || v === 'N/A' || v === 'NONE' || v === 'NULL' || v === 'UNKNOWN') return '';

@@ -50,8 +50,10 @@ async function assignOneClass(
   let guard = 0;
 
   for (;;) {
-    if (signal?.aborted) throw new Error('Polygon assignment canceled');
-    if (cursor && ++guard > 200) throw new Error('assign-poly made no progress (cursor echo)');
+    if (signal?.aborted) throw new Error('assign-poly cancelled');
+    // Hard ceiling only (echo-stall detection is the equality check below);
+    // 2000 pages ≈ 10M rows — a class bigger than that is a different bug.
+    if (cursor && ++guard > 2000) throw new Error('assign-poly exceeded the page ceiling');
     const res = await fetch('/api/sql/assign-poly', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
