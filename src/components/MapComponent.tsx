@@ -14,6 +14,7 @@ import { fetchJsonAutoGz } from '@/lib/fetchJsonAuto';
 import { getFeatureName, normalizeGeoJsonCrs } from '@/lib/geojsonUpload';
 import { readGeoCache, writeGeoCache, dropGeoCache } from '@/lib/csvCache';
 import { buildBoundaryAliasIndex, prefetchBoundaryNameMap, getZipVerifiedPolyResolver, getGeoAssignment, type BoundaryAliasIndex } from '@/lib/boundaryNameMatch';
+import { BOUNDARY_SOURCES } from '@/lib/boundaryFiles';
 
 // navigator.deviceMemory reports the RAM tier in whole GB (Chrome). Machines
 // with ≤4 GB get lean constants everywhere: fewer point markers, and the
@@ -37,16 +38,6 @@ function LassoIcon({ className = 'w-4 h-4' }: { className?: string }) {
     </svg>
   );
 }
-
-const BOUNDARY_SOURCES: Record<BoundaryKey, string> = {
-  subdivisions: 'Mapped Subdivisions.geojson',
-  zipcodes: 'Zip.geojson',
-  highschools: 'Houston_ISD.geojson',
-  elementary: 'Elementary School ISD.geojson',
-  middle: 'Middle School ISD.geojson',
-  neighborhoods: 'Mapped Subdivisions.geojson',
-  areas: '',
-};
 
 /** Firestore timestamps arrive as numbers or ISO strings — normalize to ms. */
 function uploadedAtMs(v: unknown): number {
