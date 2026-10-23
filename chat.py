@@ -181,11 +181,12 @@ def _match_areas(boundary: str, terms: list[str], limit: int = 8) -> list[str]:
     seen = set()
     for f in features:
         props = f.get("properties") or {}
-        raw = None
-        for key in ("NAME", "Name", "Zip_Code", "Subdivision", "name"):
-            if props.get(key) not in (None, ""):
-                raw = props[key]
-                break
+        raw = props.get("name")
+        if raw in (None, ""):
+            for key in ("NAME", "Name", "Zip_Code", "Subdivision"):
+                if props.get(key) not in (None, ""):
+                    raw = props[key]
+                    break
         name = fd.clean_boundary_name(raw)
         if name and name not in seen:
             seen.add(name)

@@ -94,12 +94,15 @@ def _filter_sql(f: dict) -> tuple[str, list]:
     _between("baths", _v("bathsMin"), _v("bathsMax"))
     _between("lot_size", _v("lotSizeMin"), _v("lotSizeMax"))
 
-    # List-to-sale sanity. A row with no list price carries no ratio, so it
-    # is kept (same comment as the reference implementation).
-    parts.append(
-        "(list_price IS NULL OR list_price <= 0 OR "
-        f"(close_price * 100.0 / list_price) BETWEEN {_v('l2sMin')} AND {_v('l2sMax')})"
-    )
+    # List-to-sale: only filter when the user actually narrows the range.
+    # The old app (and the CSVs) count every closed sale by default; forcing
+    # 50–150 here silently dropped legitimate outliers (e.g. a 152.6% sale),
+    # which is why an area showed 913 instead of 915 properties.
+    if _v("l2sMin") > d["l2sMin"] or _v("l2sMax") < d["l2sMax"]:
+        parts.append(
+            "(list_price IS NULL OR list_price <= 0 OR "
+            f"(close_price * 100.0 / list_price) BETWEEN {_v('l2sMin')} AND {_v('l2sMax')})"
+        )
 
     # Days on market: cdom when set, otherwise dom.
     dom_expr = "coalesce(nullif(cdom, 0), dom, 0)"
@@ -266,6 +269,31 @@ def boundary_features(boundary: str) -> list[dict]:
         valid.append(feat)
     if skipped:
         print(f"[engine] {boundary}: {len(valid)} features kept, {skipped} dropped")
+
+    # Two different polygons often share a name (e.g. two "RIVERSIDE PARK").
+    # Grouping by that name merged their properties and gave both areas the
+    # same number. Give duplicates a stable suffix (their ZIP when available)
+    # so each polygon keeps its own stats.
+    from collections import Counter
+
+    base_names = [fd.clean_boundary_name(_feature_name(f)) for f in valid]
+    totals = Counter(base_names)
+    seen = Counter()
+    for feat, base in zip(valid, base_names):
+        name = base
+        if base and totals[base] > 1:
+            seen[base] += 1
+            props = feat.setdefault("properties", {})
+            zipc = props.get("Zip_Code")
+            suffix = f" ({zipc})" if zipc not in (None, "") else f" #{seen[base]}"
+            candidate = base + suffix
+            if candidate in totals:  # the ZIP alone was not unique
+                candidate = base + f" #{seen[base]}"
+            name = candidate
+            totals[name] += 1
+        props = feat.setdefault("properties", {})
+        props["base_name"] = base
+        props["name"] = name
     features = valid
 
     with _geom_lock:
@@ -418,7 +446,7 @@ def geojson_payload(boundary: str) -> dict:
     for feat in boundary_features(boundary):
         props = feat.get("properties") or {}
         raw = None
-        for key in ("NAME", "Name", "Zip_Code", "Subdivision", "name"):
+        for key in ("name", "NAME", "Name", "Zip_Code", "Subdivision"):
             if props.get(key) not in (None, ""):
                 raw = props[key]
                 break
@@ -442,7 +470,7 @@ def geojson_payload(boundary: str) -> dict:
 
 def _feature_name(feature: dict) -> str:
     props = feature.get("properties") or {}
-    for key in ("NAME", "Name", "Zip_Code", "Subdivision", "name"):
+    for key in ("name", "NAME", "Name", "Zip_Code", "Subdivision"):
         val = props.get(key)
         if val not in (None, ""):
             return str(val)
@@ -452,10 +480,10 @@ def _feature_name(feature: dict) -> str:
 def _build_index(boundary: str):
     """(STRtree, geoms, names) for a boundary class."""
     features = boundary_features(boundary)
-    geoms, names = [], []
+    geoms, names, feature_ids, base_names = [], [], [], []
     import shapely
 
-    for feat in features:
+    for feature_id, feat in enumerate(features):
         try:
             geom = shape(feat["geometry"])
         except Exception:  # noqa: BLE001
@@ -477,11 +505,15 @@ def _build_index(boundary: str):
         name = fd.clean_boundary_name(_feature_name(feat))
         if not name:
             continue
+        props = feat.get("properties") or {}
+        base = fd.clean_boundary_name(props.get("base_name") or name)
         geoms.append(geom)
         names.append(name)
+        feature_ids.append(feature_id)
+        base_names.append(base)
     if not geoms:
-        return None, [], []
-    return STRtree(geoms), geoms, names
+        return None, [], [], [], []
+    return STRtree(geoms), geoms, names, feature_ids, base_names
 
 
 _index_cache: dict[str, tuple] = {}
@@ -492,15 +524,15 @@ def _get_index(boundary: str):
     with _index_lock:
         if boundary in _index_cache:
             return _index_cache[boundary]
-    tree, geoms, names = _build_index(boundary)
+    tree, geoms, names, fids, bases = _build_index(boundary)
     with _index_lock:
-        _index_cache[boundary] = (tree, geoms, names)
-    return tree, geoms, names
+        _index_cache[boundary] = (tree, geoms, names, fids, bases)
+    return tree, geoms, names, fids, bases
 
 
 def assign_points(boundary: str, lats: list, lngs: list) -> list[str]:
     """Assign each point to a polygon name (smallest containing polygon wins)."""
-    tree, geoms, names = _get_index(boundary)
+    tree, geoms, names, _fids, _bases = _get_index(boundary)
     if tree is None:
         return []
     out = []
@@ -530,7 +562,13 @@ def assign_points(boundary: str, lats: list, lngs: list) -> list[str]:
 # ── Aggregates ───────────────────────────────────────────────────────────────
 
 _METRIC_EXPR = {
-    "__l2s": "CASE WHEN list_price > 0 THEN (close_price * 100.0 / list_price) END",
+    # Sanitized inside the metric: corrupt list prices (e.g. $449) must not
+    # skew the ratio, but the row itself still counts as a sale elsewhere.
+    "__l2s": (
+        "CASE WHEN list_price > 0 "
+        "AND (close_price * 100.0 / list_price) BETWEEN 10 AND 1000 "
+        "THEN (close_price * 100.0 / list_price) END"
+    ),
     "__dom": "(coalesce(cdom,0) + coalesce(dom,0))",
     "__r2s": "CASE WHEN close_price > 0 AND listing_type = 'rent' THEN (close_price * 12.0) / close_price END",
 }

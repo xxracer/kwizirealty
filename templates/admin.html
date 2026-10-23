@@ -876,6 +876,12 @@
     try {
       const s = await api(`/api/admin/db-stats?section=${encodeURIComponent(section)}`);
       $('db-stats-total').textContent = fmt(s.total);
+      // "Uploaded here" counts FILE RECORDS. When the originals were removed
+      // but their rows are live, say so instead of "nothing uploaded".
+      if (($('sec-file-count').textContent || '0') === '0' && s.total > 0) {
+        $('sec-file-meta').textContent =
+          `Original files are no longer in Storage, but ${fmt(s.total)} rows are live in the database.`;
+      }
       $('db-stats-years').innerHTML = (s.byYear || []).length
         ? s.byYear.map((r) => `<tr><td>${r.year || 'undated'}</td><td>${fmt(r.rows)}</td></tr>`).join('')
         : '<tr><td colspan="2" class="muted">No rows in the database for this section yet.</td></tr>';
