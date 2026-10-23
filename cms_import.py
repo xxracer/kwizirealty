@@ -362,6 +362,20 @@ def discard_session(session_id: str) -> int:
     )
 
 
+def commit_all() -> int:
+    """Emergency tool: publish every staged row."""
+    return fd.sql_exec(
+        "UPDATE properties SET upload_session_id = NULL WHERE upload_session_id IS NOT NULL"
+    )
+
+
+def discard_all() -> int:
+    """Emergency tool: delete every staged row."""
+    return fd.sql_exec(
+        "DELETE FROM properties WHERE upload_session_id IS NOT NULL"
+    )
+
+
 def pending_sessions() -> list[dict]:
     return [
         {"sessionId": r["sid"], "rows": int(r["n"] or 0)}

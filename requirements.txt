@@ -5,3 +5,4 @@ python-multipart>=0.0.9
 shapely>=2.0
 pyogrio>=0.9
 google-auth>=2.30
+requests>=2.31

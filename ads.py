@@ -77,6 +77,12 @@ def set_status(ad_id: str, status: str) -> None:
     fd.fs_write("ads", ad_id, {"status": status}, merge=True)
 
 
+def set_placement(ad_id: str, placement: str) -> None:
+    if placement not in PLACEMENTS:
+        raise HTTPException(status_code=400, detail="Unknown placement")
+    fd.fs_write("ads", ad_id, {"placement": placement}, merge=True)
+
+
 def delete_ad(ad_id: str) -> None:
     ad = next((a for a in list_ads() if a.get("_id") == ad_id), None)
     fd.fs_delete("ads", ad_id)
