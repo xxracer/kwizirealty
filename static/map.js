@@ -172,6 +172,23 @@
     });
   }
 
+  // Center the view on the areas that actually exist (the old app did the
+  // same), instead of a fixed Houston center.
+  function fitToAreas() {
+    if (!state.map || !state.features.length) return;
+    const bounds = new maplibregl.LngLatBounds();
+    const extend = (coords) => {
+      if (!Array.isArray(coords)) return;
+      if (typeof coords[0] === 'number') { bounds.extend([coords[0], coords[1]]); return; }
+      coords.forEach(extend);
+    };
+    state.features.forEach((f) => extend(f.geometry && f.geometry.coordinates));
+    if (bounds.isEmpty()) return;
+    state.map.fitBounds(bounds, { padding: 24, maxZoom: 10.5, duration: 0 });
+    // Stay inside the Texas lock: fitBounds can go below the configured zoom.
+    if (state.map.getZoom() < 8) state.map.setZoom(8);
+  }
+
   const popup = () => (state.popup = state.popup || new maplibregl.Popup({
     closeButton: false, closeOnClick: false, maxWidth: '280px',
   }));
@@ -248,6 +265,7 @@
     state.loadedBoundary = boundary;
     if (state.map && state.map.getSource('areas')) {
       state.map.getSource('areas').setData({ type: 'FeatureCollection', features: state.features });
+      fitToAreas();
     }
     hideOverlay();
     return state.features.length;
@@ -1016,6 +1034,18 @@
         el.innerHTML = `<span class="sponsored">Sponsored</span><a href="${ad.targetUrl || '#'}" target="_blank" rel="noopener">${media}</a>`;
         el.hidden = false;
       });
+
+      // The map fills the screen when there are no ads; each active banner
+      // takes height back and each skyscraper takes width.
+      document.body.classList.toggle('ads-top', by.top.length > 0);
+      document.body.classList.toggle('ads-bottom', by.bottom.length > 0);
+      document.body.classList.toggle('ads-side', by.corner.length > 0 || by.right.length > 0);
+      if (state.map) {
+        setTimeout(() => {
+          state.map.resize();
+          fitToAreas();
+        }, 60);
+      }
     }).catch(() => {});
   }
 

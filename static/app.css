@@ -359,13 +359,22 @@ select[multiple] option { padding: .2rem .3rem; white-space: nowrap; overflow: h
 .premium-locked { opacity: .35; pointer-events: none; position: relative; }
 
 /* ── map card ───────────────────────────────────────────────────────────── */
+/* The map fills the viewport by default. Each active banner takes ~96 px
+   from the height; the side skyscrapers take their width from the row. */
 .map-card {
-  position: relative; min-width: 0; height: 65vh; max-height: 760px;
+  position: relative; min-width: 0; flex: 1 1 auto;
+  height: calc(100vh - 170px); min-height: 480px; max-height: none;
 }
-@media (min-width: 640px) {
-  /* `flex: 1` sets flex-basis:0, which would override the mobile height in
-     the column flex container — apply it only where the column has a height. */
-  .map-card { height: auto; min-height: 420px; flex: 1; }
+@media (max-width: 639px) {
+  .map-card { height: calc(100vh - 235px); min-height: 420px; }
+}
+body.ads-top .map-card,
+body.ads-bottom .map-card { height: calc(100vh - 266px); }
+body.ads-top.ads-bottom .map-card { height: calc(100vh - 362px); }
+@media (max-width: 639px) {
+  body.ads-top .map-card,
+  body.ads-bottom .map-card { height: calc(100vh - 331px); }
+  body.ads-top.ads-bottom .map-card { height: calc(100vh - 427px); }
 }
 .map-shell {
   position: absolute; inset: 0; background: var(--panel);

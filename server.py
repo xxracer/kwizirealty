@@ -515,6 +515,13 @@ def admin_files(request: Request, category: str | None = None):
     return JSONResponse({"files": admin.list_files(category)})
 
 
+@app.get("/api/admin/file-preview")
+def admin_file_preview(request: Request, id: str = ""):
+    """The CMS Eye: the first rows of an uploaded CSV / GeoJSON stats."""
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.file_preview(id))
+
+
 @app.post("/api/admin/delete-file")
 async def admin_delete_file(request: Request):
     admin.verify_admin(request.headers.get("authorization"))
