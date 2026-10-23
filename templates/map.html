@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Market Explorer — ResDogs</title>
+<meta name="description" content="ResDogs Market Explorer — explore Houston subdivisions, ZIP codes and school zones with live sales, rent and tax data."/>
+<link rel="icon" href="/static/red-dogs-logo.png"/>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"/>
+<link rel="stylesheet" href="/static/app.css?v={{ v }}"/>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── header ─────────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-left">
+      <a class="h-back" href="/">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+        <span class="lbl">Back</span>
+      </a>
+      <div class="h-sep"></div>
+      <div class="logo-tile">K</div>
+      <h1 class="h-title">Real-Estate Analytics</h1>
+    </div>
+    <div class="header-right">
+      <div id="header-status" class="status-loading" hidden>
+        <span class="spinner"></span><span>Loading market data…</span>
+      </div>
+      <button class="header-btn" id="btn-tour" title="Show guided tour">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+        <span class="lbl">Tour</span>
+      </button>
+      <button class="header-btn" id="btn-save" title="Save Report">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>
+        <span class="lbl">Save</span>
+      </button>
+      <a class="header-btn" id="signin-btn" href="/login?next=/map" title="Sign in" hidden>Sign in</a>
+      <button class="header-btn" id="btn-account" title="My Account">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span class="lbl">Account</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── summary bar ────────────────────────────────────────────────────── -->
+  <div class="summary">
+    <div class="summary-item">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>
+      <span class="summary-label">Boundary</span>
+      <span class="summary-value" id="sum-boundary">Subdivisions</span>
+    </div>
+    <div class="summary-sep"></div>
+    <div class="summary-item">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+      <span class="summary-label">Metric</span>
+      <span class="summary-value" id="sum-metric">Sales Price</span>
+    </div>
+    <div class="summary-sep"></div>
+    <div class="summary-item">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      <span class="summary-label">Period</span>
+      <span class="summary-value" id="sum-period">All data</span>
+    </div>
+    <div class="summary-sep"></div>
+    <div class="summary-item">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>
+      <span class="summary-label">Schools</span>
+      <span class="summary-value" id="sum-schools" style="color:#d1d5db">None</span>
+    </div>
+    <div class="summary-right">
+      <span><b id="sum-props">—</b> properties</span>
+      <span><b id="sum-areas">—</b> areas</span>
+      <span><b id="sum-selected">0</b> selected</span>
+    </div>
+  </div>
+
+  <!-- ── mobile filter toggle ───────────────────────────────────────────── -->
+  <button class="sidebar-toggle" id="sidebar-toggle">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+    <span id="toggle-label">Show filters</span>
+    <span class="badge" id="toggle-badge" hidden>0</span>
+  </button>
+  <div class="backdrop" id="backdrop" hidden></div>
+
+  <div class="workspace">
+    <!-- ── sidebar ──────────────────────────────────────────────────────── -->
+    <aside class="sidebar" id="sidebar">
+      <div class="plan-banner" id="plan-banner" hidden>
+        <b>Free preview</b>
+        You can explore the map, but filters and reports need an account.
+        <a href="/login?next=/map">Sign in</a>
+      </div>
+      <div class="sheet-head">
+        <div style="display:flex;align-items:center;gap:.5rem">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+          <span class="sheet-title">Filters</span>
+          <span class="badge" id="sheet-badge" hidden>0</span>
+        </div>
+        <button class="icon-btn" id="sidebar-close" aria-label="Close filters">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- 1. Search -->
+      <section class="section" data-section="search">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <h3 class="section-title">Search</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body" hidden>
+          <div style="display:flex;align-items:center;gap:.5rem;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.06);border-radius:.75rem;padding:.5rem .75rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input type="text" id="search-input" placeholder="Area, address or ZIP…" style="background:transparent;border:none;flex:1;padding:0" autocomplete="off"/>
+            <button id="search-go" style="background:#2563eb;color:#fff;border:none;border-radius:.375rem;padding:.375rem .75rem;font-size:12px;font-weight:500;cursor:pointer">Go</button>
+          </div>
+          <div id="search-results" style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem"></div>
+        </div>
+      </section>
+
+      <!-- 2. Geographic Boundary -->
+      <section class="section" data-section="boundary">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>
+            <h3 class="section-title">Geographic Boundary</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body" hidden>
+          <div class="seg" id="boundary-seg">
+            {% for b in boundaries %}
+            <button class="seg-btn{% if b.key == default_boundary %} active{% endif %}" data-boundary="{{ b.key }}" title="{{ b.name }}{% if b.premium %} (Premium){% endif %}">
+              <span class="full">{{ b.name }}</span><span class="short">{{ b.short }}</span>
+              {% if b.premium %}<span class="prem">★<span class="p-full">PREM</span></span>{% endif %}
+            </button>
+            {% endfor %}
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Market Metric -->
+      <section class="section" data-section="metric">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+            <h3 class="section-title">Market Metric</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body" hidden>
+          <div class="select-wrap">
+            <button class="select-trigger" id="metric-trigger">
+              <span id="metric-label">{{ metrics[0].label }}</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="select-panel" id="metric-panel" hidden>
+              {% for m in metrics %}
+              <button class="select-opt{% if m.key == default_metric %} active{% endif %}" data-metric="{{ m.key }}">{{ m.label }}</button>
+              {% endfor %}
+            </div>
+          </div>
+          <p class="hint">⌄ {{ metrics|length }} metrics available</p>
+        </div>
+      </section>
+
+      <!-- 4. Close Period -->
+      <section class="section" data-section="period">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            <h3 class="section-title">Close Period</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body">
+          <div class="select-wrap">
+            <button class="select-trigger" id="period-trigger">
+              <span id="period-label">{{ periods[0].label }}</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="select-panel" id="period-panel" hidden>
+              {% for p in periods %}
+              <button class="select-opt{% if p.key == default_period %} active{% endif %}" data-period="{{ p.key }}">{{ p.label }}</button>
+              {% endfor %}
+            </div>
+          </div>
+          <p class="hint">⌄ {{ periods|length }} time periods available — years {{ years_from }} through {{ years_to }}</p>
+        </div>
+      </section>
+
+      <!-- 5. Property Filters -->
+      <section class="section" data-section="property">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg>
+            <h3 class="section-title">Property Filters</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body" hidden>
+          <div style="display:flex;flex-direction:column;gap:1rem">
+            {% for rc in range_controls[:2] %}
+            <div data-range="{{ rc.low }}">
+              <div class="range-label"><span>{{ rc.label }}</span><span class="range-value">{{ 'Any' }}</span></div>
+              <div class="range-pair">
+                <input type="range" class="kwizi-range" data-key="{{ rc.low }}" min="{{ rc.min }}" max="{{ rc.max }}" step="{{ rc.step }}" value="{{ rc.min }}"/>
+                <input type="range" class="kwizi-range" data-key="{{ rc.high }}" min="{{ rc.min }}" max="{{ rc.max }}" step="{{ rc.step }}" value="{{ rc.max }}"/>
+              </div>
+            </div>
+            {% endfor %}
+            <div class="grid2">
+              <div>
+                <span class="label">Beds</span>
+                <select data-filter="bedsMin" class="sm">
+                  <option value="0">Any</option>
+                  {% for n in range(1,7) %}<option value="{{ n }}">{{ n }}+</option>{% endfor %}
+                </select>
+              </div>
+              <div>
+                <span class="label">Baths</span>
+                <select data-filter="bathsMin" class="sm">
+                  <option value="0">Any</option>
+                  {% for n in range(1,6) %}<option value="{{ n }}">{{ n }}+</option>{% endfor %}
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 6. Advanced Filters -->
+      <section class="section" data-section="advanced">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg>
+            <h3 class="section-title">Advanced Filters</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body" hidden>
+          <div style="display:flex;flex-direction:column;gap:1.25rem">
+            {% for rc in range_controls[2:] %}
+            <div data-range="{{ rc.low }}">
+              <div class="range-label"><span>{{ rc.label }}</span><span class="range-value">Any</span></div>
+              <div class="range-pair">
+                <input type="range" class="kwizi-range" data-key="{{ rc.low }}" min="{{ rc.min }}" max="{{ rc.max }}" step="{{ rc.step }}" value="{{ rc.min }}"/>
+                <input type="range" class="kwizi-range" data-key="{{ rc.high }}" min="{{ rc.min }}" max="{{ rc.max }}" step="{{ rc.step }}" value="{{ rc.max }}"/>
+              </div>
+            </div>
+            {% endfor %}
+            <div class="grid2">
+              <div>
+                <span class="label">Property Type</span>
+                <select id="sel-property-type" class="sm"><option value="any">All Types</option></select>
+              </div>
+              <div>
+                <span class="label">Pool</span>
+                <select data-filter="pool">
+                  <option value="any">Any</option>
+                  <option value="yes">Yes</option>
+                  <option value="no">No</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <span class="label">Cities <span class="opt-count" id="count-cities"></span></span>
+              <select id="sel-cities" class="sm" multiple size="8"></select>
+            </div>
+            <div style="padding-top:1rem;border-top:1px solid rgba(255,255,255,.06)">
+              <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem;color:#c084fc">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>
+                <span class="section-title">School Filters</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:1rem">
+                <div>
+                  <span class="label">School District <span class="opt-count" id="count-districts"></span></span>
+                  <select id="sel-districts" class="sm" multiple size="8"></select>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:.75rem">
+                  <div><span class="label">Elementary <span class="opt-count" id="count-elementary"></span></span><select id="sel-elementary" class="sm" multiple size="5"></select></div>
+                  <div><span class="label">Middle <span class="opt-count" id="count-middle"></span></span><select id="sel-middle" class="sm" multiple size="5"></select></div>
+                  <div><span class="label">District <span class="opt-count" id="count-high"></span></span><select id="sel-high" class="sm" multiple size="5"></select></div>
+                </div>
+                {% for rk, rl in [('elementaryRating','Elem Rating'),('middleRating','Middle Rating'),('highRating','High Rating')] %}
+                <div>
+                  <span class="label">{{ rl }}</span>
+                  <div style="display:flex;flex-wrap:wrap;gap:.25rem" data-rating="{{ rk }}">
+                    {% for g in rating_options %}<button class="chip" data-grade="{{ g }}">{{ g }}</button>{% endfor %}
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. Scale Range -->
+      <section class="section" data-section="scale">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+            <h3 class="section-title">Scale Range</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body" hidden>
+          <div style="display:flex;flex-direction:column;gap:.75rem">
+            <label class="check" style="justify-content:space-between">
+              <span style="display:flex;align-items:center;gap:.5rem;font-weight:600;color:#fff">
+                <input type="checkbox" id="scale-on"/> Scale Range on
+              </span>
+              <span id="scale-off-hint" style="font-size:10px;color:#6b7280">map = solid blue</span>
+            </label>
+            <div id="scale-controls" hidden>
+              <p style="font-size:10px;color:#6b7280;line-height:1.5;margin:.25rem 0 .75rem">
+                Controls the color scale of the map: each area is colored by where its metric value falls between Min and Max. With Auto scale on, Min/Max fit the current data automatically. Drag the handles on the bar to shrink or expand the range, or drag them back out to expand it again.
+              </p>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem">
+                <label class="check"><input type="checkbox" id="auto-scale" checked/> Auto scale</label>
+                <button id="reverse-colors" class="link-btn">Reverse colors</button>
+              </div>
+              <div class="scale-bar" id="scale-bar">
+                <div class="scale-dim l" id="scale-dim-l" hidden></div>
+                <div class="scale-dim r" id="scale-dim-r" hidden></div>
+                <div class="scale-handle" id="scale-handle-min" style="left:0%"></div>
+                <div class="scale-handle" id="scale-handle-max" style="left:100%"></div>
+              </div>
+              <div class="scale-ends"><span id="scale-min-label">—</span><span id="scale-max-label">—</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 8. Map Layers -->
+      <section class="section" data-section="layers">
+        <button class="section-head" data-toggle>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fb7185" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+            <h3 class="section-title">Map Layers</h3>
+          </div>
+          <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="section-body" hidden>
+          <div style="display:flex;flex-direction:column;gap:.5rem">
+            <button class="layer-btn" id="layer-sales">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01M16 6h.01M12 6h.01M12 10h.01M12 14h.01M16 10h.01M16 14h.01M8 10h.01M8 14h.01"/></svg>
+              <span>Current Sales</span>
+            </button>
+            <button class="layer-btn" id="layer-rentals">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01M16 6h.01M12 6h.01M12 10h.01M12 14h.01M16 10h.01M16 14h.01M8 10h.01M8 14h.01"/></svg>
+              <span>Est. Rentals</span>
+            </button>
+            <button class="layer-btn" id="layer-flood">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+              <span>Flood Zones</span>
+            </button>
+            <p id="flood-hint" style="font-size:10px;color:#6b7280;line-height:1.5;padding:0 .25rem" hidden>
+              Flood Hazard Areas via FEMA NFHL. Zoom in to city level for the zones to render.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <button class="reset-btn" id="reset-all">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        Reset all filters
+      </button>
+    </aside>
+
+    <!-- ── main ──────────────────────────────────────────────────────────── -->
+    <main class="main-col">
+      <div class="main-inner">
+        <div class="ad-slot ad-banner" id="ad-top" hidden></div>
+        <div class="map-row">
+          <div class="ad-slot ad-side" id="ad-left" hidden></div>
+          <div class="map-card">
+          <div class="map-shell">
+            <div class="map-toolbar">
+              <div class="map-toolbar-left">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 7-8.5 8.5-5-5L2 17"/><path d="M16 7h6v6"/></svg>
+                <span class="t">Interactive Map</span>
+                <span class="c" id="map-count">Loading market data…</span>
+              </div>
+              <div class="map-toolbar-right">
+                <label class="check"><input type="checkbox" id="multi-select"/> Multi-select</label>
+              </div>
+            </div>
+
+            <div class="map-host">
+              <div id="map"></div>
+
+              <div class="map-tools">
+                <div class="tool-wrap">
+                  <button class="tool-btn active" id="tool-select" aria-label="Select">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="m13 13 6 6"/></svg>
+                  </button>
+                  <div class="tool-tip"><b>Select</b><span> · Click polygons to select them</span></div>
+                </div>
+                <div class="tool-wrap">
+                  <button class="tool-btn" id="tool-box" aria-label="Box">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+                  </button>
+                  <div class="tool-tip"><b>Box</b><span> · Drag a rectangle to select areas inside it</span></div>
+                </div>
+                <div class="tool-wrap">
+                  <button class="tool-btn" id="tool-lasso" aria-label="Lasso">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5c3-4 12-4 15 0s0 9-6 9c-3 0-5-1-5-3s2-3 4-3 4 2 4 4c0 4-6 7-10 5"/></svg>
+                  </button>
+                  <div class="tool-tip"><b>Lasso</b><span> · Draw a freehand shape to select areas inside</span></div>
+                </div>
+                <button class="tool-btn danger" id="tool-clear" title="Clear selection">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+                <button class="tool-btn pill" id="tool-report" hidden>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+                  <span id="report-btn-label">Generate Report</span>
+                </button>
+              </div>
+
+              <button class="apply-fab" id="apply-filters" hidden>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                Apply Filters
+                <span class="pulse-dot"></span>
+              </button>
+
+              <div class="tool-hint" id="tool-hint" hidden></div>
+              <div class="map-overlay" id="map-overlay" hidden>
+                <div class="overlay-card">
+                  <div class="big-spinner"></div>
+                  <div class="t" id="overlay-title">Loading Data...</div>
+                  <div class="d" id="overlay-desc">Fetching the market dataset for the map.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="ad-slot ad-side" id="ad-right" hidden></div>
+        </div>
+        <div class="ad-slot ad-banner" id="ad-bottom" hidden></div>
+
+        <!-- ── report ──────────────────────────────────────────────────── -->
+        <div class="report" id="report" hidden>
+          <div class="report-root">
+            <div class="report-head">
+              <div class="report-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+                <h2>Detailed Market Report</h2>
+                <span class="rows-badge">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+                  <span id="report-rows">0 rows</span>
+                </span>
+              </div>
+              <div class="report-actions">
+                <div class="report-sel" id="report-sel">All visible areas</div>
+                <button class="link-btn" id="report-back">Back to filters</button>
+                <button class="export-btn" id="report-print" title="Export as PDF">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                  Export PDF
+                </button>
+              </div>
+            </div>
+
+            <div class="report-grid two">
+              <div class="card accent" style="color:#60a5fa">
+                <div class="card-head">
+                  <div style="display:flex;align-items:center;gap:.5rem">
+                    <div class="card-icon" style="color:#60a5fa"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+                    <h3 class="card-title">Quick Stats</h3>
+                  </div>
+                </div>
+                <div class="card-body"><div class="tiles four" id="quick-stats"></div></div>
+              </div>
+
+              <div class="card accent" style="color:#f472b6">
+                <div class="card-head">
+                  <div style="display:flex;align-items:center;gap:.5rem">
+                    <div class="card-icon" style="color:#f472b6"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+                    <h3 class="card-title">Market Health</h3>
+                  </div>
+                </div>
+                <div class="card-body"><div id="market-health"></div></div>
+              </div>
+            </div>
+
+            <div class="card accent" style="color:#34d399">
+              <div class="card-head">
+                <div style="display:flex;align-items:center;gap:.5rem">
+                  <div class="card-icon" style="color:#34d399"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 17.5v-11"/></svg></div>
+                  <h3 class="card-title">Sales · Tax · Rent</h3>
+                </div>
+              </div>
+              <div class="card-body" id="sales-tax-rent"></div>
+            </div>
+
+            <div class="report-grid two">
+              <div class="card accent" style="color:#22d3ee">
+                <div class="card-head">
+                  <div style="display:flex;align-items:center;gap:.5rem">
+                    <div class="card-icon" style="color:#22d3ee"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+                    <h3 class="card-title">Time Series</h3>
+                  </div>
+                </div>
+                <div class="card-body" id="time-series"></div>
+              </div>
+
+              <div class="card accent" style="color:#34d399">
+                <div class="card-head">
+                  <div style="display:flex;align-items:center;gap:.5rem">
+                    <div class="card-icon" style="color:#34d399"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 7-8.5 8.5-5-5L2 17"/><path d="M16 7h6v6"/></svg></div>
+                    <h3 class="card-title">Top Areas</h3>
+                  </div>
+                </div>
+                <div class="card-body" id="top-areas"></div>
+              </div>
+            </div>
+
+            <div class="card accent" style="color:#22d3ee">
+              <div class="card-head">
+                <div style="display:flex;align-items:center;gap:.5rem">
+                  <div class="card-icon" style="color:#22d3ee"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01M16 6h.01M12 6h.01M12 10h.01M12 14h.01"/></svg></div>
+                  <h3 class="card-title">Year Built</h3>
+                </div>
+              </div>
+              <div class="card-body" id="year-built"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>window.RESDOGS = {{ bootstrap|tojson }};</script>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script type="module" src="/static/account.js?v={{ v }}"></script>
+<script src="/static/map.js?v={{ v }}"></script>
+</body>
+</html>

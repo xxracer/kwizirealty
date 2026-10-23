@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Admin — ResDogs</title>
+<meta name="description" content="ResDogs CMS — manage the dataset, boundaries and users."/>
+<link rel="icon" href="/static/red-dogs-logo.png"/>
+<link rel="stylesheet" href="/static/app.css?v={{ v }}"/>
+<style>
+  .cms { min-height: 100vh; background: #0a0c10; color: #fff; }
+  .cms-top {
+    background: #121620; border-bottom: 1px solid rgba(255,255,255,.06);
+    padding: .75rem 1rem; display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 30;
+  }
+  .cms-brand { display: flex; align-items: center; gap: .6rem; }
+  .cms-brand img { width: 2rem; height: 2rem; border-radius: .4rem; }
+  .cms-brand b { font-size: 1rem; }
+  .cms-brand span { color: #9ca3af; font-size: .8rem; }
+  .cms-layout { display: flex; min-height: calc(100vh - 57px); }
+  .cms-nav {
+    width: 250px; flex-shrink: 0; background: #0d1016; border-right: 1px solid rgba(255,255,255,.06);
+    padding: .75rem; display: flex; flex-direction: column; gap: .2rem;
+  }
+  @media (max-width: 820px) { .cms-nav { width: 100%; } .cms-layout { flex-direction: column; } }
+  .cms-nav-item {
+    display: flex; align-items: center; gap: .6rem; padding: .55rem .65rem; border-radius: .6rem;
+    background: none; border: none; color: #d1d5db; cursor: pointer; text-align: left; width: 100%;
+    font-size: .82rem; transition: background .15s;
+  }
+  .cms-nav-item:hover { background: rgba(255,255,255,.06); }
+  .cms-nav-item.active { background: #2563eb; color: #fff; }
+  .cms-nav-item small { display: block; color: #9ca3af; font-size: .65rem; }
+  .cms-nav-item.active small { color: #dbeafe; }
+  .cms-main { flex: 1; padding: 1.25rem; max-width: 1100px; }
+  .cms-title { font-size: 1.15rem; font-weight: 700; margin: 0 0 .25rem; }
+  .cms-sub { color: #9ca3af; font-size: .8rem; margin: 0 0 1rem; }
+  .kpi { display: grid; grid-template-columns: repeat(2,1fr); gap: .6rem; margin-bottom: 1rem; }
+  @media (min-width: 760px) { .kpi { grid-template-columns: repeat(4,1fr); } }
+  .card2 { background: #121620; border: 1px solid rgba(255,255,255,.07); border-radius: .9rem; padding: 1rem; margin-bottom: 1rem; }
+  .card2 h3 { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: #e5e7eb; margin: 0 0 .7rem; }
+  table.tbl { width: 100%; border-collapse: collapse; font-size: .78rem; }
+  table.tbl th, table.tbl td { padding: .4rem .5rem; border-bottom: 1px solid rgba(255,255,255,.06); text-align: right; }
+  table.tbl th:first-child, table.tbl td:first-child { text-align: left; }
+  table.tbl th { color: #6b7280; text-transform: uppercase; font-size: .65rem; }
+  .drop {
+    border: 1px dashed rgba(255,255,255,.2); border-radius: .8rem; padding: 1.5rem;
+    text-align: center; color: #9ca3af; font-size: .82rem; cursor: pointer; transition: .15s;
+  }
+  .drop.on { border-color: #3b82f6; background: rgba(59,130,246,.07); color: #93c5fd; }
+  .drop b { color: #fff; }
+  .btn { background: #2563eb; color: #fff; border: none; border-radius: .5rem; padding: .5rem .8rem; font-size: .78rem; font-weight: 700; cursor: pointer; }
+  .btn:hover { background: #1d4ed8; }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+  .btn.ghost { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); }
+  .btn.danger { background: #be123c; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid rgba(255,255,255,.05); font-size: .78rem; }
+  .row:last-child { border-bottom: none; }
+  .muted { color: #6b7280; }
+  .ok { color: #34d399; } .warn { color: #fbbf24; } .err { color: #fb7185; }
+  .prog { height: .4rem; background: rgba(255,255,255,.08); border-radius: 9999px; overflow: hidden; margin-top: .6rem; }
+  .prog > div { height: 100%; width: 0; background: #3b82f6; transition: width .25s; }
+  .pill { display: inline-flex; align-items: center; gap: .3rem; padding: .15rem .5rem; border-radius: 9999px; font-size: .68rem; background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.3); color: #93c5fd; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="cms">
+  <div class="cms-top">
+    <div class="cms-brand">
+      <img src="/static/red-dogs-logo.png" alt="ResDogs"/>
+      <div><b>ResDogs</b> <span>· Admin</span></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:.75rem">
+      <span id="who" class="muted" style="font-size:.75rem"></span>
+      <button class="btn ghost" id="signout">Sign out</button>
+    </div>
+  </div>
+
+  <div class="cms-layout">
+    <aside class="cms-nav" id="cms-nav"></aside>
+    <main class="cms-main">
+
+      <!-- dashboard -->
+      <section id="view-dashboard">
+        <h1 class="cms-title">Dashboard</h1>
+        <p class="cms-sub">Overview of all data</p>
+
+        <div class="card2" id="gate-card" style="border-color:rgba(59,130,246,.35)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+            <div style="max-width:640px">
+              <h3 style="margin:0 0 .25rem">User management</h3>
+              <p class="muted" style="font-size:.75rem;margin:0;line-height:1.5">
+                <b id="gate-state">Off</b> — <span id="gate-desc">the map is open: anybody sees every filter and report for free.</span>
+              </p>
+            </div>
+            <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;user-select:none">
+              <input type="checkbox" id="gate-toggle" style="width:1.1rem;height:1.1rem;accent-color:#2563eb"/>
+              <span style="font-size:.8rem;font-weight:700">Enable</span>
+            </label>
+          </div>
+          <p id="gate-msg" style="font-size:.72rem;margin:.5rem 0 0"></p>
+        </div>
+
+        <div class="kpi">
+          <div class="tile"><span class="k">Committed rows</span><span class="v" id="kpi-committed">—</span></div>
+          <div class="tile"><span class="k">Pending rows</span><span class="v" id="kpi-pending">—</span></div>
+          <div class="tile"><span class="k">Total rows</span><span class="v" id="kpi-total">—</span></div>
+          <div class="tile"><span class="k">Polygon columns</span><span class="v" id="kpi-poly">—</span></div>
+        </div>
+        <div class="card2"><h3>Rows by dataset year</h3><table class="tbl"><thead><tr><th>Year</th><th>Rows</th><th>Committed</th><th>Pending</th></tr></thead><tbody id="years-body"></tbody></table></div>
+        <div class="card2"><h3>Polygon assignment</h3><div id="coverage-body" style="display:flex;flex-direction:column;gap:.6rem"></div>
+          <div style="display:flex;gap:.5rem;margin-top:.8rem;flex-wrap:wrap">
+            <select id="assign-class" class="sm" style="max-width:200px">
+              <option value="subdivisions">Subdivisions</option><option value="zipcodes">Zip Codes</option>
+              <option value="highschools">School Districts</option><option value="elementary">Elementary</option><option value="middle">Middle</option>
+            </select>
+            <button class="btn" id="assign-run">Assign missing rows</button>
+          </div>
+          <div class="prog"><div id="assign-prog"></div></div>
+          <p id="assign-msg" style="margin:.4rem 0 0;font-size:.75rem"></p>
+        </div>
+        <div class="card2"><h3>Pending upload sessions</h3><div id="pending-body"></div></div>
+      </section>
+
+      <!-- data section -->
+      <section id="view-section" class="hidden">
+        <h1 class="cms-title" id="sec-title"></h1>
+        <p class="cms-sub" id="sec-sub"></p>
+        <div class="card2">
+          <h3>Upload</h3>
+          <label class="drop" id="drop" for="data-file">
+            Drop a <b>.csv</b> here or click to choose a file
+            <input id="data-file" type="file" accept=".csv,text/csv" hidden/>
+          </label>
+          <p class="muted" style="font-size:.72rem;margin:.6rem 0 0" id="sec-cols"></p>
+          <div class="prog"><div id="upload-prog"></div></div>
+          <p id="upload-msg" style="margin:.5rem 0 0;font-size:.78rem"></p>
+        </div>
+        <div class="card2"><h3>Uploaded files</h3><div id="section-files"></div></div>
+      </section>
+
+      <!-- area metrics -->
+      <section id="view-areas" class="hidden">
+        <h1 class="cms-title">Area Metrics</h1>
+        <p class="cms-sub">Boundary GeoJSON uploads</p>
+        <div class="card2">
+          <h3>Replace a boundary file</h3>
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.7rem">
+            <select id="boundary-class" class="sm" style="max-width:230px">
+              <option value="subdivisions">Subdivisions / Neighborhoods</option><option value="zipcodes">Zip Codes</option>
+              <option value="highschools">School Districts</option><option value="elementary">Elementary</option><option value="middle">Middle Schools</option>
+            </select>
+            <span id="boundary-target" class="muted" style="font-size:.72rem;align-self:center"></span>
+          </div>
+          <label class="drop" id="drop-geo" for="geo-file">
+            Drop a <b>.geojson</b> here or click to choose a file
+            <input id="geo-file" type="file" accept=".geojson,.json,application/geo+json" hidden/>
+          </label>
+          <p id="geo-msg" style="margin:.5rem 0 0;font-size:.78rem"></p>
+        </div>
+        <div class="card2"><h3>Uploaded boundary files</h3><div id="boundary-list"></div>
+          <p class="warn" style="font-size:.72rem;margin:.7rem 0 0">Replacing a boundary changes the polygons — run the assignment again afterwards.</p>
+        </div>
+      </section>
+
+      <!-- ads -->
+      <section id="view-ads" class="hidden">
+        <h1 class="cms-title">Ads Campaigns</h1>
+        <p class="cms-sub">Manage advertisements</p>
+
+        <div class="card2">
+          <h3>New campaign</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem">
+            <div><span class="label">Title</span><input id="ad-title" type="text" placeholder="Spring campaign"/></div>
+            <div><span class="label">Beneficiary (optional)</span><input id="ad-beneficiary" type="text" placeholder="Client name"/></div>
+            <div><span class="label">Target URL</span><input id="ad-url" type="text" placeholder="https://…"/></div>
+            <div><span class="label">Placement</span>
+              <select id="ad-placement">
+                <option value="corner">Left of the map (side column)</option>
+                <option value="top">Above the map (thin banner)</option>
+                <option value="bottom">Below the map (thin banner)</option>
+                <option value="right">Right of the map (side column)</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:1rem;align-items:flex-start;margin-top:.9rem;flex-wrap:wrap">
+            <label class="drop" id="ad-drop" for="ad-file" style="flex:1;min-width:260px">
+              Drop an <b>image</b> or <b>video</b> here, or click to choose
+              <input id="ad-file" type="file" accept="image/*,video/*" hidden/>
+            </label>
+            <div style="text-align:center">
+              <div class="label" style="text-align:center">Size on the map</div>
+              <div id="ad-size-box" style="background:#fff;border-radius:.25rem;display:flex;align-items:center;justify-content:center;margin:0 auto"></div>
+              <div id="ad-size-label" class="muted" style="font-size:.65rem;margin-top:.3rem"></div>
+            </div>
+          </div>
+
+          <div id="ad-preview-wrap" style="margin-top:.8rem" class="hidden">
+            <div class="label">Preview</div>
+            <div id="ad-preview" style="background:#0b0e14;border:1px solid rgba(255,255,255,.1);border-radius:.6rem;overflow:hidden;display:flex;align-items:center;justify-content:center"></div>
+          </div>
+
+          <div class="prog"><div id="ad-prog"></div></div>
+          <div style="display:flex;gap:.5rem;margin-top:.7rem;align-items:center">
+            <button class="btn" id="ad-create">Create campaign</button>
+            <span id="ad-msg" style="font-size:.78rem"></span>
+          </div>
+        </div>
+
+        <div class="card2"><h3>Campaigns</h3><div id="ads-list"></div></div>
+      </section>
+
+      <!-- users -->
+      <section id="view-users" class="hidden">
+        <h1 class="cms-title">System Users</h1>
+        <p class="cms-sub">Manage access — free viewers, individual plans and company seats</p>
+
+        <div class="card2" id="user-create-card">
+          <h3>Create an account</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem">
+            <div><span class="label">Name</span><input id="u-name" type="text" placeholder="Jane Doe"/></div>
+            <div><span class="label">Email</span><input id="u-email" type="email" placeholder="jane@company.com"/></div>
+            <div><span class="label">Temporary password</span><input id="u-pass" type="text" placeholder="At least 8 characters"/></div>
+            <div><span class="label">Plan</span>
+              <select id="u-plan"><option>Basic</option><option>Premium</option><option>Enterprise</option></select>
+            </div>
+            <div><span class="label">Status</span>
+              <select id="u-status"><option>active</option><option>trial</option><option>expired</option></select>
+            </div>
+          </div>
+          <div style="display:flex;gap:.5rem;margin-top:.7rem;align-items:center">
+            <button class="btn" id="u-create">Create user</button>
+            <span id="u-msg" style="font-size:.78rem"></span>
+          </div>
+        </div>
+
+        <div class="card2" id="users-list-card"><h3>Users</h3><div id="users-list"></div></div>
+
+        <div class="card2" id="company-create-card">
+          <h3 id="companies-title">Company accounts (Enterprise seats)</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem">
+            <div><span class="label">Company name</span><input id="c-name" type="text" placeholder="Acme Realty"/></div>
+            <div><span class="label">Owner email</span><input id="c-owner" type="email" placeholder="owner@acme.com"/></div>
+            <div><span class="label">Plan</span>
+              <select id="c-plan"><option>Enterprise</option><option>Premium</option><option>Basic</option></select>
+            </div>
+            <div><span class="label">Status</span>
+              <select id="c-status"><option>active</option><option>trial</option><option>expired</option></select>
+            </div>
+          </div>
+          <div style="display:flex;gap:.5rem;margin-top:.7rem;align-items:center">
+            <button class="btn" id="c-create">Create company</button>
+            <span id="c-msg" style="font-size:.78rem"></span>
+          </div>
+          <div id="companies-list" style="margin-top:.9rem"></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+  import { getAuth, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+
+  const $ = (id) => document.getElementById(id);
+  const state = { token: null, email: null, section: 'dashboard', status: null };
+
+  const SECTIONS = [
+    { id: 'dashboard', label: 'Dashboard', sub: 'Overview of all data' },
+    { id: 'sales', label: 'Sales Data', sub: 'Sold prices & history', category: 'sales', cols: 'MLS Number · Close Date · Close Price · SF · Latitude · Longitude' },
+    { id: 'rent', label: 'Rent Data', sub: 'Rental prices & history', category: 'rent', cols: 'MLS Number · Lease Date · Lease Price · SF · Latitude · Longitude' },
+    { id: 'current', label: 'Current Listings', sub: 'All current listings — upload inside a folder' },
+    { id: 'current-sales', label: '└ Sales', sub: 'Current for-sale uploads', category: 'current-sale', cols: 'MLS Number · Close Price · Latitude · Longitude' },
+    { id: 'current-rent', label: '└ Rent', sub: 'Current for-rent uploads', category: 'current-rent', cols: 'MLS Number · Lease Price · Latitude · Longitude' },
+    { id: 'current-tax', label: '└ Taxes', sub: 'Current tax uploads', category: 'current-tax', cols: 'MLS # · Tax Rate · Tax Year · Tax Amount' },
+    { id: 'tax', label: 'Tax Records', sub: 'Assessed values & taxes', category: 'tax', cols: 'MLS # · Tax Rate · Tax Year · Tax Amount' },
+    { id: 'schools', label: 'School Ratings', sub: 'TEA scores', category: 'school' },
+    { id: 'areas', label: 'Area Metrics', sub: 'Boundary GeoJSON uploads' },
+    { id: 'ads', label: 'Ads Campaigns', sub: 'Manage advertisements', collection: 'ads' },
+    { id: 'users', label: 'System Users', sub: 'Manage access', collection: 'users' },
+  ];
+  const byId = Object.fromEntries(SECTIONS.map((s) => [s.id, s]));
+
+  const cfg = await (await fetch('/api/admin/config')).json();
+  const app = initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, appId: cfg.appId });
+  const auth = getAuth(app);
+
+  onAuthStateChanged(auth, async (user) => {
+    if (!user) { location.replace('/login?next=/admin'); return; }
+    state.token = await user.getIdToken();
+    state.email = user.email || '';
+    $('who').textContent = state.email;
+    setInterval(() => user.getIdToken(true).then((t) => { state.token = t; }), 20 * 60 * 1000);
+
+    // The allowlist is the admin. An Enterprise account may still enter to
+    // manage its own colleagues (System Users), nothing else.
+    let account = { plan: 'free', isAdmin: false };
+    try {
+      account = await api('/api/me');
+    } catch (err) { console.warn(err); }
+    const allowed = (cfg.allowedEmails || []).map((e) => e.toLowerCase());
+    const isAdmin = account.isAdmin || allowed.includes(state.email.toLowerCase());
+    const isEnterprise = account.plan === 'enterprise';
+
+    if (!isAdmin && !isEnterprise) {
+      await signOut(auth); location.replace('/login?next=/admin'); return;
+    }
+    state.isAdmin = isAdmin;
+    state.account = account;
+
+    buildNav(isAdmin);
+    if (isAdmin) {
+      await loadGate();
+      await loadStatus();
+      show('dashboard');
+    } else {
+      show('users');
+    }
+  });
+  $('signout').addEventListener('click', () => signOut(auth));
+
+  async function api(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    if (state.token) headers.Authorization = `Bearer ${state.token}`;
+    const res = await fetch(path, { ...options, headers });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  const fmt = (n) => Number(n || 0).toLocaleString();
+
+  function buildNav(isAdmin) {
+    const list = isAdmin ? SECTIONS : SECTIONS.filter((s) => s.id === 'users');
+    $('cms-nav').innerHTML = list.map((s) => `
+      <button class="cms-nav-item" data-section="${s.id}">
+        <span style="flex:1">${s.label}<small>${s.sub}</small></span>
+      </button>`).join('');
+    document.querySelectorAll('.cms-nav-item').forEach((b) => b.addEventListener('click', () => show(b.dataset.section)));
+  }
+
+  function show(id) {
+    state.section = id;
+    document.querySelectorAll('.cms-nav-item').forEach((b) => b.classList.toggle('active', b.dataset.section === id));
+    ['view-dashboard', 'view-section', 'view-areas', 'view-ads', 'view-users'].forEach((v) => $(v).classList.add('hidden'));
+    const sec = byId[id] || byId.dashboard;
+    if (id === 'dashboard') { $('view-dashboard').classList.remove('hidden'); loadStatus(); loadPending(); }
+    else if (id === 'areas') { $('view-areas').classList.remove('hidden'); loadBoundaries(); syncTargetLabel(); }
+    else if (id === 'ads') { $('view-ads').classList.remove('hidden'); loadAds(); paintSizeBox(); }
+    else if (id === 'users') {
+      $('view-users').classList.remove('hidden');
+      const isAdmin = !!state.isAdmin;
+      $('user-create-card').hidden = !isAdmin;
+      $('users-list-card').hidden = !isAdmin;
+      $('company-create-card').hidden = !isAdmin;
+      if (isAdmin) { loadUsers(); loadCompanies(); }
+      else { loadMyCompany(); }
+    }
+    else { $('view-section').classList.remove('hidden'); prepSection(sec); }
+  }
+
+  // ── access-control switch ─────────────────────────────────────────────────
+  async function loadGate() {
+    try {
+      const gate = await api('/api/admin/gate');
+      const on = !!gate.userManagementEnabled;
+      $('gate-toggle').checked = on;
+      $('gate-state').textContent = on ? 'On' : 'Off';
+      $('gate-state').style.color = on ? '#34d399' : '#fbbf24';
+      $('gate-desc').textContent = on
+        ? 'visitors without an account get a read-only map; filters and reports require a plan (Basic, Premium or Enterprise).'
+        : 'the map is open: anybody sees every filter and report for free.';
+    } catch (err) { console.warn(err); }
+  }
+
+  $('gate-toggle').addEventListener('change', async () => {
+    const on = $('gate-toggle').checked;
+    $('gate-msg').className = 'warn';
+    $('gate-msg').textContent = 'Saving…';
+    try {
+      const gate = await api('/api/admin/gate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userManagementEnabled: on }),
+      });
+      $('gate-msg').className = 'ok';
+      $('gate-msg').textContent = gate.userManagementEnabled
+        ? 'User management ON — plans are enforced on the map.'
+        : 'User management OFF — the map is open for everyone.';
+      loadGate();
+    } catch (err) {
+      $('gate-msg').className = 'err';
+      $('gate-msg').textContent = String(err.message || err);
+      $('gate-toggle').checked = !on;
+    }
+  });
+
+  // ── status ────────────────────────────────────────────────────────────────
+  async function loadStatus() {
+    try {
+      const s = await api('/api/admin/status');
+      state.status = s;
+      $('kpi-committed').textContent = fmt(s.committed);
+      $('kpi-pending').textContent = fmt(s.pending);
+      $('kpi-total').textContent = fmt(s.total);
+      $('kpi-poly').textContent = s.polyColumnsReady ? 'Ready' : 'Missing';
+      $('kpi-poly').style.color = s.polyColumnsReady ? '#34d399' : '#fbbf24';
+      $('years-body').innerHTML = (s.byYear || []).map((r) => `<tr><td>${r.year || 'undated'}</td><td>${fmt(r.rows)}</td><td>${fmt(r.committed)}</td><td>${fmt(r.pending)}</td></tr>`).join('');
+      $('coverage-body').innerHTML = (s.coverage || []).map((c) => {
+        const pct = c.withCoords ? Math.round((c.assigned / c.withCoords) * 100) : 0;
+        return `<div><div style="display:flex;justify-content:space-between;font-size:.72rem;color:#d1d5db"><span>${c.label}</span><span>${fmt(c.assigned)} / ${fmt(c.withCoords)} (${pct}%)</span></div><div class="prog"><div style="width:${pct}%"></div></div></div>`;
+      }).join('');
+      $('boundary-list').innerHTML = (s.boundaryFiles || []).map((b) => {
+        const when = b.uploadedAt ? new Date(Number(b.uploadedAt)).toLocaleString() : '—';
+        const size = b.size ? `${(Number(b.size) / 1024 / 1024).toFixed(2)} MB` : '—';
+        return `<div class="row"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${b.name}">${b.name}</span><span class="muted">${size} · ${when}</span></div>`;
+      }).join('') || '<span class="muted" style="font-size:.75rem">No boundary files yet.</span>';
+    } catch (err) { console.warn(err); }
+  }
+
+  async function loadPending() {
+    try {
+      const { sessions = [] } = await api('/api/admin/pending');
+      $('pending-body').innerHTML = sessions.length ? sessions.map((s) => `
+        <div class="row"><span class="pill">${s.sessionId}</span><span class="muted">${fmt(s.rows)} rows</span>
+        <span style="display:flex;gap:.4rem">
+          <button class="btn" data-commit="${s.sessionId}">Add All</button>
+          <button class="btn danger" data-discard="${s.sessionId}">Discard</button>
+        </span></div>`).join('') : '<span class="muted" style="font-size:.75rem">No pending sessions.</span>';
+      document.querySelectorAll('[data-commit]').forEach((b) => b.addEventListener('click', async () => {
+        const out = await api('/api/admin/commit-session', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sessionId: b.dataset.commit }) });
+        b.textContent = `Committed ${fmt(out.committed)}`; loadStatus(); loadPending();
+      }));
+      document.querySelectorAll('[data-discard]').forEach((b) => b.addEventListener('click', async () => {
+        await api('/api/admin/discard-session', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sessionId: b.dataset.discard }) });
+        loadStatus(); loadPending();
+      }));
+    } catch (err) { console.warn(err); }
+  }
+
+  // ── data sections ─────────────────────────────────────────────────────────
+  function prepSection(sec) {
+    $('sec-title').textContent = sec.label;
+    $('sec-sub').textContent = sec.sub;
+    $('sec-cols').textContent = sec.cols ? `Required: ${sec.cols}` : '';
+    $('upload-msg').textContent = '';
+    $('upload-prog').style.width = '0';
+    $('drop').classList.remove('on');
+    loadFiles(sec.category, 'section-files');
+  }
+
+  async function loadFiles(category, hostId) {
+    if (!category) { $(hostId).innerHTML = '<span class="muted" style="font-size:.75rem">This section is informational; uploads are managed in the main CMS.</span>'; return; }
+    try {
+      const { files = [] } = await api(`/api/admin/files?category=${encodeURIComponent(category)}`);
+      $(hostId).innerHTML = files.length ? files.map((f) => `
+        <div class="row"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${f.name}">${f.name}</span>
+        <span class="muted">${f.size ? (Number(f.size)/1024/1024).toFixed(2)+' MB' : ''} ${f.uploadedAt ? '· '+new Date(Number(f.uploadedAt)).toLocaleDateString() : ''}</span>
+        <button class="btn danger" data-del="${f.id}" data-path="${f.storagePath || ''}">Delete</button></div>`).join('')
+        : '<span class="muted" style="font-size:.75rem">No files uploaded in this section yet.</span>';
+      document.querySelectorAll(`#${hostId} [data-del]`).forEach((b) => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await api('/api/admin/delete-file', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: b.dataset.del, storagePath: b.dataset.path }) }); }
+        catch (e) { console.warn(e); }
+        loadFiles(category, hostId);
+      }));
+    } catch (err) { $(hostId).innerHTML = `<span class="err" style="font-size:.75rem">${err.message}</span>`; }
+  }
+
+  async function uploadData(file) {
+    const sec = byId[state.section];
+    if (!sec || !sec.category) return;
+    const msg = $('upload-msg');
+    msg.className = 'warn'; msg.textContent = `Uploading ${file.name}…`;
+    $('upload-prog').style.width = '35%';
+    try {
+      const fd = new FormData();
+      fd.append('section', sec.id);
+      fd.append('file', file);
+      const out = await api('/api/admin/upload-data', { method: 'POST', body: fd });
+      $('upload-prog').style.width = '100%';
+      if (out.error) {
+        msg.className = 'err';
+        msg.textContent = `${out.error} ${out.detail || ''}`;
+        return;
+      }
+      msg.className = 'ok';
+      msg.textContent = `${out.file}: ${fmt(out.imported)} rows staged for ${out.year} (${fmt(out.skipped)} skipped). Click “Add All” in the dashboard to publish.`;
+      loadFiles(sec.category, 'section-files');
+      loadStatus(); loadPending();
+    } catch (err) {
+      msg.className = 'err'; msg.textContent = String(err.message || err);
+    }
+  }
+
+  const dataInput = $('data-file');
+  const drop = $('drop');
+  ['dragenter','dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('on'); }));
+  ['dragleave','drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('on'); }));
+  drop.addEventListener('drop', (e) => { const f = e.dataTransfer.files[0]; if (f) uploadData(f); });
+  dataInput.addEventListener('change', () => { if (dataInput.files[0]) uploadData(dataInput.files[0]); });
+
+  // ── boundaries ────────────────────────────────────────────────────────────
+  const targetLabels = {
+    subdivisions: 'Mapped Subdivisions.geojson', zipcodes: 'Zip.geojson', highschools: 'Houston_ISD.geojson',
+    elementary: 'Elementary School ISD.geojson', middle: 'Middle School ISD.geojson',
+  };
+  function syncTargetLabel() { $('boundary-target').textContent = `→ ${targetLabels[$('boundary-class').value]}`; }
+  $('boundary-class').addEventListener('change', syncTargetLabel);
+
+  async function loadBoundaries() { await loadStatus(); loadFiles('boundary', 'boundary-list'); }
+
+  async function uploadBoundary(file) {
+    const msg = $('geo-msg');
+    msg.className = 'warn'; msg.textContent = `Uploading ${file.name}…`;
+    try {
+      const fd = new FormData();
+      fd.append('class', $('boundary-class').value);
+      fd.append('file', file);
+      const out = await api('/api/admin/upload-boundary', { method: 'POST', body: fd });
+      msg.className = 'ok';
+      msg.textContent = `Uploaded ${out.name}: ${fmt(out.features)} areas.`;
+      loadBoundaries();
+    } catch (err) { msg.className = 'err'; msg.textContent = String(err.message || err); }
+  }
+  const geoDrop = $('drop-geo');
+  ['dragenter','dragover'].forEach((ev) => geoDrop.addEventListener(ev, (e) => { e.preventDefault(); geoDrop.classList.add('on'); }));
+  ['dragleave','drop'].forEach((ev) => geoDrop.addEventListener(ev, (e) => { e.preventDefault(); geoDrop.classList.remove('on'); }));
+  geoDrop.addEventListener('drop', (e) => { const f = e.dataTransfer.files[0]; if (f) uploadBoundary(f); });
+  $('geo-file').addEventListener('change', () => { if ($('geo-file').files[0]) uploadBoundary($('geo-file').files[0]); });
+
+  // ── ads ───────────────────────────────────────────────────────────────────
+  const SIZE = { corner: [160, 600], top: [1024, 80], bottom: [1024, 80], right: [160, 600] };
+
+  function paintSizeBox() {
+    const [w, h] = SIZE[$('ad-placement').value] || SIZE.corner;
+    const scale = Math.min(220 / w, 150 / h, 1);
+    const box = $('ad-size-box');
+    box.style.width = `${Math.max(40, Math.round(w * scale))}px`;
+    box.style.height = `${Math.max(24, Math.round(h * scale))}px`;
+    box.innerHTML = `<span style="font-size:9px;font-weight:700;color:#111">${w}×${h}</span>`;
+    $('ad-size-label').textContent = `${w} × ${h} px`;
+    // Keep the live preview at the same aspect ratio.
+    const prev = $('ad-preview');
+    prev.style.aspectRatio = `${w} / ${h}`;
+    prev.style.maxWidth = w <= 200 ? '200px' : '100%';
+  }
+  $('ad-placement').addEventListener('change', paintSizeBox);
+
+  let adMediaUrl = null;
+  $('ad-file').addEventListener('change', () => {
+    const f = $('ad-file').files[0];
+    if (!f) return;
+    if (adMediaUrl) URL.revokeObjectURL(adMediaUrl);
+    adMediaUrl = URL.createObjectURL(f);
+    const prev = $('ad-preview');
+    prev.innerHTML = f.type.startsWith('video/')
+      ? `<video src="${adMediaUrl}" autoplay loop muted playsinline style="width:100%;height:100%;object-fit:cover"></video>`
+      : `<img src="${adMediaUrl}" alt="" style="width:100%;height:100%;object-fit:cover"/>`;
+    $('ad-preview-wrap').classList.remove('hidden');
+  });
+
+  async function loadAds() {
+    try {
+      const { ads = [] } = await api('/api/admin/ads');
+      $('ads-list').innerHTML = ads.length ? ads.map((a) => `
+        <div class="row" style="align-items:center">
+          <div style="width:46px;height:46px;border-radius:.4rem;overflow:hidden;background:#0b0e14;flex-shrink:0">
+            ${a.mediaType === 'video'
+              ? `<video src="${a.mediaUrl}" muted style="width:100%;height:100%;object-fit:cover"></video>`
+              : `<img src="${a.mediaUrl}" alt="" style="width:100%;height:100%;object-fit:cover"/>`}
+          </div>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            <b>${a.title}</b>
+            <small class="muted"> · ${a.placement} · ${a.status}</small>
+          </span>
+          <button class="btn ghost" data-toggle="${a.id}" data-to="${a.status === 'active' ? 'inactive' : 'active'}">
+            ${a.status === 'active' ? 'Pause' : 'Activate'}
+          </button>
+          <button class="btn danger" data-adel="${a.id}">Delete</button>
+        </div>`).join('') : '<span class="muted" style="font-size:.75rem">No campaigns yet.</span>';
+
+      document.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
+        await api('/api/admin/ads/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: b.dataset.toggle, status: b.dataset.to }) });
+        loadAds();
+      }));
+      document.querySelectorAll('[data-adel]').forEach((b) => b.addEventListener('click', async () => {
+        if (!confirm('Delete this campaign?')) return;
+        await api('/api/admin/ads/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: b.dataset.adel }) });
+        loadAds();
+      }));
+    } catch (err) { $('ads-list').innerHTML = `<span class="err" style="font-size:.75rem">${err.message}</span>`; }
+  }
+
+  $('ad-create').addEventListener('click', async () => {
+    const msg = $('ad-msg');
+    const file = $('ad-file').files[0];
+    if (!file) { msg.className = 'err'; msg.textContent = 'Choose an image or video.'; return; }
+    msg.className = 'warn'; msg.textContent = 'Uploading…';
+    $('ad-prog').style.width = '40%';
+    try {
+      const fd = new FormData();
+      fd.append('title', $('ad-title').value);
+      fd.append('beneficiaryName', $('ad-beneficiary').value);
+      fd.append('targetUrl', $('ad-url').value);
+      fd.append('placement', $('ad-placement').value);
+      fd.append('media', file);
+      await api('/api/admin/ads', { method: 'POST', body: fd });
+      $('ad-prog').style.width = '100%';
+      msg.className = 'ok'; msg.textContent = 'Campaign created.';
+      $('ad-title').value = ''; $('ad-beneficiary').value = ''; $('ad-url').value = '';
+      $('ad-file').value = ''; $('ad-preview-wrap').classList.add('hidden');
+      loadAds();
+    } catch (err) { msg.className = 'err'; msg.textContent = String(err.message || err); }
+  });
+
+  // ── users ─────────────────────────────────────────────────────────────────
+  async function loadUsers() {
+    try {
+      const { users = [] } = await api('/api/admin/users');
+      $('users-list').innerHTML = users.length ? users.map((u) => {
+        const sub = u.subscription || {};
+        return `<div class="row" style="flex-wrap:wrap">
+          <span style="flex:1;min-width:180px"><b>${u.name || '—'}</b><br><small class="muted">${u.email}</small></span>
+          <select data-uplan="${u._id}" style="width:auto;font-size:.72rem">
+            ${['Basic','Premium','Enterprise'].map((p) => `<option ${p === (sub.plan || 'Basic') ? 'selected' : ''}>${p}</option>`).join('')}
+          </select>
+          <select data-ustatus="${u._id}" style="width:auto;font-size:.72rem">
+            ${['active','trial','expired'].map((s) => `<option ${s === (sub.status || 'active') ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+          <span class="pill">${u.role || 'user'}</span>
+          <button class="btn danger" data-udel="${u._id}">Delete</button>
+        </div>`;
+      }).join('') : '<span class="muted" style="font-size:.75rem">No users yet.</span>';
+
+      document.querySelectorAll('[data-uplan]').forEach((el) => el.addEventListener('change', async () => {
+        await api('/api/admin/users/update', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: el.dataset.uplan, plan: el.value }) });
+      }));
+      document.querySelectorAll('[data-ustatus]').forEach((el) => el.addEventListener('change', async () => {
+        await api('/api/admin/users/update', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: el.dataset.ustatus, status: el.value }) });
+      }));
+      document.querySelectorAll('[data-udel]').forEach((el) => el.addEventListener('click', async () => {
+        if (!confirm('Delete this user? Their sign-in is removed too.')) return;
+        await api('/api/admin/users/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: el.dataset.udel }) });
+        loadUsers();
+      }));
+    } catch (err) { $('users-list').innerHTML = `<span class="err" style="font-size:.75rem">${err.message}</span>`; }
+  }
+
+  $('u-create').addEventListener('click', async () => {
+    const msg = $('u-msg');
+    msg.className = 'warn'; msg.textContent = 'Creating…';
+    try {
+      await api('/api/admin/users', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+        name: $('u-name').value, email: $('u-email').value, password: $('u-pass').value,
+        plan: $('u-plan').value, status: $('u-status').value,
+      })});
+      msg.className = 'ok'; msg.textContent = 'User created.';
+      $('u-name').value = ''; $('u-email').value = ''; $('u-pass').value = '';
+      loadUsers();
+    } catch (err) { msg.className = 'err'; msg.textContent = String(err.message || err); }
+  });
+
+  function companyCard(c, canManage) {
+    const sub = c.subscription || {};
+    const seats = (c.employees || []).map((e) => `
+      <div class="row"><span>${e}</span>${e === c.ownerEmail
+        ? '<span class="pill">owner</span>'
+        : (canManage ? `<button class="btn danger" data-rm="${c._id}" data-email="${e}">Remove</button>` : '')}</div>`).join('');
+    return `<div class="card2" style="margin:.5rem 0">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+        <div><b>${c.name}</b> <span class="muted" style="font-size:.72rem">· ${c.ownerEmail} · ${(c.employees || []).length} seat(s) · ${sub.plan || 'Enterprise'} (${sub.status || 'active'})</span></div>
+        ${canManage ? `<button class="btn danger" data-cdel="${c._id}">Delete</button>` : ''}
+      </div>
+      <div style="margin-top:.5rem">${seats}</div>
+      ${canManage ? `<div style="display:flex;gap:.4rem;margin-top:.5rem">
+        <input type="email" placeholder="colleague@company.com" data-newmail="${c._id}" style="flex:1"/>
+        <button class="btn" data-addmail="${c._id}">Add colleague</button>
+      </div>` : ''}
+    </div>`;
+  }
+
+  function bindCompanyActions(reload) {
+    document.querySelectorAll('[data-addmail]').forEach((b) => b.addEventListener('click', async () => {
+      const input = document.querySelector(`[data-newmail="${b.dataset.addmail}"]`);
+      try {
+        await api('/api/admin/companies/employee-add', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ companyId: b.dataset.addmail, email: input.value }) });
+        reload();
+      } catch (err) { alert(err.message); }
+    }));
+    document.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', async () => {
+      await api('/api/admin/companies/employee-remove', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ companyId: b.dataset.rm, email: b.dataset.email }) });
+      reload();
+    }));
+    document.querySelectorAll('[data-cdel]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirm('Delete this company account?')) return;
+      await api('/api/admin/companies/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: b.dataset.cdel }) });
+      reload();
+    }));
+  }
+
+  async function loadCompanies() {
+    try {
+      const { companies = [] } = await api('/api/admin/companies');
+      $('companies-list').innerHTML = companies.length
+        ? companies.map((c) => companyCard(c, true)).join('')
+        : '<span class="muted" style="font-size:.75rem">No company accounts yet.</span>';
+      bindCompanyActions(loadCompanies);
+    } catch (err) { $('companies-list').innerHTML = `<span class="err" style="font-size:.75rem">${err.message}</span>`; }
+  }
+
+  async function loadMyCompany() {
+    try {
+      const { company } = await api('/api/admin/my-company');
+      $('companies-list').innerHTML = company
+        ? companyCard(company, true)
+        : '<span class="muted" style="font-size:.75rem">Your company record could not be loaded.</span>';
+      bindCompanyActions(loadMyCompany);
+    } catch (err) { $('companies-list').innerHTML = `<span class="err" style="font-size:.75rem">${err.message}</span>`; }
+  }
+
+  $('c-create').addEventListener('click', async () => {
+    const msg = $('c-msg');
+    msg.className = 'warn'; msg.textContent = 'Creating…';
+    try {
+      await api('/api/admin/companies', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+        name: $('c-name').value, ownerEmail: $('c-owner').value,
+        plan: $('c-plan').value, status: $('c-status').value,
+      })});
+      msg.className = 'ok'; msg.textContent = 'Company created.';
+      $('c-name').value = ''; $('c-owner').value = '';
+      loadCompanies();
+    } catch (err) { msg.className = 'err'; msg.textContent = String(err.message || err); }
+  });
+
+  // ── assignment ────────────────────────────────────────────────────────────
+  $('assign-run').addEventListener('click', async () => {
+    const btn = $('assign-run'); btn.disabled = true;
+    const cls = $('assign-class').value;
+    $('assign-msg').className = 'warn'; $('assign-msg').textContent = 'Assigning…';
+    let after = null, total = 0, guard = 0;
+    try {
+      for (;;) {
+        const out = await api('/api/admin/assign', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ class: cls, after }) });
+        total += out.assigned || 0;
+        $('assign-prog').style.width = `${Math.min(100, (guard + 1) * 2)}%`;
+        $('assign-msg').textContent = `Assigned ${fmt(total)} rows…`;
+        if (!out.next || out.done || ++guard > 200) break;
+        after = out.next;
+      }
+      $('assign-prog').style.width = '100%';
+      $('assign-msg').className = 'ok'; $('assign-msg').textContent = `Done — ${fmt(total)} rows assigned.`;
+      loadStatus();
+    } catch (err) { $('assign-msg').className = 'err'; $('assign-msg').textContent = String(err.message || err); }
+    finally { btn.disabled = false; }
+  });
+</script>
+</body>
+</html>
