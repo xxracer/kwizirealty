@@ -475,6 +475,26 @@ async def admin_discard_session(request: Request):
     return JSONResponse({"ok": True, "discarded": n})
 
 
+@app.post("/api/admin/commit-all")
+def admin_commit_all(request: Request):
+    import cms_import
+
+    admin.verify_admin(request.headers.get("authorization"))
+    n = cms_import.commit_all()
+    engine._agg_cache.clear()
+    engine._ref_date["value"] = None
+    return JSONResponse({"ok": True, "committed": n})
+
+
+@app.post("/api/admin/cancel-all")
+def admin_cancel_all(request: Request):
+    import cms_import
+
+    admin.verify_admin(request.headers.get("authorization"))
+    n = cms_import.discard_all()
+    return JSONResponse({"ok": True, "discarded": n})
+
+
 @app.get("/api/admin/pending")
 def admin_pending(request: Request):
     import cms_import
@@ -683,6 +703,14 @@ async def admin_ad_status(request: Request):
     admin.verify_admin(request.headers.get("authorization"))
     body = await request.json()
     ads.set_status(str(body.get("id") or ""), str(body.get("status") or "active"))
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/ads/placement")
+async def admin_ad_placement(request: Request):
+    admin.verify_admin(request.headers.get("authorization"))
+    body = await request.json()
+    ads.set_placement(str(body.get("id") or ""), str(body.get("placement") or "corner"))
     return JSONResponse({"ok": True})
 
 
