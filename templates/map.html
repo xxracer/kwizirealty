@@ -534,6 +534,29 @@
   </div>
 </div>
 
+<!-- ── Hommie AI chat ─────────────────────────────────────────────────────── -->
+<button class="chat-fab" id="chat-fab" title="Open Hommie AI Assistant" aria-label="Open Hommie AI Assistant">
+  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M8 14h.01M16 14h.01"/><path d="M9 18h6"/></svg>
+</button>
+
+<div class="chat-panel" id="chat-panel" hidden>
+  <div class="chat-head">
+    <div class="chat-avatar">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M8 14h.01M16 14h.01"/><path d="M9 18h6"/></svg>
+    </div>
+    <div class="chat-titles"><b>Hommie AI</b><small>Real Estate Assistant</small></div>
+    <button class="chat-close" id="chat-close" aria-label="Close chat">✕</button>
+  </div>
+  <div class="chat-messages" id="chat-messages"></div>
+  <div class="chat-options" id="chat-options" hidden></div>
+  <form class="chat-form" id="chat-form">
+    <input id="chat-input" type="text" placeholder="Ask about the Houston market…" autocomplete="off"/>
+    <button type="submit" id="chat-send" aria-label="Send">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>
+    </button>
+  </form>
+</div>
+
 <script>window.RESDOGS = {{ bootstrap|tojson }};</script>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script type="module" src="/static/account.js?v={{ v }}"></script>

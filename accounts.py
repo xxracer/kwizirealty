@@ -322,11 +322,10 @@ def verify_id_token(authorization: str | None) -> dict | None:
         return None
     token = authorization.split(" ", 1)[1].strip()
     try:
-        from google.auth.transport import requests as ga_requests
         from google.oauth2 import id_token
 
         return id_token.verify_firebase_token(
-            token, ga_requests.Request(), audience=fd.PROJECT,
+            token, fd._UrllibTransport(), audience=fd.PROJECT,
             clock_skew_in_seconds=120,
         )
     except Exception:  # noqa: BLE001

@@ -66,11 +66,10 @@ def verify_admin(authorization: str | None) -> str:
         raise HTTPException(status_code=401, detail="Sign in required")
     token = authorization.split(" ", 1)[1].strip()
     try:
-        from google.auth.transport import requests as ga_requests
         from google.oauth2 import id_token
 
         info = id_token.verify_firebase_token(
-            token, ga_requests.Request(), audience=fd.PROJECT,
+            token, fd._UrllibTransport(), audience=fd.PROJECT,
             clock_skew_in_seconds=120,
         )
     except Exception as exc:  # noqa: BLE001
@@ -299,6 +298,89 @@ def upload_boundary(cls: str, filename: str, content: bytes) -> dict:
 
 # ── files / collections ─────────────────────────────────────────────────────
 
+def _download_object(url: str) -> bytes:
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": "resdogs-cms"})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        buf = r.read()
+    if buf[:2] == b"\x1f\x8b":
+        buf = gzip.decompress(buf)
+    return buf
+
+
+def file_preview(doc_id: str, limit: int = 60) -> dict:
+    """The Eye: the first rows of an uploaded CSV (or GeoJSON stats).
+
+    The file is read from Storage; if the object no longer exists the answer
+    says so instead of failing.
+    """
+    import csv as _csv
+    import io as _io
+
+    files = fd._fs_list("cms_files")
+    rec = next((f for f in files if f.get("_id") == doc_id), None)
+    if not rec:
+        raise HTTPException(status_code=404, detail="File record not found")
+    name = rec.get("name") or ""
+    url = rec.get("storageUrl")
+    if not url:
+        return {"ok": False, "error": "This record has no Storage file."}
+
+    try:
+        body = _download_object(url)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "name": name,
+            "error": "The original file is no longer in Storage. Its rows may still be in the database.",
+            "detail": str(exc)[:200],
+        }
+
+    text = body.decode("utf-8-sig", errors="replace")
+
+    if name.lower().endswith((".geojson", ".json")):
+        try:
+            data = json.loads(text)
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "name": name, "error": "The file is not valid JSON."}
+        feats = data.get("features") or []
+        types = sorted({(f.get("geometry") or {}).get("type") or "null" for f in feats})
+        return {
+            "ok": True,
+            "name": name,
+            "kind": "geojson",
+            "features": len(feats),
+            "geometryTypes": ", ".join(types),
+            "sample": [
+                {"name": (f.get("properties") or {}).get("Name")
+                 or (f.get("properties") or {}).get("NAME")
+                 or ""}
+                for f in feats[:limit]
+            ],
+        }
+
+    sample = text[:8192]
+    delimiter = "," if sample.count(",") >= sample.count(";") else ";"
+    reader = _csv.DictReader(_io.StringIO(text), delimiter=delimiter)
+    headers = [h.strip() if isinstance(h, str) else h for h in (reader.fieldnames or [])]
+    rows = []
+    total = 0
+    for raw in reader:
+        total += 1
+        if len(rows) < limit:
+            rows.append({str(k).strip(): ("" if v is None else str(v)) for k, v in raw.items() if k is not None})
+    return {
+        "ok": True,
+        "name": name,
+        "kind": "csv",
+        "headers": headers,
+        "rows": rows,
+        "total": total,
+        "shown": len(rows),
+    }
+
+
 def list_files(category: str | None = None) -> list[dict]:
     files = fd._fs_list("cms_files")
     if category:
@@ -429,6 +511,35 @@ def assign_chunk(cls: str, after: dict | None, limit: int = 15000) -> dict:
         "next": {"m": last["mls_number"], "y": int(last["dataset_year"])},
         "done": len(rows) < limit,
     }
+
+
+def db_stats(section: str) -> dict:
+    """Rows already imported for a CMS section, by dataset year.
+
+    The original CSV files may no longer be in Storage (a re-upload rehearsal
+    deletes them), but their rows stay in Postgres — this is what the CMS
+    shows so the owner can see the data is loaded.
+    """
+    if section in ("rent", "current-rent"):
+        cond = "listing_type = 'rent'"
+    elif section in ("tax", "current-tax"):
+        cond = "listing_type = 'tax'"
+    elif section == "current-sales":
+        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND (close_date IS NULL OR close_date = '')"
+    elif section == "current":
+        cond = "close_date IS NULL OR close_date = ''"
+    else:
+        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND close_date IS NOT NULL AND close_date <> ''"
+
+    rows = fd.sql_rows(
+        "SELECT dataset_year AS yr, count(*)::int AS n FROM properties "
+        f"WHERE upload_session_id IS NULL AND ({cond}) GROUP BY 1 ORDER BY 1"
+    )
+    by_year = [
+        {"year": int(r.get("yr") or 0), "rows": int(r.get("n") or 0)}
+        for r in rows
+    ]
+    return {"section": section, "total": sum(y["rows"] for y in by_year), "byYear": by_year}
 
 
 def coverage_for(cls: str) -> dict:

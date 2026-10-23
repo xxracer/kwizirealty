@@ -421,6 +421,12 @@ async def admin_assign(request: Request):
     return JSONResponse(admin.assign_chunk(cls, after))
 
 
+@app.get("/api/admin/db-stats")
+def admin_db_stats(request: Request, section: str = "sales"):
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.db_stats(section))
+
+
 @app.get("/api/admin/coverage")
 def admin_coverage(request: Request, cls: str = "subdivisions"):
     admin.verify_admin(request.headers.get("authorization"))
@@ -507,6 +513,13 @@ def admin_pending(request: Request):
 def admin_files(request: Request, category: str | None = None):
     admin.verify_admin(request.headers.get("authorization"))
     return JSONResponse({"files": admin.list_files(category)})
+
+
+@app.get("/api/admin/file-preview")
+def admin_file_preview(request: Request, id: str = ""):
+    """The CMS Eye: the first rows of an uploaded CSV / GeoJSON stats."""
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.file_preview(id))
 
 
 @app.post("/api/admin/delete-file")
@@ -720,6 +733,26 @@ async def admin_ad_delete(request: Request):
     body = await request.json()
     ads.delete_ad(str(body.get("id") or ""))
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/chat")
+async def api_chat(request: Request):
+    """Hommie AI — Gemini with tools over the live dataset."""
+    import chat
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    try:
+        out = chat.reply(body.get("messages") or [], body.get("context") or {})
+        return JSONResponse(out)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"reply": f"The assistant is unavailable right now ({str(exc)[:160]}).",
+             "actions": []},
+            status_code=200,
+        )
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
