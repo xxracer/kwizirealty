@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ResDogs — Real Estate Intelligence for Houston</title>
+<meta name="description" content="ResDogs is the real estate intelligence platform for the Houston metro: interactive maps, live area reports and AI insights built on the MLS data."/>
+<meta property="og:site_name" content="ResDogs"/>
+<meta property="og:title" content="ResDogs — Real Estate Intelligence for Houston"/>
+<link rel="icon" href="/static/red-dogs-logo.png"/>
+<link rel="stylesheet" href="/static/home.css?v={{ v }}"/>
+</head>
+<body>
+<div class="home">
+
+  <!-- ── nav ────────────────────────────────────────────────────────────── -->
+  <header class="nav">
+    <div class="nav-inner">
+      <div class="nav-left">
+        <a class="brand" href="/">
+          <img src="/static/red-dogs-logo.png" alt="ResDogs logo"/>
+          <span>ResDogs</span>
+        </a>
+        <nav class="nav-links">
+          <a href="/map">Map</a>
+          <a href="#product">Features</a>
+          <a href="#about">About Us</a>
+        </nav>
+      </div>
+      <div class="nav-right">
+        <a class="nav-contact" href="#contact">Contact Us</a>
+        <div class="nav-sep"></div>
+        <a class="btn-outline" href="/admin">Log In</a>
+        <a class="btn-primary" href="/map">Start For Free</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ── hero ──────────────────────────────────────────────────────────── -->
+    <section class="hero">
+      <div class="hero-bg"></div>
+      <div class="hero-fade-r"></div>
+      <div class="hero-fade-t"></div>
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <h1>The First AI Agent Built for Real Estate</h1>
+          <p>A single system for sourcing, diligence, and strategy in the Houston metro area. Make data-driven land and property decisions faster than ever.</p>
+          <a class="btn-primary big" href="/map">Launch Explorer</a>
+        </div>
+        <div class="hero-phone-wrap">
+          <div class="phone">
+            <div class="phone-notch"><div class="notch-bar"></div><div class="notch-dot"><i></i></div></div>
+            <div class="phone-map"><canvas id="phone-preview"></canvas></div>
+            <div class="phone-shade"></div>
+            <div class="phone-chat">
+              <div class="chat-row">
+                <div class="chat-bot">✦</div>
+                <div>
+                  <p>I have gathered the requested information and I am currently loading the data to generate your report...</p>
+                  <div class="chat-status"><span class="mini-spin"></span> PROCESSING DATA</div>
+                </div>
+              </div>
+              <div class="chat-bars">
+                <div><span style="width:6rem"></span><span class="acc" style="width:2rem"></span></div>
+                <div><span style="width:4rem"></span><span style="width:3rem;opacity:.7"></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── trust band ────────────────────────────────────────────────────── -->
+    <section class="trust">
+      <div class="trust-inner">
+        <h2>Over <span>$40 Billion</span> in<br/>Land Decisions Made<br/>Annually With ResDogs</h2>
+        <div>
+          <p>The nation's best real estate teams rely on ResDogs Intelligence to move faster, catch risks earlier, and close more of the right deals.</p>
+          <div class="logos"><span>CBRE</span><span class="it">LENNAR</span><span class="up">Vulcan</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── feature: comprehensive data ───────────────────────────────────── -->
+    <section class="feature">
+      <div class="feature-inner">
+        <div class="feature-mock">
+          <div class="mock-bg"></div>
+          <div class="mock-stack">
+            <div class="mock-card">
+              <div class="mock-head"><span class="dot"></span><div class="bar" style="width:8rem"></div></div>
+              <div class="mock-lines"><div style="width:100%"></div><div style="width:83%"></div><div style="width:66%"></div></div>
+            </div>
+            <div class="mock-card acc">
+              <div class="mock-head"><span class="dot acc"></span><div class="bar acc" style="width:6rem"></div></div>
+              <div class="mock-block"></div>
+            </div>
+          </div>
+        </div>
+        <div class="feature-copy">
+          <span class="eyebrow">✦ Comprehensive Data</span>
+          <h3>Uncover off-market opportunities with precision.</h3>
+          <p>Stop relying on outdated county records. ResDogs aggregates millions of data points—from zoning and floodplains to historical sales and school ratings—so you can identify high-value parcels before they hit the market.</p>
+          <ul>
+            <li>✓ Instant property ownership lookup</li>
+            <li>✓ Historical sales and tax data</li>
+            <li>✓ Interactive zoning and flood overlays</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── cinematic ───────────────────────────────────────────────────────── -->
+    <section class="cinema">
+      <video autoplay loop muted playsinline>
+        <source src="/static/image/4AB04F9D-849B-4B65-B12B-BB0CEF6FBA4E.mp4" type="video/mp4"/>
+      </video>
+      <div class="cinema-copy">
+        <h2>Understand the ground truth.</h2>
+        <p>From dense urban cores to sprawling suburban developments, our platform provides context to every location across Texas.</p>
+        <a class="btn-white" href="/map">▶ See the platform in action</a>
+      </div>
+      <div class="cinema-shade"></div>
+    </section>
+
+    <!-- ── regional coverage ──────────────────────────────────────────────── -->
+    <section class="regional">
+      <div class="regional-inner">
+        <div class="regional-head">
+          <span class="eyebrow">✦ Regional Coverage</span>
+          <h2>Hyper-local intelligence across Houston.</h2>
+          <p>Explore dedicated insights tailored to specific communities and their unique market dynamics.</p>
+        </div>
+        <div class="regional-grid">
+          <a class="region-card" href="/map">
+            <div class="region-img" style="background-image:url('/static/image/katy-tx.jpg')"></div>
+            <div class="region-fade"></div>
+            <div class="region-copy">
+              <h3>Katy, TX</h3>
+              <div><p>Suburban expansion analysis</p><span>↗ +8.2%</span></div>
+            </div>
+          </a>
+          <a class="region-card" href="/map">
+            <div class="region-img" style="background-image:url('/static/image/beach-galveston-island-texas.jpg')"></div>
+            <div class="region-fade"></div>
+            <div class="region-copy">
+              <h3>Galveston</h3>
+              <div><p>Coastal property intelligence</p><span>↗ +5.4%</span></div>
+            </div>
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── gallery ────────────────────────────────────────────────────────── -->
+    <section class="gallery">
+      <div class="gallery-inner">
+        <div class="gallery-head">
+          <h2>Real world validation.</h2>
+          <p>A closer look at the properties and data points we analyze daily to bring you the best market intelligence.</p>
+        </div>
+        <div class="gallery-grid">
+          <div class="g-item big" style="background-image:url('/static/image/IMG_2183.jpeg')">
+            <div class="g-fade"></div>
+            <div class="g-caption"><span>Featured Asset</span><p>Urban residential analysis and valuation modeling.</p></div>
+          </div>
+          <div class="g-item" style="background-image:url('/static/image/IMG_2186.jpeg')"></div>
+          <div class="g-item" style="background-image:url('/static/image/IMG_2188.jpeg')"></div>
+          <div class="g-item wide" style="background-image:url('/static/image/IMG_2190.jpeg')">
+            <div class="g-pill">Property Portfolios</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── capabilities ───────────────────────────────────────────────────── -->
+    <section class="capabilities" id="product">
+      <div class="cap-inner">
+        <div class="cap-head">
+          <h2>Built for speed and precision.</h2>
+          <p>A complete suite of tools designed specifically for real estate professionals in the Houston market.</p>
+        </div>
+        <div class="cap-grid">
+          <div class="cap-card"><div class="cap-icon">◈</div><h3>Interactive Houston map</h3><p>Color-coded ZIP codes, neighborhoods, school zones, and subdivisions. Click, box, or lasso to build your selection.</p></div>
+          <div class="cap-card"><div class="cap-icon">▥</div><h3>Live area reports</h3><p>Median price, rent, price per sq.ft., appreciation, days on market, and the Investor's Index — updated as you filter.</p></div>
+          <div class="cap-card"><div class="cap-icon">↗</div><h3>5-year forecast</h3><p>See fitted trends, forecast lines, and prediction intervals for any selected region or comparison set.</p></div>
+          <div class="cap-card"><div class="cap-icon">⌂</div><h3>School-district intelligence</h3><p>Filter by elementary, middle, and high-school ratings, or switch boundaries to see market behavior by school zone.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── final CTA ──────────────────────────────────────────────────────── -->
+    <section class="cta" id="about">
+      <h2>Ready to see the full picture?</h2>
+      <p>Join the top land teams using ResDogs to source and evaluate property in seconds.</p>
+      <a class="btn-primary big" href="/map">Start For Free</a>
+    </section>
+  </main>
+
+  <!-- ── footer ───────────────────────────────────────────────────────────── -->
+  <footer class="footer" id="contact">
+    <div class="footer-inner">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="/"><img src="/static/red-dogs-logo.png" alt="ResDogs logo"/><span>ResDogs</span></a>
+          <p>The ultimate Houston real estate analytics platform. Make smarter decisions with live data, interactive maps, and AI insights.</p>
+        </div>
+        <div>
+          <h4>Product</h4>
+          <ul>
+            <li><a href="/map">Market Explorer</a></li>
+            <li><a href="#about">About Us</a></li>
+            <li><a href="/admin">Admin Login</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4>Legal</h4>
+          <ul>
+            <li><a href="#">Privacy Policy</a></li>
+            <li><a href="#">Terms of Service</a></li>
+            <li><a href="#contact">Contact Us</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <div>© <span id="year"></span> ResDogs Realty. All rights reserved.</div>
+        <div class="footer-social"><a href="#">Twitter</a><a href="#">LinkedIn</a></div>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+  document.getElementById('year').textContent = new Date().getFullYear();
+
+  // The decorative phone map: a tiny canvas painter (no map library), exactly
+  // like the new app's PhoneMapPreview.
+  (function () {
+    const c = document.getElementById('phone-preview');
+    if (!c) return;
+    const paint = () => {
+      const w = c.clientWidth || 280, h = c.clientHeight || 560;
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#0a0c10';
+      ctx.fillRect(0, 0, w, h);
+      // roads
+      ctx.strokeStyle = 'rgba(255,255,255,.07)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 14; i++) {
+        ctx.beginPath(); ctx.moveTo(0, (i * h) / 14); ctx.lineTo(w, (i * h) / 14); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo((i * w) / 14, 0); ctx.lineTo((i * w) / 14, h); ctx.stroke();
+      }
+      // polygons
+      const colors = ['#2c7be5', '#3288bd', '#66c2a5', '#abdda4', '#fdae61', '#f46d43'];
+      for (let i = 0; i < 26; i++) {
+        const x = Math.random() * w, y = Math.random() * h;
+        const r = 10 + Math.random() * 34;
+        ctx.beginPath();
+        for (let k = 0; k < 6; k++) {
+          const a = (Math.PI / 3) * k + Math.random() * 0.3;
+          const rr = r * (0.7 + Math.random() * 0.5);
+          const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+          if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fillStyle = colors[Math.floor(Math.random() * colors.length)] + '66';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,.25)';
+        ctx.stroke();
+      }
+    };
+    paint();
+    window.addEventListener('resize', paint);
+  })();
+</script>
+</body>
+</html>

@@ -1,8 +1,8 @@
 {
-  "crons": [
-    {
-      "path": "/api/sql/sync",
-      "schedule": "0 9 * * *"
+  "functions": {
+    "server.py": {
+      "maxDuration": 60,
+      "memory": 1024
     }
-  ]
+  }
 }

@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Sign in — ResDogs</title>
+<meta name="description" content="Sign in to the ResDogs CMS."/>
+<link rel="icon" href="/static/red-dogs-logo.png"/>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; min-height: 100%; }
+  body {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 2.5rem 1rem; color: #fff;
+    background: linear-gradient(135deg, #0a0c10 0%, #11151c 50%, #0a0c10 100%);
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .card {
+    width: 100%; max-width: 28rem; background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.1); border-radius: 1.5rem; padding: 2rem;
+    box-shadow: 0 25px 50px -12px rgba(0,0,0,.6); backdrop-filter: blur(8px);
+  }
+  .shield {
+    width: 3rem; height: 3rem; margin: 0 auto 1.5rem; border-radius: 1rem;
+    background: rgba(16,185,129,.2); border: 1px solid rgba(16,185,129,.4);
+    display: flex; align-items: center; justify-content: center;
+  }
+  h1 { font-size: 1.5rem; font-weight: 700; text-align: center; margin: 0 0 .25rem; }
+  .sub { font-size: .875rem; color: #9ca3af; text-align: center; margin: 0 0 1.5rem; }
+  .google {
+    width: 100%; display: flex; align-items: center; justify-content: center; gap: .75rem;
+    padding: .75rem 1.25rem; border-radius: .75rem; background: #fff; color: #0a0c10;
+    font-weight: 600; font-size: 1rem; border: none; cursor: pointer;
+    transition: background .15s;
+  }
+  .google:hover { background: #f3f4f6; }
+  .google:disabled { opacity: .6; cursor: not-allowed; }
+  .alt {
+    width: 100%; padding: .5rem 1.25rem; border-radius: .75rem;
+    border: 1px solid rgba(255,255,255,.1); background: transparent; color: #d1d5db;
+    font-size: .75rem; cursor: pointer; margin-top: .75rem;
+  }
+  .alt:hover { background: rgba(255,255,255,.05); }
+  form { display: flex; flex-direction: column; gap: .5rem; margin-top: .75rem; }
+  input {
+    width: 100%; padding: .625rem 1rem; border-radius: .75rem; background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.1); color: #fff; font-size: .875rem; outline: none;
+  }
+  input:focus { border-color: #3b82f6; }
+  input::placeholder { color: #6b7280; }
+  .submit {
+    width: 100%; display: flex; align-items: center; justify-content: center; gap: .5rem;
+    padding: .625rem 1.25rem; border-radius: .75rem; background: #2563eb; color: #fff;
+    border: none; font-size: .875rem; font-weight: 600; cursor: pointer;
+  }
+  .submit:hover { background: #1d4ed8; }
+  .submit:disabled { opacity: .6; cursor: not-allowed; }
+  .msg { margin: 1rem 0 0; font-size: .875rem; text-align: center; }
+  .msg.error { color: #fb7185; }
+  .msg.warn { color: #fbbf24; }
+  .notes { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid rgba(255,255,255,.1); }
+  .note { display: flex; align-items: flex-start; gap: .75rem; font-size: .75rem; color: #9ca3af; margin-top: .75rem; }
+  .note:first-child { margin-top: 0; }
+  .note svg { flex-shrink: 0; margin-top: .1rem; color: #34d399; }
+  .note strong { color: #e5e7eb; }
+  .back { margin-top: 2rem; font-size: 11px; text-align: center; color: #6b7280; }
+  .back a { color: #6b7280; text-decoration: underline; text-underline-offset: 2px; }
+  .back a:hover { color: #d1d5db; }
+  .spin { width: 1.15rem; height: 1.15rem; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="shield">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+  </div>
+  <h1>ResDogs Access</h1>
+  <p class="sub">Sign in with your Google account to continue.</p>
+
+  <div id="checking" class="sub hidden">
+    <span class="spin" style="display:inline-block;vertical-align:middle;margin-right:.5rem"></span>
+    Checking your account…
+  </div>
+
+  <div id="actions">
+    <button class="google" id="google">
+      <svg viewBox="0 0 24 24" width="20" height="20">
+        <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.2-2.27H12v4.51h6.47c-.28 1.4-1.07 2.59-2.27 3.4v2.81h3.66c2.16-1.99 3.43-4.91 3.43-8.45z"/>
+        <path fill="#34A853" d="M12 24c3.24 0 5.95-1.07 7.93-2.91l-3.66-2.81c-1.07.72-2.45 1.15-4.27 1.15-3.27 0-6.04-2.21-7.03-5.18H1.18v3.25C3.16 21.43 7.27 24 12 24z"/>
+        <path fill="#FBBC05" d="M4.97 14.18c-.25-.72-.39-1.49-.39-2.18s.14-1.46.39-2.18V6.57H1.18C.43 8.16 0 9.97 0 12s.43 3.84 1.18 5.43l3.79-3.25z"/>
+        <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.81l3.42-3.42C17.95 1.16 15.24 0 12 0 7.27 0 3.16 2.57 1.18 6.57l3.79 3.25C5.96 6.96 8.73 4.75 12 4.75z"/>
+      </svg>
+      <span id="google-label">Continue with Google</span>
+    </button>
+
+    <button class="alt" id="show-email">Sign in with email &amp; password instead</button>
+
+    <form id="email-form" class="hidden">
+      <input type="email" id="email" placeholder="Email" autocomplete="email" required/>
+      <input type="password" id="password" placeholder="Password" autocomplete="current-password" required/>
+      <button type="submit" class="submit" id="email-submit">Sign in with email</button>
+    </form>
+  </div>
+
+  <p class="msg error hidden" id="error"></p>
+
+  <div class="notes">
+    <div class="note">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>
+      <p>Only the accounts in <strong>NEXT_PUBLIC_CMS_ALLOWED_EMAILS</strong> can manage the dataset.</p>
+    </div>
+    <div class="note">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg>
+      <p>Already approved? After signing in you will be redirected automatically.</p>
+    </div>
+  </div>
+
+  <p class="back"><a href="/">Back to home</a></p>
+</div>
+
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+  import {
+    getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect,
+    signInWithEmailAndPassword, setPersistence, browserLocalPersistence,
+  } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const next = params.get('next') || '/admin';
+
+  const cfg = await (await fetch('/api/admin/config')).json();
+  const app = initializeApp({
+    apiKey: cfg.apiKey, authDomain: cfg.authDomain,
+    projectId: cfg.projectId, appId: cfg.appId,
+  });
+  const auth = getAuth(app);
+  await setPersistence(auth, browserLocalPersistence).catch(() => {});
+
+  const allowed = (cfg.allowedEmails || []).map((e) => e.toLowerCase());
+
+  function showError(text) {
+    const el = $('error');
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+
+  function allowedEmail(email) {
+    return !allowed.length || allowed.includes(String(email || '').toLowerCase());
+  }
+
+  function startCheck() {
+    $('actions').classList.add('hidden');
+    $('checking').classList.remove('hidden');
+  }
+
+  onAuthStateChanged(auth, (user) => {
+    if (!user) {
+      $('checking').classList.add('hidden');
+      $('actions').classList.remove('hidden');
+      return;
+    }
+    if (!allowedEmail(user.email)) {
+      showError(`${user.email} is not an admin account.`);
+      auth.signOut();
+      return;
+    }
+    startCheck();
+    location.replace(next);
+  });
+
+  $('google').addEventListener('click', async () => {
+    $('error').classList.add('hidden');
+    $('google-label').textContent = 'Signing in…';
+    $('google').disabled = true;
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (err) {
+      // Popups blocked → redirect flow
+      try {
+        await signInWithRedirect(auth, new GoogleAuthProvider());
+      } catch (err2) {
+        showError(String(err2.message || err2));
+        $('google-label').textContent = 'Continue with Google';
+        $('google').disabled = false;
+      }
+    }
+  });
+
+  $('show-email').addEventListener('click', () => {
+    $('show-email').classList.add('hidden');
+    $('email-form').classList.remove('hidden');
+  });
+
+  $('email-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('error').classList.add('hidden');
+    $('email-submit').disabled = true;
+    $('email-submit').textContent = 'Signing in…';
+    try {
+      await signInWithEmailAndPassword(auth, $('email').value.trim(), $('password').value);
+    } catch (err) {
+      const code = err && err.code || '';
+      const msg = code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found'
+        ? 'Invalid email or password.'
+        : code === 'auth/operation-not-allowed'
+          ? 'Email/password sign-in is not enabled for this Firebase project.'
+          : String(err.message || err);
+      showError(msg);
+      $('email-submit').disabled = false;
+      $('email-submit').textContent = 'Sign in with email';
+    }
+  });
+</script>
+</body>
+</html>
