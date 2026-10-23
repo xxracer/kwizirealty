@@ -1049,6 +1049,155 @@
     }).catch(() => {});
   }
 
+  // ── Hommie AI chat ─────────────────────────────────────────────────────────
+  const chatState = { messages: [], busy: false, started: false };
+
+  function chatBubble(role, text) {
+    const el = document.createElement('div');
+    el.className = `chat-msg ${role}`;
+    el.textContent = text;
+    $('#chat-messages').appendChild(el);
+    $('#chat-messages').scrollTop = $('#chat-messages').scrollHeight;
+    return el;
+  }
+
+  function chatOptions(options, multi) {
+    const host = $('#chat-options');
+    if (!options || !options.length) { host.hidden = true; host.innerHTML = ''; return; }
+    host.hidden = false;
+    host.innerHTML = options.map((o) => `<button data-opt="${String(o).replace(/"/g, '&quot;')}">${o}</button>`).join('');
+    host.querySelectorAll('[data-opt]').forEach((b) => b.addEventListener('click', () => {
+      const value = b.dataset.opt;
+      host.hidden = true;
+      host.innerHTML = '';
+      chatSend(value);
+    }));
+  }
+
+  function chatContext() {
+    const metricLabel = (B.metrics.find((m) => m.key === state.metric) || {}).label;
+    const periodLabel = (B.periods.find((p) => p.key === state.period) || {}).label;
+    const count = Number(($('#sum-props').textContent || '0').replace(/,/g, '')) || 0;
+    return {
+      boundary: state.boundary,
+      metric: state.metric,
+      metricLabel,
+      period: state.period,
+      periodLabel,
+      selectedNames: selectedNames(),
+      filters: state.applied,
+      stats: { count },
+    };
+  }
+
+  async function applyChatActions(actions) {
+    for (const a of actions || []) {
+      if (a.type === 'set_boundary' && B.boundaries.some((b) => b.key === a.boundary)) {
+        state.boundary = a.boundary;
+        state.selected.clear();
+        $$('#boundary-seg .seg-btn').forEach((x) => x.classList.toggle('active', x.dataset.boundary === a.boundary));
+        await refreshAll();
+      } else if (a.type === 'set_metric') {
+        state.metric = a.metric;
+        const m = B.metrics.find((x) => x.key === a.metric);
+        if (m) $('#metric-label').textContent = m.label;
+        $$('#metric-panel .select-opt').forEach((x) => x.classList.toggle('active', x.dataset.metric === a.metric));
+        await refreshAll();
+      } else if (a.type === 'set_period') {
+        state.period = a.period;
+        state.draft.period = a.period;
+        state.applied.period = a.period;
+        const p = B.periods.find((x) => x.key === a.period);
+        if (p) $('#period-label').textContent = p.label;
+        await refreshAll();
+      } else if (a.type === 'set_filters') {
+        Object.entries(a.filters || {}).forEach(([k, v]) => {
+          state.draft[k] = v;
+          state.applied[k] = v;
+          const input = document.querySelector(`input[data-key="${k}"]`);
+          if (input) { input.value = v; input.dispatchEvent(new Event('input', { bubbles: true })); }
+          const sel = document.querySelector(`select[data-filter="${k}"]`);
+          if (sel) sel.value = String(v);
+        });
+        await refreshAll();
+      } else if (a.type === 'select_areas') {
+        const wanted = new Set((a.names || []).map((n) => String(n).toUpperCase()));
+        const idx = [];
+        state.features.forEach((f, i) => {
+          if (wanted.has(String((f.properties && f.properties.name) || '').toUpperCase())) idx.push(i);
+        });
+        if (idx.length) {
+          window.__rd.select(idx);
+          const c = state.centroids[idx[0]];
+          if (c) state.map.flyTo({ center: c, zoom: 12 });
+        }
+        if (a.report) {
+          state.reportOpen = true;
+          $('#report').hidden = false;
+          $('#tool-report').hidden = true;
+          await renderReport();
+          $('#report').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      } else if (a.type === 'ask') {
+        chatOptions(a.options || [], a.multi);
+      }
+    }
+  }
+
+  async function chatSend(text) {
+    const value = String(text || '').trim();
+    if (!value || chatState.busy) return;
+    chatState.messages.push({ role: 'user', content: value });
+    chatBubble('user', value);
+    chatOptions([], false);
+    chatState.busy = true;
+    $('#chat-send').disabled = true;
+    $('#chat-input').value = '';
+    const typing = chatBubble('bot typing', 'Hommie is thinking…');
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: chatState.messages, context: chatContext() }),
+      });
+      const data = await res.json();
+      typing.remove();
+      const reply = data.reply || '…';
+      chatState.messages.push({ role: 'assistant', content: reply });
+      chatBubble('bot', reply);
+      await applyChatActions(data.actions || []);
+    } catch (err) {
+      typing.remove();
+      chatBubble('bot', 'No pude conectar con el asistente. Intenta de nuevo.');
+      console.warn('[chat]', err);
+    } finally {
+      chatState.busy = false;
+      $('#chat-send').disabled = false;
+      $('#chat-input').focus();
+    }
+  }
+
+  function initChat() {
+    const open = (v) => {
+      $('#chat-panel').hidden = !v;
+      $('#chat-fab').hidden = v;
+      if (v && !chatState.started) {
+        chatState.started = true;
+        const hello = 'Hi! I’m Hommie, your Houston real-estate assistant. Ask me about any area, or try a suggestion:';
+        chatState.messages.push({ role: 'assistant', content: hello });
+        chatBubble('bot', hello);
+        chatOptions(['Report for Katy', '4+ beds under $500k', 'Show rental prices', 'Compare Sugar Land and Cypress'], false);
+      }
+      if (v) setTimeout(() => $('#chat-input').focus(), 50);
+    };
+    $('#chat-fab').addEventListener('click', () => open(true));
+    $('#chat-close').addEventListener('click', () => open(false));
+    $('#chat-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      chatSend($('#chat-input').value);
+    });
+  }
+
   // ── boot ───────────────────────────────────────────────────────────────────
   function boot() {
     initSections();
@@ -1064,6 +1213,7 @@
     initLayers();
     initMap();
     initDrawCanvas();
+    initChat();
     initAds();
     if (window.RESDOGS_ACCOUNT) applyAccount(window.RESDOGS_ACCOUNT);
     state.map.on('load', () => {

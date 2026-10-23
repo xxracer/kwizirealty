@@ -735,6 +735,26 @@ async def admin_ad_delete(request: Request):
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/chat")
+async def api_chat(request: Request):
+    """Hommie AI — Gemini with tools over the live dataset."""
+    import chat
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    try:
+        out = chat.reply(body.get("messages") or [], body.get("context") or {})
+        return JSONResponse(out)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"reply": f"The assistant is unavailable right now ({str(exc)[:160]}).",
+             "actions": []},
+            status_code=200,
+        )
+
+
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthz():
     return "ok"
