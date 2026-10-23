@@ -333,6 +333,15 @@
           </div>
         </div>
 
+        <div class="card2" style="margin-bottom:1rem">
+          <h3>Rows already in the database</h3>
+          <div style="display:flex;align-items:baseline;gap:.5rem">
+            <span id="db-stats-total" style="font-size:1.6rem;font-weight:700">—</span>
+            <span class="muted" style="font-size:.8rem">rows imported and live on the map</span>
+          </div>
+          <table class="tbl" style="margin-top:.6rem"><thead><tr><th>Year</th><th>Rows</th></tr></thead><tbody id="db-stats-years"></tbody></table>
+        </div>
+
         <div id="upload-pane" class="grid-upload">
           <div class="card2" style="position:sticky;top:1rem;align-self:start">
             <h3>⬆ Upload <span id="sec-title-sm"></span></h3>
@@ -823,6 +832,7 @@
     $('upload-msg').textContent = '';
     $('upload-prog').style.width = '0';
     $('drop').classList.remove('on');
+    loadDbStats(sec.id);
     const cat = sec.category;
     if (cat) {
       loadFiles(cat, 'section-files');
@@ -832,6 +842,16 @@
       $('section-files').innerHTML = '<span class="muted" style="font-size:.75rem">Open one of the folders under Current Listings to upload.</span>';
       $('section-files-edit').innerHTML = '';
     }
+  }
+
+  async function loadDbStats(section) {
+    try {
+      const s = await api(`/api/admin/db-stats?section=${encodeURIComponent(section)}`);
+      $('db-stats-total').textContent = fmt(s.total);
+      $('db-stats-years').innerHTML = (s.byYear || []).length
+        ? s.byYear.map((r) => `<tr><td>${r.year || 'undated'}</td><td>${fmt(r.rows)}</td></tr>`).join('')
+        : '<tr><td colspan="2" class="muted">No rows in the database for this section yet.</td></tr>';
+    } catch (err) { console.warn(err); }
   }
 
   async function loadSectionStats(category) {

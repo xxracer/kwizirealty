@@ -953,7 +953,10 @@
   function applyAccount(account) {
     state.account = account || { signedIn: false, plan: 'free' };
     const plan = state.account.plan || 'free';
-    const locked = !state.account.signedIn || plan === 'free';
+    // THE OWNER'S SWITCH WINS: with user management OFF (gateEnabled false)
+    // the map is open to everyone, signed in or not.
+    const gateOn = state.account.gateEnabled !== false;
+    const locked = gateOn && (!state.account.signedIn || plan === 'free');
     document.body.classList.toggle('plan-locked', locked);
 
     const signin = $('#signin-btn');

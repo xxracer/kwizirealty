@@ -421,6 +421,12 @@ async def admin_assign(request: Request):
     return JSONResponse(admin.assign_chunk(cls, after))
 
 
+@app.get("/api/admin/db-stats")
+def admin_db_stats(request: Request, section: str = "sales"):
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.db_stats(section))
+
+
 @app.get("/api/admin/coverage")
 def admin_coverage(request: Request, cls: str = "subdivisions"):
     admin.verify_admin(request.headers.get("authorization"))

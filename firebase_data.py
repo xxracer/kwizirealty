@@ -61,23 +61,58 @@ def storage_download_url(object_path: str) -> str:
 
 # ── auth ──────────────────────────────────────────────────────────────────────
 
-_tok = {"value": None}
+_tok = {"value": None, "exp": 0.0}
 _lock = threading.Lock()
+
+
+class _UrllibResponse:
+    def __init__(self, status, headers, data):
+        self.status = status
+        self.headers = headers
+        self.data = data
+
+
+class _UrllibTransport:
+    """google-auth transport built on stdlib urllib.
+
+    The bundled Vercel runtime did not have `requests`, and
+    `google.auth.transport.requests` raised ImportError on every Firebase
+    call (map, /api/me, CMS lists). This adapter removes that dependency.
+    """
+
+    def __call__(self, url, method="GET", body=None, headers=None, timeout=None, **kwargs):
+        req = urllib.request.Request(
+            url, data=body, headers=headers or {}, method=method
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or 60) as resp:
+                return _UrllibResponse(resp.status, dict(resp.headers), resp.read())
+        except urllib.error.HTTPError as exc:
+            return _UrllibResponse(exc.code, dict(exc.headers or {}), exc.read())
 
 
 def token() -> str:
     with _lock:
-        if _tok["value"]:
+        now = time.time()
+        if _tok["value"] and now < _tok["exp"] - 60:
             return _tok["value"]
         from google.oauth2 import service_account
-        from google.auth.transport.requests import Request
+
         sa = json.loads(_env("FIREBASE_SERVICE_ACCOUNT"))
         creds = service_account.Credentials.from_service_account_info(
             sa, scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
         if not creds.valid:
-            creds.refresh(Request())
+            creds.refresh(_UrllibTransport())
         _tok["value"] = creds.token
+        try:
+            from datetime import datetime
+            if creds.expiry:
+                _tok["exp"] = now + (creds.expiry - datetime.utcnow()).total_seconds()
+            else:
+                _tok["exp"] = now + 3000
+        except Exception:  # noqa: BLE001
+            _tok["exp"] = now + 3000
         return _tok["value"]
 
 

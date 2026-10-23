@@ -66,11 +66,10 @@ def verify_admin(authorization: str | None) -> str:
         raise HTTPException(status_code=401, detail="Sign in required")
     token = authorization.split(" ", 1)[1].strip()
     try:
-        from google.auth.transport import requests as ga_requests
         from google.oauth2 import id_token
 
         info = id_token.verify_firebase_token(
-            token, ga_requests.Request(), audience=fd.PROJECT,
+            token, fd._UrllibTransport(), audience=fd.PROJECT,
             clock_skew_in_seconds=120,
         )
     except Exception as exc:  # noqa: BLE001
@@ -429,6 +428,35 @@ def assign_chunk(cls: str, after: dict | None, limit: int = 15000) -> dict:
         "next": {"m": last["mls_number"], "y": int(last["dataset_year"])},
         "done": len(rows) < limit,
     }
+
+
+def db_stats(section: str) -> dict:
+    """Rows already imported for a CMS section, by dataset year.
+
+    The original CSV files may no longer be in Storage (a re-upload rehearsal
+    deletes them), but their rows stay in Postgres — this is what the CMS
+    shows so the owner can see the data is loaded.
+    """
+    if section in ("rent", "current-rent"):
+        cond = "listing_type = 'rent'"
+    elif section in ("tax", "current-tax"):
+        cond = "listing_type = 'tax'"
+    elif section == "current-sales":
+        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND (close_date IS NULL OR close_date = '')"
+    elif section == "current":
+        cond = "close_date IS NULL OR close_date = ''"
+    else:
+        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND close_date IS NOT NULL AND close_date <> ''"
+
+    rows = fd.sql_rows(
+        "SELECT dataset_year AS yr, count(*)::int AS n FROM properties "
+        f"WHERE upload_session_id IS NULL AND ({cond}) GROUP BY 1 ORDER BY 1"
+    )
+    by_year = [
+        {"year": int(r.get("yr") or 0), "rows": int(r.get("n") or 0)}
+        for r in rows
+    ]
+    return {"section": section, "total": sum(y["rows"] for y in by_year), "byYear": by_year}
 
 
 def coverage_for(cls: str) -> dict:
