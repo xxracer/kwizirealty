@@ -44,6 +44,11 @@ BOUNDARY_FILE_NAME = {
     "middle": "Middle School ISD.geojson",
 }
 
+TEXT_COLUMN = {
+    "subdivisions": "subdivisions", "zipcodes": "zipcodes",
+    "highschools": "highschools", "elementary": "elementary", "middle": "middle",
+}
+
 POLY_COLUMN = {
     "subdivisions": "poly_id_subdivisions",
     "zipcodes": "poly_id_zipcodes",
@@ -452,7 +457,7 @@ def assign_chunk(cls: str, after: dict | None, limit: int = 15000) -> dict:
     if not col:
         raise HTTPException(status_code=400, detail="Unknown boundary class")
 
-    tree, geoms, names = engine._get_index(cls)
+    tree, geoms, names, fids, bases = engine._get_index(cls)
     if tree is None:
         return {"assigned": 0, "next": None, "done": True, "error": "No geometry"}
 
@@ -467,8 +472,9 @@ def assign_chunk(cls: str, after: dict | None, limit: int = 15000) -> dict:
         where.append(
             f"(mls_number > {m} OR (mls_number = {m} AND dataset_year > {y}))"
         )
+    text_col = TEXT_COLUMN.get(cls, "subdivisions")
     sql = (
-        "SELECT mls_number, dataset_year, lat, lng FROM properties WHERE "
+        f"SELECT mls_number, dataset_year, lat, lng, {text_col} AS row_text FROM properties WHERE "
         + " AND ".join(where)
         + f" ORDER BY mls_number, dataset_year LIMIT {int(limit)}"
     )
@@ -489,6 +495,20 @@ def assign_chunk(cls: str, after: dict | None, limit: int = 15000) -> dict:
             hits = [k for k in tree.query(pt) if geoms[k].intersects(pt)]
             if hits:
                 assigned = names[min(hits, key=lambda k: geoms[k].area)]
+            else:
+                key = fd.clean_boundary_name(row.get("row_text"))
+                cands = [i for i, b in enumerate(bases) if b == key] if key else []
+                if len(cands) == 1:
+                    assigned = names[cands[0]]
+                elif cands:
+                    best = min(cands, key=lambda k: (
+                        (geoms[k].centroid.x - pt.x) ** 2 + (geoms[k].centroid.y - pt.y) ** 2
+                    ))
+                    assigned = names[best]
+                elif len(geoms):
+                    near = tree.nearest(pt)
+                    if geoms[near].distance(pt) * 111.0 <= 0.55:
+                        assigned = names[near]
         values.append(
             "("
             + ", ".join([

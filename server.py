@@ -173,11 +173,12 @@ def api_map(
     poly_meta = []
     for feat in features:
         props = feat.get("properties") or {}
-        raw = None
-        for key in ("NAME", "Name", "Zip_Code", "Subdivision", "name"):
-            if props.get(key) not in (None, ""):
-                raw = props[key]
-                break
+        raw = props.get("name")
+        if raw in (None, ""):
+            for key in ("NAME", "Name", "Zip_Code", "Subdivision"):
+                if props.get(key) not in (None, ""):
+                    raw = props[key]
+                    break
         poly_meta.append({
             "name": fd.clean_boundary_name(raw),
             "label": fd.expand_boundary_name(raw),
@@ -317,28 +318,106 @@ def api_report(
     })
 
 
+def _search_tokens(text: str) -> list[str]:
+    """Uppercase words with a light singular form (SPRINGS -> SPRING)."""
+    clean = "".join(ch if ch.isalnum() else " " for ch in (text or "").upper())
+    out = []
+    for word in clean.split():
+        if len(word) > 3 and word.endswith("S"):
+            word = word[:-1]
+        out.append(word)
+    return out
+
+
+def _search_score(query: str, name: str) -> int:
+    """0 = no match; higher is better. Token-based so 'Eagle Spring Pkwy'
+    still finds 'EAGLE SPRINGS PKWY TO TIMBER FOREST DRIVE'."""
+    q_tokens = _search_tokens(query)
+    if not q_tokens:
+        return 0
+    n_tokens = _search_tokens(name)
+    if not n_tokens:
+        return 0
+    q_compact = " ".join(q_tokens)
+    n_compact = " ".join(n_tokens)
+    if q_compact in n_compact:
+        return 100 + len(q_tokens)
+    score = 0
+    for qt in q_tokens:
+        hit = False
+        for nt in n_tokens:
+            if nt == qt or nt.startswith(qt) or qt.startswith(nt):
+                hit = True
+                break
+        if not hit:
+            return 0
+        score += 1
+    return score
+
+
 @app.get("/api/search")
 def api_search(q: str = "", boundary: str = DEFAULT_BOUNDARY, limit: int = 20):
     """Search areas by name (the sidebar's Search section)."""
-    term = (q or "").strip().upper()
+    term = (q or "").strip()
     if not term:
         return JSONResponse({"results": []})
     features = engine.boundary_features(boundary)
-    results = []
-    for feat in features:
+    scored = []
+    for idx, feat in enumerate(features):
         props = feat.get("properties") or {}
-        raw = None
-        for key in ("NAME", "Name", "Zip_Code", "Subdivision", "name"):
-            if props.get(key) not in (None, ""):
-                raw = props[key]
-                break
-        name = fd.clean_boundary_name(raw)
+        name = props.get("name")
+        if name in (None, ""):
+            for key in ("NAME", "Name", "Zip_Code", "Subdivision"):
+                if props.get(key) not in (None, ""):
+                    name = fd.clean_boundary_name(props[key])
+                    break
+        name = fd.clean_boundary_name(name)
         if not name:
             continue
-        if term in name:
-            results.append({"name": name, "label": fd.expand_boundary_name(name)})
-        if len(results) >= limit:
-            break
+        score = _search_score(term, name)
+        if score:
+            scored.append((score, len(name), idx, name))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    results = [
+        {"name": name, "label": fd.expand_boundary_name(name), "index": idx}
+        for _s, _l, idx, name in scored[:limit]
+    ]
+
+    # Address fallback (needs GOOGLE_MAPS_API_KEY): geocode and return the
+    # polygon that contains the address — the old app searched addresses.
+    if not results and any(ch.isdigit() for ch in term):
+        key = fd._env("GOOGLE_MAPS_API_KEY")
+        if key:
+            import urllib.parse
+            import urllib.request
+
+            url = (
+                "https://maps.googleapis.com/maps/api/geocode/json?address="
+                + urllib.parse.quote(term)
+                + "&key="
+                + key
+            )
+            try:
+                with urllib.request.urlopen(url, timeout=15) as r:
+                    data = json.loads(r.read().decode())
+                loc = (data.get("results") or [{}])[0].get("geometry", {}).get("location")
+                if loc:
+                    from shapely.geometry import Point
+
+                    tree, geoms, names, _fids, _bases = engine._get_index(boundary)
+                    pt = Point(float(loc["lng"]), float(loc["lat"]))
+                    hits = [k for k in tree.query(pt) if geoms[k].intersects(pt)]
+                    idx = min(hits, key=lambda k: geoms[k].area) if hits else None
+                    if idx is None and len(geoms):
+                        idx = tree.nearest(pt)
+                        if geoms[idx].distance(pt) * 111.0 > 2.0:
+                            idx = None
+                    if idx is not None:
+                        name = names[idx]
+                        results = [{"name": name, "label": fd.expand_boundary_name(name), "index": idx}]
+            except Exception as exc:  # noqa: BLE001
+                print("[search] geocode failed:", exc)
+
     return JSONResponse({"results": results})
 
 

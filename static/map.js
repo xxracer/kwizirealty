@@ -735,8 +735,16 @@
       pairs.forEach((p) => { p.panel.hidden = true; });
     });
     // Reposition on resize, close on scroll: a fixed panel would drift.
+    // Scrolling INSIDE the panel must NOT close it (the Close Period list is
+    // taller than its max-height and has to be scrollable).
     window.addEventListener('resize', () => pairs.forEach((p) => { p.panel.hidden = true; }));
-    document.addEventListener('scroll', () => pairs.forEach((p) => { p.panel.hidden = true; }), true);
+    document.addEventListener('scroll', (e) => {
+      const target = e.target;
+      pairs.forEach((p) => {
+        if (target instanceof Node && p.panel.contains(target)) return;
+        p.panel.hidden = true;
+      });
+    }, true);
   }
 
   function initBoundary() {

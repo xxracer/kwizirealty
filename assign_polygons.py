@@ -27,7 +27,11 @@ import engine
 import firebase_data as fd
 
 CLASSES = ["subdivisions", "zipcodes", "highschools", "elementary", "middle"]
-CHUNK = 2500
+CHUNK = 1000
+TEXT_COL = {
+    "subdivisions": "subdivisions", "zipcodes": "zipcodes",
+    "highschools": "highschools", "elementary": "elementary", "middle": "middle",
+}
 
 
 def ensure_columns(classes):
@@ -71,9 +75,10 @@ def pull_rows(only_missing: bool, classes):
         "AND lat <> 0 AND lng <> 0"
     )
     if only_missing:
-        cond = " AND ".join(f"poly_id_{c} IS NULL" for c in classes)
+        cond = " OR ".join(f"(poly_id_{c} IS NULL OR poly_id_{c} = '')" for c in classes)
         where += f" AND ({cond})"
-    sql = f"SELECT mls_number, dataset_year, lat, lng FROM properties WHERE {where}"
+    sql = ("SELECT mls_number, dataset_year, lat, lng, subdivisions, zipcodes, "
+           f"highschools, elementary, middle FROM properties WHERE {where}")
     t0 = time.time()
     rows = fd.sql_rows(sql)
     print(f"[assign] {len(rows):,} rows with coordinates in {time.time() - t0:.1f}s")
@@ -91,18 +96,36 @@ def assign(rows, indexes):
         except (TypeError, ValueError):
             continue
         names = {}
-        for cls, (tree, geoms, names_list) in indexes.items():
+        for cls, (tree, geoms, names_list, fids, bases) in indexes.items():
             if tree is None:
                 names[cls] = ""
                 continue
             hits = tree.query(pt)
             # Keep only real containment — the tree returns bbox candidates.
             hits = [k for k in hits if geoms[k].intersects(pt)]
-            if len(hits) == 0:
-                names[cls] = ""
-            else:
+            if hits:
                 best = min(hits, key=lambda k: geoms[k].area)
-                names[cls] = names_list[best]
+            else:
+                # Fallback for points a few metres outside the polygon: use
+                # the row's ZIP / school / subdivision text (the owner's
+                # "geolocation + zip code + street name" rule).
+                key = fd.clean_boundary_name(row.get(TEXT_COL[cls]))
+                cands = [i for i, b in enumerate(bases) if b == key] if key else []
+                if len(cands) == 1:
+                    best = cands[0]
+                elif cands:
+                    best = min(cands, key=lambda k: (
+                        (geoms[k].centroid.x - pt.x) ** 2 + (geoms[k].centroid.y - pt.y) ** 2
+                    ))
+                else:
+                    best = None
+                # Last resort: a point a few metres outside the layer (street,
+                # sidewalk, rounded corner) belongs to the nearest polygon.
+                if best is None and len(geoms):
+                    near = tree.nearest(pt)
+                    if geoms[near].distance(pt) * 111.0 <= 0.55:
+                        best = near
+            names[cls] = names_list[best] if best is not None else ""
         out.append((row["mls_number"], int(row["dataset_year"]), names))
         if n % 25000 == 0:
             rate = n / max(1e-9, time.time() - started)
@@ -158,9 +181,9 @@ def main(argv):
     indexes = {}
     for cls in classes:
         t0 = time.time()
-        tree, geoms, names = engine._get_index(cls)
+        tree, geoms, names, fids, bases = engine._get_index(cls)
         print(f"[assign] {cls}: {len(geoms)} polygons ({time.time() - t0:.1f}s)")
-        indexes[cls] = (tree, geoms, names)
+        indexes[cls] = (tree, geoms, names, fids, bases)
 
     rows = pull_rows(only_missing, classes)
     if not rows:

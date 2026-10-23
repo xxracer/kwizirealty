@@ -156,11 +156,25 @@ def sql_literal(value) -> str:
 
 
 def sql_exec(sql: str) -> int:
-    """Run a non-SELECT statement (DDL / UPDATE) and return the affected rows."""
+    """Run a non-SELECT statement (DDL / UPDATE) and return the affected rows.
+
+    Retries a couple of times: a long UPDATE can lose the TLS connection
+    mid-flight (WinError 10053 / RemoteDisconnected) and the statement is
+    idempotent for our use (explicit UPDATE by key).
+    """
     sql = " ".join(sql.split())
     escaped = sql.replace("\\", "\\\\").replace('"', '\\"')
-    data = _gql('mutation Exec { _execute(sql: "' + escaped + '") }')
-    return int(data.get("_execute") or 0)
+    query = 'mutation Exec { _execute(sql: "' + escaped + '") }'
+    last = None
+    for attempt in range(3):
+        try:
+            data = _gql(query)
+            return int(data.get("_execute") or 0)
+        except (urllib.error.URLError, ConnectionError, OSError) as exc:
+            last = exc
+            _tok["value"] = None
+            time.sleep(1.5 * (attempt + 1))
+    raise last if last else RuntimeError("sql_exec failed")
 
 
 _SQL_CACHE: dict[str, tuple[float, list]] = {}
