@@ -28,7 +28,7 @@ METRICS = [
     {"key": "Est. Rental Price", "label": "Rental Price", "category": "rental",
      "col": "close_price", "kind": "rent", "fmt": "money"},
     {"key": "Rent-to-Sale Ratio", "label": "Rent-to-Sale Ratio", "category": "rental",
-     "col": "__r2s", "kind": "both", "fmt": "ratio"},
+     "col": "__r2s", "kind": "both", "fmt": "ratio3"},
     {"key": "Rental Price per Sqft", "label": "Rental Price / Sq.Ft.", "category": "rental",
      "col": "price_per_sqft", "kind": "rent", "fmt": "money2"},
     {"key": "Rental Days On Market", "label": "Rent Days on Market", "category": "rental",
@@ -318,6 +318,7 @@ _METRIC_FMT = {
     "days": format_days,
     "number": format_number,
     "ratio": format_ratio,
+    "ratio3": lambda v: "—" if v is None else f"{float(v):.3f}",
     "score": format_score,
     "sqft": format_sqft,
 }

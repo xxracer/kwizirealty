@@ -44,9 +44,10 @@ LIST_RENT_HEADERS = ["Original List Price", "List Price", "Original Rent", "List
 LEASE_DATE_HEADERS = [
     "Lease Date", "Rented Date", "Contract Date", "Close Date", "Lease Start Date",
 ]
-TAX_MLS_HEADERS = ["MLS #", "MLS Number", "MLS"]
+TAX_MLS_HEADERS = ["MLS #", "MLS Number", "MLS", "Parcel ID", "parcel_id"]
 TAX_YEAR_HEADERS = ["Tax Year"]
 TAX_AMOUNT_HEADERS = ["Tax Amount", "Taxes"]
+TAX_ASSESSED_HEADERS = ["Assessed Total Value", "Assessed Value", "assessed_total_value"]
 TAX_RATE_HEADERS = ["Tax Rate", "Tax Rate %"]
 
 INSERT_COLUMNS = [
@@ -189,14 +190,29 @@ def map_rows(rows: list[dict], section: str, session_id: str, default_year: int)
             tax_rate = clean_number(pick_first(row, TAX_RATE_HEADERS))
             tax_year = clean_number(pick_first(row, TAX_YEAR_HEADERS))
             tax_amount = clean_number(pick_first(row, TAX_AMOUNT_HEADERS))
+            assessed = clean_number(pick_first(row, TAX_ASSESSED_HEADERS))
+            # The CoreLogic tax export carries no "Tax Rate": it is derived
+            # from the assessed value, exactly like the old ETL did.
+            if not tax_rate and assessed > 0 and tax_amount > 0:
+                tax_rate = tax_amount * 100.0 / assessed
             if not tax_rate and not tax_year and not tax_amount:
                 continue
+            lat = clean_number(row.get("Latitude") or row.get("latitude"))
+            lng = clean_number(row.get("Longitude") or row.get("longitude"))
+            zip_raw = str(row.get("Postal Code") or row.get("Zip") or "").strip()
             out.append({
                 "mls_number": mls,
                 "dataset_year": int(tax_year) if tax_year else default_year,
+                "address": str(row.get("Address") or "").strip(),
+                "city": str(row.get("City Name") or "").strip(),
+                "zip": zip_raw,
+                "zipcodes": zip_raw,
+                "subdivisions": fd.clean_boundary_name(row.get("Subdivision")),
                 "tax_rate": tax_rate or None,
                 "tax_year": int(tax_year) if tax_year else None,
                 "tax_amount": tax_amount or None,
+                "lat": lat or None,
+                "lng": lng or None,
                 "listing_type": "tax",
                 "upload_session_id": session_id,
             })
@@ -309,7 +325,8 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
     core = ["mls_number", "dataset_year", "upload_session_id", "listing_type"]
     if section in TAX_SECTIONS:
         allowed = core + [
-            c for c in ("tax_rate", "tax_year", "tax_amount")
+            c for c in ("tax_rate", "tax_year", "tax_amount",
+                        "lat", "lng", "address", "city", "zip", "zipcodes", "subdivisions")
             if any(r.get(c) is not None for r in mapped)
         ]
     else:
