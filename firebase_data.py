@@ -116,25 +116,50 @@ def token() -> str:
         return _tok["value"]
 
 
+_TRANSIENT = (408, 429, 500, 502, 503, 504)
+
+
 def _gql(query: str, variables=None, retry=True):
+    """Execute GraphQL with retries.
+
+    Data Connect occasionally answers 503 UNAVAILABLE (or drops the TLS
+    connection) while a query is in flight. Without a retry the map/report
+    shows an empty result; with it the request simply succeeds a moment later.
+    """
     body = json.dumps({"query": query, **({"variables": variables} if variables else {})}).encode()
-    req = urllib.request.Request(
-        DC_URL,
-        data=body,
-        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            out = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code == 401 and retry:
-            _tok["value"] = None
-            return _gql(query, variables, retry=False)
-        raise RuntimeError(f"Data Connect HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
-    if out.get("errors"):
-        raise RuntimeError(f"Data Connect error: {str(out['errors'])[:400]}")
-    return out["data"]
+    last_error = None
+    for attempt in range(4):
+        req = urllib.request.Request(
+            DC_URL,
+            data=body,
+            headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                out = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and retry:
+                _tok["value"] = None
+                retry = False
+                continue
+            detail = e.read().decode("utf-8", "replace")[:300]
+            if e.code in _TRANSIENT and attempt < 3:
+                last_error = f"Data Connect HTTP {e.code}: {detail}"
+                time.sleep(1.2 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Data Connect HTTP {e.code}: {detail}")
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            if attempt < 3:
+                last_error = str(e)
+                _tok["value"] = None
+                time.sleep(1.2 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Data Connect connection failed: {e}") from None
+        if out.get("errors"):
+            raise RuntimeError(f"Data Connect error: {str(out['errors'])[:400]}")
+        return out["data"]
+    raise RuntimeError(f"Data Connect unavailable after retries: {last_error}")
 
 
 # ── raw SQL through the connector ─────────────────────────────────────────────

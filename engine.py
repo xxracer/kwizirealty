@@ -202,7 +202,10 @@ def _kind_clause(metric: dict) -> str:
             "AND close_date IS NOT NULL AND close_date <> ''"
         )
     if kind == "rent":
-        return "listing_type = 'rent'"
+        # Closed leases only: the "Current for Rent" rows (no lease date) are
+        # active listings, not rental comps — the old app kept them in a
+        # separate table and never used them for the rental median.
+        return "listing_type = 'rent' AND close_date IS NOT NULL AND close_date <> ''"
     if kind == "both":
         return "coalesce(listing_type, 'sale') <> 'tax'"
     return ""
@@ -656,24 +659,53 @@ def _cache_put(key: str, value):
         _agg_cache[key] = (time.time(), value)
 
 
+_key_locks: dict[str, threading.Lock] = {}
+_key_locks_guard = threading.Lock()
+
+
+def _inflight_lock(key: str) -> threading.Lock:
+    with _key_locks_guard:
+        lock = _key_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            if len(_key_locks) > 128:
+                _key_locks.clear()
+            _key_locks[key] = lock
+        return lock
+
+
 def aggregate_by_name(
     metric_key: str,
     boundary: str,
     filters: dict,
     period: str,
 ) -> dict[str, dict]:
-    """Per-polygon aggregates grouped by the row's own boundary text.
+    """Per-polygon aggregates (memoized + single-flight).
 
-    This is the fast path: no geometry needed, the rows already carry the
-    subdivision / zip / school name they belong to.
+    Two requests for the same filters wait for ONE Postgres query instead of
+    stacking identical heavy scans on the small instance.
     """
     metric = METRIC_BY_KEY.get(metric_key)
     if not metric:
         return {}
     key = _cache_key("by_name", metric_key, boundary, period, filters)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
+    with _inflight_lock(key):
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        out = _aggregate_impl(metric, boundary, filters, period)
+        _cache_put(key, out)
+        return out
+
+
+def _aggregate_impl(metric: dict, boundary: str, filters: dict, period: str) -> dict[str, dict]:
+    metric_key = metric["key"]
+    # Rent-to-Sale is not a row-level value: it needs the rent median and the
+    # sale median of the SAME polygon. The old app computed
+    # (rent_median * 12) / sale_median — replicate it exactly.
+    if metric_key == "Rent-to-Sale Ratio":
+        return _rent_to_sale(boundary, filters, period)
+
     where, _ = _filter_sql(filters)
     kind = _kind_clause(metric)
     if kind:
@@ -710,7 +742,33 @@ def aggregate_by_name(
             "max": _num(r.get("max_v")),
             "total_volume": _num(r.get("total_volume")),
         }
-    _cache_put(key, out)
+    return out
+
+
+def _rent_to_sale(boundary: str, filters: dict, period: str) -> dict[str, dict]:
+    """(rent median * 12) / sale median per polygon — the old app's formula.
+
+    Built from the two cached row-level aggregates instead of a second heavy
+    CTE: the rent and sale medians are already computed (and memoized) for the
+    map, so combining them is instant and never duplicates Postgres work.
+    """
+    rent = aggregate_by_name("Est. Rental Price", boundary, filters, period)
+    sale = aggregate_by_name("Close Price", boundary, filters, period)
+    out: dict[str, dict] = {}
+    for name, r in rent.items():
+        s = sale.get(name)
+        if not s or not r.get("value") or not s.get("value"):
+            continue
+        value = (float(r["value"]) * 12.0) / float(s["value"])
+        out[name] = {
+            "name": name,
+            "count": min(int(r.get("count") or 0), int(s.get("count") or 0)),
+            "value": value,
+            "avg": value,
+            "min": value,
+            "max": value,
+            "total_volume": 0.0,
+        }
     return out
 
 
@@ -740,6 +798,10 @@ def aggregate_by_geometry(
     """
     metric = METRIC_BY_KEY.get(metric_key)
     if not metric:
+        return {}
+    if metric_key == "Rent-to-Sale Ratio":
+        # Requires a rent median joined to a sale median; the geometry path
+        # would have to run the same join per custom area.
         return {}
     where, _ = _filter_sql(filters)
     kind = _kind_clause(metric)
