@@ -17,6 +17,7 @@ import json
 import re
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 import firebase_data as fd
@@ -176,16 +177,28 @@ def parse_csv(content: bytes) -> tuple[list[str], list[dict]]:
 
 # ── row mapping ─────────────────────────────────────────────────────────────
 
-def map_rows(rows: list[dict], section: str, session_id: str, default_year: int) -> list[dict]:
+def map_rows(
+    rows: list[dict],
+    section: str,
+    session_id: str,
+    default_year: int,
+    skips: dict[str, int] | None = None,
+) -> list[dict]:
     rent = section in RENT_SECTIONS
     tax = section in TAX_SECTIONS
     listing = "rent" if rent else "tax" if tax else "sale"
     out = []
 
+    def skip(reason: str) -> None:
+        """Count why a CSV row never became a property row."""
+        if skips is not None:
+            skips[reason] = skips.get(reason, 0) + 1
+
     for row in rows:
         if tax:
             mls = str(pick_first(row, TAX_MLS_HEADERS) or "").strip()
             if not mls:
+                skip("no MLS number")
                 continue
             tax_rate = clean_number(pick_first(row, TAX_RATE_HEADERS))
             tax_year = clean_number(pick_first(row, TAX_YEAR_HEADERS))
@@ -196,6 +209,7 @@ def map_rows(rows: list[dict], section: str, session_id: str, default_year: int)
             if not tax_rate and assessed > 0 and tax_amount > 0:
                 tax_rate = tax_amount * 100.0 / assessed
             if not tax_rate and not tax_year and not tax_amount:
+                skip("no tax rate/year/amount")
                 continue
             lat = clean_number(row.get("Latitude") or row.get("latitude"))
             lng = clean_number(row.get("Longitude") or row.get("longitude"))
@@ -223,7 +237,15 @@ def map_rows(rows: list[dict], section: str, session_id: str, default_year: int)
                        else clean_number(row.get("Close Price") or row.get("Original List Price")))
         lat = clean_number(row.get("Latitude"))
         lng = clean_number(row.get("Longitude"))
-        if not close_price or not lat or not lng:
+        mls = str(row.get("MLS Number") or "").strip()
+        if not mls:
+            skip("no MLS number")
+            continue
+        if not close_price:
+            skip("no Close/Lease price")
+            continue
+        if not lat or not lng:
+            skip("no coordinates")
             continue
 
         sqft = clean_number(row.get("SF"))
@@ -305,17 +327,54 @@ def _insert_batch(rows: list[dict], columns: list[str]) -> None:
     fd.sql_exec(sql)
 
 
+# One-sentence explanation of what an upload changes on the map — shown in
+# the post-upload report (same wording the old CMS used).
+EFFECT_BY_SECTION = {
+    "sales": "Sold-property records for {year}, keyed by MLS number + year. Re-uploading updates the same rows instead of duplicating them.",
+    "rent": "Rental records for {year}, keyed by MLS number + year. Re-uploading is safe — existing rows are updated in place.",
+    "current-sales": "Active for-sale listings, keyed by MLS number + year. Independent from the historical Sales bucket.",
+    "current-rent": "Active for-rent listings, keyed by MLS number + year. Independent from the historical Rent bucket.",
+    "current-tax": "Current tax values attached by MLS number; re-uploading refreshes them in place.",
+    "tax": "Tax records: rate/amount/year attached to the rows that share the same MLS number.",
+    "schools": "School ratings from the CSV, used by the school filters and report cards.",
+}
+DEFAULT_EFFECT = "Rows are keyed by MLS number + year; re-uploading updates them in place."
+
+
+def _effect_for(section: str, year: int) -> str:
+    template = EFFECT_BY_SECTION.get(section, DEFAULT_EFFECT)
+    return template.format(year=year) if "{year}" in template else template
+
+
 def stage_import(section: str, filename: str, content: bytes) -> dict:
     headers, rows = parse_csv(content)
     if not rows:
-        return {"error": "The file has no data rows."}
+        return {"ok": False, "error": "The file has no data rows.", "file": filename, "section": section}
 
     default_year = detect_year(filename, rows)
     session_id = f"sess-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    mapped = map_rows(rows, section, session_id, default_year)
+    skips: dict[str, int] = {}
+    mapped = map_rows(rows, section, session_id, default_year, skips)
+    zip_counts = Counter(
+        str(r.get("zipcodes") or "").strip()
+        for r in mapped
+        if str(r.get("zipcodes") or "").strip()
+    )
+    top_zips = [{"name": name, "count": n} for name, n in zip_counts.most_common(40)]
+    effect = _effect_for(section, default_year)
     if not mapped:
         return {
+            "ok": False,
             "error": "No row could be imported.",
+            "file": filename,
+            "section": section,
+            "year": default_year,
+            "parsed": len(rows),
+            "imported": 0,
+            "skipped": len(rows),
+            "skipReasons": skips,
+            "zips": [],
+            "effect": effect,
             "headers": headers,
             "detail": "Check the required columns (MLS Number, Close Price, Latitude, Longitude).",
         }
@@ -358,11 +417,15 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
         "ok": True,
         "sessionId": session_id,
         "section": section,
+        "category": category,
         "file": filename,
         "year": default_year,
         "parsed": len(rows),
         "imported": len(mapped),
         "skipped": len(rows) - len(mapped),
+        "skipReasons": skips,
+        "zips": top_zips,
+        "effect": effect,
         "headers": headers,
     }
 

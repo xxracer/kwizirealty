@@ -515,7 +515,7 @@ def admin_coverage(request: Request, cls: str = "subdivisions"):
 
 @app.post("/api/admin/upload-data")
 async def admin_upload_data(request: Request):
-    """Parse a property CSV and stage its rows into Postgres."""
+    """Parse a property CSV, import its rows and publish them right away."""
     import cms_import
 
     admin.verify_admin(request.headers.get("authorization"))
@@ -530,6 +530,16 @@ async def admin_upload_data(request: Request):
     if len(content) > 200 * 1024 * 1024:
         return JSONResponse({"error": "File too large (200 MB max)"}, status_code=400)
     result = cms_import.stage_import(section, upload.filename, content)
+    # Publish immediately: the owner asked to skip the dashboard "Add All"
+    # trip. If the commit fails the rows stay staged and the dashboard
+    # session list still lets them publish or discard.
+    if result.get("sessionId"):
+        try:
+            result["committed"] = cms_import.commit_session(result["sessionId"])
+            result["published"] = True
+        except Exception as exc:  # noqa: BLE001
+            result["published"] = False
+            result["commitError"] = str(exc)[:200]
     return JSONResponse(result)
 
 
