@@ -304,6 +304,37 @@ def map_rows(
 
 # ── SQL staging ─────────────────────────────────────────────────────────────
 
+def _row_key(row: dict) -> tuple[str, int]:
+    """The table's primary key identity: MLS number + dataset year."""
+    return (str(row.get("mls_number") or "").strip(), int(row.get("dataset_year") or 0))
+
+
+def committed_keys(rows: list[dict]) -> set[tuple[str, int]]:
+    """Which of these (MLS, year) pairs are already COMMITTED (visible on the map).
+
+    Used by the upload report to tell "New" rows apart from rows that already
+    exist in the database and are being refreshed in place. Pending rows from
+    another session are ignored on purpose — only what the map can see counts.
+    """
+    keys = {k for k in (_row_key(r) for r in rows) if k[0]}
+    if not keys:
+        return set()
+    mls = sorted({m for m, _ in keys})
+    found: set[tuple[str, int]] = set()
+    chunk_size = 1000
+    for i in range(0, len(mls), chunk_size):
+        chunk = mls[i : i + chunk_size]
+        sql = (
+            "SELECT mls_number, dataset_year FROM properties "
+            "WHERE upload_session_id IS NULL AND mls_number IN ("
+            + ",".join(fd.sql_literal(m) for m in chunk)
+            + ")"
+        )
+        for r in fd.sql_rows(sql, use_cache=False):
+            found.add((str(r.get("mls_number") or "").strip(), int(r.get("dataset_year") or 0)))
+    return found & keys
+
+
 def _insert_batch(rows: list[dict], columns: list[str]) -> None:
     cols = ", ".join(columns + ["updated_at"])
     updates = ", ".join(
@@ -355,12 +386,29 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
     session_id = f"sess-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     skips: dict[str, int] = {}
     mapped = map_rows(rows, section, session_id, default_year, skips)
-    zip_counts = Counter(
-        str(r.get("zipcodes") or "").strip()
-        for r in mapped
-        if str(r.get("zipcodes") or "").strip()
-    )
+    # "What did this upload actually change?" — split the rows into NEW vs
+    # already in the database (re-uploaded → refreshed in place) and call out
+    # duplicate (MLS, year) pairs inside the file, exactly like new kwizi's
+    # post-upload report. Must run BEFORE the insert: only committed rows
+    # count as "already in the database".
+    existing = committed_keys(mapped)
+    key_counts = Counter(_row_key(r) for r in mapped)
+    duplicate_rows = sum(n - 1 for n in key_counts.values() if n > 1)
+    updated_rows = sum(1 for r in mapped if _row_key(r) in existing)
+    new_rows = len(mapped) - updated_rows
+
+    zip_new_counts: Counter = Counter()
+    zip_updated_counts: Counter = Counter()
+    for r in mapped:
+        z = str(r.get("zipcodes") or "").strip()
+        if not z:
+            continue
+        (zip_updated_counts if _row_key(r) in existing else zip_new_counts)[z] += 1
+
+    zip_counts = zip_new_counts + zip_updated_counts
     top_zips = [{"name": name, "count": n} for name, n in zip_counts.most_common(40)]
+    zips_added = [{"name": name, "count": n} for name, n in zip_new_counts.most_common(40)]
+    zips_updated = [{"name": name, "count": n} for name, n in zip_updated_counts.most_common(40)]
     effect = _effect_for(section, default_year)
     if not mapped:
         return {
@@ -374,6 +422,11 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
             "skipped": len(rows),
             "skipReasons": skips,
             "zips": [],
+            "zipsAdded": [],
+            "zipsUpdated": [],
+            "newRows": 0,
+            "updatedRows": 0,
+            "duplicateRows": 0,
             "effect": effect,
             "headers": headers,
             "detail": "Check the required columns (MLS Number, Close Price, Latitude, Longitude).",
@@ -425,6 +478,11 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
         "skipped": len(rows) - len(mapped),
         "skipReasons": skips,
         "zips": top_zips,
+        "zipsAdded": zips_added,
+        "zipsUpdated": zips_updated,
+        "newRows": new_rows,
+        "updatedRows": updated_rows,
+        "duplicateRows": duplicate_rows,
         "effect": effect,
         "headers": headers,
     }

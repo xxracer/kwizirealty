@@ -303,6 +303,20 @@
   .rp-chip.amber { background: rgba(245,158,11,.1); border-color: rgba(245,158,11,.3); color: #fcd34d; }
   .rp-chip.emerald { background: rgba(16,185,129,.1); border-color: rgba(16,185,129,.3); color: #6ee7b7; }
   .rp-skipped { color: #fca5a5; }
+  /* Upload summary boxes — NEW / already in the database / duplicates /
+     skipped. Same idea as new kwizi's post-upload modal. */
+  .rp-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: .55rem; }
+  .rp-stat { border-radius: .7rem; padding: .6rem .75rem; border: 1px solid var(--border); background: rgba(255,255,255,.03); }
+  .rp-stat b { display: block; font-size: 1.15rem; line-height: 1.2; color: #fff; }
+  .rp-stat span { display: block; font-size: .66rem; margin-top: .15rem; color: #9ca3af; line-height: 1.35; }
+  .rp-stat.new { border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.08); }
+  .rp-stat.new b { color: #6ee7b7; }
+  .rp-stat.existing { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.08); }
+  .rp-stat.existing b { color: #fcd34d; }
+  .rp-stat.dup { border-color: rgba(168,85,247,.4); background: rgba(168,85,247,.08); }
+  .rp-stat.dup b { color: #d8b4fe; }
+  .rp-stat.skip { border-color: rgba(244,63,94,.4); background: rgba(244,63,94,.08); }
+  .rp-stat.skip b { color: #fca5a5; }
   .rp-foot { padding: .85rem 1.25rem; border-top: 1px solid var(--border); }
   .rp-note { font-size: 11px; color: rgba(251,191,36,.85); margin: 0 0 .6rem; }
   .rp-actions { display: flex; gap: .5rem; }
@@ -1349,14 +1363,29 @@
     const failed = !!r.error;
     const rows = Number(r.imported || 0);
     const skipped = Number(r.skipped || 0);
+    const newRows = Number(r.newRows || 0);
+    const updatedRows = Number(r.updatedRows || 0);
+    const duplicateRows = Number(r.duplicateRows || 0);
     const yearPart = r.year ? ` · Year ${r.year}` : '';
-    const meta = `${secLabel || 'Uploaded'}${yearPart} · ${fmt(rows)} rows${skipped ? ` · ${fmt(skipped)} skipped` : ''}`;
+    const dbPart = updatedRows ? ` · ${fmt(updatedRows)} already in DB` : '';
+    const meta = `${secLabel || 'Uploaded'}${yearPart} · ${fmt(rows)} rows${dbPart}${skipped ? ` · ${fmt(skipped)} skipped` : ''}`;
     const reasons = r.skipReasons && Object.keys(r.skipReasons).length
       ? Object.entries(r.skipReasons).map(([k, v]) => `${fmt(v)} ${k}`).join(' · ')
       : '';
+    const chipsFor = (list, cls) => (list || []).map((z) => (
+      `<span class="rp-chip ${cls}">${esc(z.name)}${Number(z.count) > 1 ? ' · ' + fmt(z.count) : ''}</span>`
+    )).join('');
     const zips = (r.zips || []).map((z) => (
       `<span class="rp-chip">${esc(z.name)}${Number(z.count) > 1 ? ' · ' + fmt(z.count) : ''}</span>`
     )).join('');
+    const updatedList = r.zipsUpdated || [];
+    const addedList = r.zipsAdded || [];
+    const updatedChips = chipsFor(updatedList, 'amber');
+    const addedChips = chipsFor(addedList, 'emerald');
+    const nameLine = (list) => {
+      const names = list.slice(0, 12).map((z) => z.name).join(', ');
+      return `${names}${list.length > 12 ? `, +${list.length - 12} more` : ''}`;
+    };
     return `<div class="rp-item${failed ? ' error' : ''}">
       <div class="rp-row">
         <div style="min-width:0">
@@ -1368,10 +1397,17 @@
       ${failed
         ? `<p class="rp-line rp-skipped">${esc(r.error)} ${esc(r.detail || '')}</p>`
         : `<p class="rp-line">${esc(r.effect || 'Rows are keyed by MLS number + year; re-uploading updates them in place.')}</p>`}
+      ${!failed && updatedList.length ? `<p class="rp-line"><span class="rp-label" style="color:#fcd34d">Updated:</span> ${esc(nameLine(updatedList))} <span class="muted">(${fmt(updatedList.length)} ZIPs)</span></p>` : ''}
+      ${!failed && addedList.length ? `<p class="rp-line"><span class="rp-label" style="color:#6ee7b7">New:</span> ${esc(nameLine(addedList))} <span class="muted">(${fmt(addedList.length)} ZIPs)</span></p>` : ''}
       <div class="rp-detail hidden" id="rp-detail-${idx}">
         ${failed ? '' : `<p><span class="rp-label">What this document uploaded:</span> ${fmt(rows)} rows${skipped ? ` · ${fmt(skipped)} skipped` : ''}${r.year ? ` · Year ${r.year}` : ''}</p>`}
+        ${failed ? '' : `<p><span class="rp-label" style="color:#6ee7b7">New:</span> ${fmt(newRows)} rows did not exist in the database yet and were added.</p>`}
+        ${failed ? '' : `<p><span class="rp-label" style="color:#fcd34d">Already in the database:</span> ${fmt(updatedRows)} rows had the same MLS + year and were refreshed in place.</p>`}
+        ${duplicateRows ? `<p class="rp-skipped">Duplicates: ${fmt(duplicateRows)} rows repeated an MLS + year inside this file; the upsert collapsed them.</p>` : ''}
         ${reasons ? `<p class="rp-skipped">Skipped rows: ${esc(reasons)}.</p>` : ''}
-        ${zips ? `<p class="rp-label">ZIPs covered in this document:</p><div class="rp-chips">${zips}</div>` : ''}
+        ${updatedChips ? `<p class="rp-label" style="color:#fcd34d">Already in the database — these ZIPs were updated in place:</p><div class="rp-chips">${updatedChips}</div>` : ''}
+        ${addedChips ? `<p class="rp-label" style="color:#6ee7b7">New — these ZIPs had no such MLS + year rows yet:</p><div class="rp-chips">${addedChips}</div>` : ''}
+        ${!updatedChips && !addedChips && zips ? `<p class="rp-label">ZIPs covered in this document:</p><div class="rp-chips">${zips}</div>` : ''}
         ${r.published === false ? '<p class="rp-skipped">The automatic publish failed — the rows stayed pending in the Dashboard.</p>' : ''}
         <p>${failed ? 'Nothing from this file reached the database.' : r.published === false ? 'Staged only — not on the map yet.' : 'Published — these rows are already in the database and live on the map.'}</p>
       </div>
@@ -1380,7 +1416,19 @@
 
   function showReport(items) {
     const body = $('rp-body');
-    body.innerHTML = items.map(reportItemHtml).join('');
+    const totals = items.reduce((a, r) => ({
+      new: a.new + Number(r.newRows || 0),
+      existing: a.existing + Number(r.updatedRows || 0),
+      dup: a.dup + Number(r.duplicateRows || 0),
+      skipped: a.skipped + Number(r.skipped || 0),
+    }), { new: 0, existing: 0, dup: 0, skipped: 0 });
+    const summary = `<div class="rp-summary">
+      <div class="rp-stat new"><b>${fmt(totals.new)}</b><span>New rows — added for the first time</span></div>
+      <div class="rp-stat existing"><b>${fmt(totals.existing)}</b><span>Already in the database — updated in place</span></div>
+      <div class="rp-stat dup"><b>${fmt(totals.dup)}</b><span>Duplicate rows inside the files — collapsed</span></div>
+      <div class="rp-stat skip"><b>${fmt(totals.skipped)}</b><span>Rows skipped (missing MLS, price or coordinates)</span></div>
+    </div>`;
+    body.innerHTML = summary + items.map(reportItemHtml).join('');
     body.querySelectorAll('[data-rp-toggle]').forEach((b) => b.addEventListener('click', () => {
       const d = $('rp-detail-' + b.dataset.rpToggle);
       if (d) d.classList.toggle('hidden');

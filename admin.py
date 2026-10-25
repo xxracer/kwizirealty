@@ -661,13 +661,17 @@ SECTION_FILE_CATEGORIES = {
 }
 
 TYPE_CONDITION = {
-    "sale": "coalesce(listing_type,'sale') = 'sale'",
+    # NULL and '' both mean "sale" in the mapper / the old engine.
+    "sale": "coalesce(nullif(listing_type,''),'sale') = 'sale'",
     "rent": "listing_type = 'rent'",
     "tax": "listing_type = 'tax'",
 }
 
 SECTION_SQL_SCOPE = {
-    "sales": (["sale"], "dated"),
+    # OWNER RULE (2026-10-25): "Delete Sales Data" wipes the WHOLE sales
+    # bucket — historical rows AND active/undated listings — so the section can
+    # be re-uploaded clean. Rent and tax buckets are never touched from here.
+    "sales": (["sale"], "any"),
     "rent": (["rent"], "dated"),
     # Same scope as the old CMS: Current Listings wipes active sale + rent
     # rows. Tax rows are shared with the Tax Records section, so they are
