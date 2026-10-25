@@ -351,6 +351,7 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
         "uploadedAt": int(time.time() * 1000),
         "storageUrl": url,
         "storagePath": object_path,
+        "year": default_year,
     }, category=category)
 
     return {

@@ -16,6 +16,7 @@ Capabilities:
 import gzip
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -156,9 +157,13 @@ def dataset_status() -> dict:
         by_category[cat] = by_category.get(cat, 0) + 1
         if cat == "boundary":
             boundaries.append({
+                "id": f.get("_id"),
                 "name": f.get("name"),
                 "size": f.get("size"),
                 "uploadedAt": f.get("uploadedAt"),
+                "storagePath": f.get("storagePath"),
+                "storageUrl": f.get("storageUrl"),
+                "year": _record_year(f),
             })
     boundaries.sort(key=lambda b: -(float(b.get("uploadedAt") or 0)))
 
@@ -243,6 +248,13 @@ def _write_firestore_file(record: dict, category: str = "boundary") -> None:
         "headers": {"arrayValue": {"values": []}},
         "rows": {"arrayValue": {"values": []}},
     }
+    # The CMS groups uploads by dataset year; keep it on the record so future
+    # uploads land in the right folder without re-reading the file.
+    if record.get("year") is not None:
+        try:
+            fields["year"] = {"integerValue": str(int(record["year"]))}
+        except (TypeError, ValueError):
+            pass
     body = json.dumps({"fields": fields}).encode()
     req = urllib.request.Request(
         url,
@@ -314,7 +326,7 @@ def _download_object(url: str) -> bytes:
     return buf
 
 
-def file_preview(doc_id: str, limit: int = 60) -> dict:
+def file_preview(doc_id: str, limit: int = 500) -> dict:
     """The Eye: the first rows of an uploaded CSV (or GeoJSON stats).
 
     The file is read from Storage; if the object no longer exists the answer
@@ -386,10 +398,55 @@ def file_preview(doc_id: str, limit: int = 60) -> dict:
     }
 
 
+_YEAR_IN_NAME = re.compile(r"(?:^|\D)(19\d{2}|20\d{2})(?:\D|$)")
+
+
+def _record_year(rec: dict) -> int | None:
+    """The dataset year of an uploaded file (same grouping the old CMS used).
+
+    Older records already carry `year`; files uploaded through this Python CMS
+    do not, so the year is recovered from the file name — exactly like the
+    browser importer's detect_year().
+    """
+    raw = rec.get("year")
+    try:
+        if raw not in (None, ""):
+            return int(raw)
+    except (TypeError, ValueError):
+        pass
+    name = rec.get("name") or ""
+    years = [int(y) for y in _YEAR_IN_NAME.findall(name) if 1900 <= int(y) <= 2099]
+    return max(years) if years else None
+
+
+def file_bytes(doc_id: str) -> tuple[bytes, str]:
+    """The original (decompressed) bytes behind a CMS record — used by Download.
+
+    Files uploaded through this Python CMS are stored gzipped, so the browser
+    must never open the Storage URL directly: it would save a .gz with a .csv
+    name. This returns the plain file the owner uploaded.
+    """
+    files = fd._fs_list("cms_files")
+    rec = next((f for f in files if f.get("_id") == doc_id), None)
+    if not rec:
+        raise HTTPException(status_code=404, detail="File record not found")
+    url = rec.get("storageUrl")
+    if not url:
+        raise HTTPException(status_code=404, detail="This record has no Storage file")
+    return _download_object(url), rec.get("name") or "download"
+
+
+CURRENT_LISTING_CATEGORIES = {"current-sale", "current-rent", "current-tax", "property"}
+
+
 def list_files(category: str | None = None) -> list[dict]:
     files = fd._fs_list("cms_files")
     if category:
-        files = [f for f in files if (f.get("category") or "") == category]
+        cats = {category}
+        # "Current Listings" is one page in the CMS but three upload buckets.
+        if category == "current":
+            cats = CURRENT_LISTING_CATEGORIES
+        files = [f for f in files if (f.get("category") or "") in cats]
     files.sort(key=lambda f: -(float(f.get("uploadedAt") or 0)))
     return [
         {
@@ -399,7 +456,9 @@ def list_files(category: str | None = None) -> list[dict]:
             "size": f.get("size"),
             "uploadedAt": f.get("uploadedAt"),
             "storagePath": f.get("storagePath"),
+            "storageUrl": f.get("storageUrl"),
             "rowCount": f.get("rowCount"),
+            "year": _record_year(f),
         }
         for f in files
     ]

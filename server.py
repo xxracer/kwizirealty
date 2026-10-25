@@ -16,6 +16,7 @@ Routes:
 import json
 import os
 import time
+import urllib.parse
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -599,6 +600,20 @@ def admin_file_preview(request: Request, id: str = ""):
     """The CMS Eye: the first rows of an uploaded CSV / GeoJSON stats."""
     admin.verify_admin(request.headers.get("authorization"))
     return JSONResponse(admin.file_preview(id))
+
+
+@app.get("/api/admin/file-download")
+def admin_file_download(request: Request, id: str = ""):
+    """Download the original file (gzip is undone server-side)."""
+    admin.verify_admin(request.headers.get("authorization"))
+    data, name = admin.file_bytes(id)
+    base = (name or "download").split("/")[-1] or "download"
+    quoted = urllib.parse.quote(base)
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"},
+    )
 
 
 @app.post("/api/admin/delete-file")

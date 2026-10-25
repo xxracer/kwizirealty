@@ -216,6 +216,42 @@
   .fm-error { padding: 1.5rem; color: #fbbf24; font-size: .82rem; line-height: 1.6; }
   .icon-btn-eye { background: none; border: none; color: #9ca3af; cursor: pointer; font-size: 1rem; padding: .2rem .4rem; }
   .icon-btn-eye:hover { color: #60a5fa; }
+
+  /* ── uploaded-file tree (same shape as the old admin) ─────────────────── */
+  .files-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; margin-bottom: .85rem; }
+  .files-head h3 { margin: 0; }
+  .file-search { position: relative; flex: 1; min-width: 11rem; max-width: 18rem; }
+  .file-search svg { position: absolute; left: .6rem; top: 50%; transform: translateY(-50%); color: #6b7280; pointer-events: none; }
+  .file-search input { padding-left: 2rem; }
+  .ftree { display: flex; flex-direction: column; gap: .3rem; max-height: 34rem; overflow: auto; padding-right: .25rem; }
+  .ftree-folder-head {
+    display: flex; align-items: center; gap: .5rem; width: 100%; background: none; border: none;
+    color: #d1d5db; cursor: pointer; padding: .45rem .25rem; font-size: .82rem; text-align: left;
+  }
+  .ftree-folder-head:hover { color: #fff; }
+  .ftree-folder-head .caret { color: #6b7280; width: .8rem; font-size: .68rem; }
+  .ftree-folder-head .folder { color: #60a5fa; }
+  .ftree-folder-head .fname { font-weight: 700; }
+  .ftree-folder-head .fcount { color: #6b7280; font-size: .7rem; }
+  .ftree-body {
+    margin: .1rem 0 .45rem .85rem; padding-left: .85rem; border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: .5rem;
+  }
+  .file-card {
+    background: var(--background); border: 1px solid var(--border); border-radius: .75rem;
+    padding: .7rem .85rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  }
+  .file-card .file-main { min-width: 0; }
+  .file-card .file-name { font-size: .82rem; font-weight: 500; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-card .file-meta { font-size: 10px; color: #9ca3af; margin-top: .18rem; }
+  .file-actions { display: flex; align-items: center; gap: .15rem; flex-shrink: 0; }
+  .file-actions button {
+    background: none; border: none; color: #9ca3af; cursor: pointer; padding: .4rem;
+    border-radius: .5rem; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .file-actions button:hover { background: rgba(255,255,255,.1); color: #fff; }
+  .file-actions button:disabled { opacity: .35; cursor: not-allowed; }
+  .file-actions button.danger:hover { background: rgba(239,68,68,.2); color: #f87171; }
 </style>
 </head>
 <body>
@@ -372,7 +408,16 @@
             <div class="prog"><div id="upload-prog"></div></div>
             <p id="upload-msg" style="margin:.5rem 0 0;font-size:.78rem"></p>
           </div>
-          <div class="card2"><h3>Uploaded files</h3><div id="section-files"></div></div>
+          <div class="card2">
+            <div class="files-head">
+              <h3>Uploaded files</h3>
+              <label class="file-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input type="text" data-search="section-files" placeholder="Search files…"/>
+              </label>
+            </div>
+            <div id="section-files"></div>
+          </div>
         </div>
 
         <div id="edit-pane" class="hidden">
@@ -380,7 +425,16 @@
             <h3>Edit Manually</h3>
             <p class="muted" style="font-size:.8rem;line-height:1.6">Manual property edits live in the main CMS. From here you can still review the uploaded files in this section and delete them.</p>
           </div>
-          <div class="card2"><h3>Uploaded files</h3><div id="section-files-edit"></div></div>
+          <div class="card2">
+            <div class="files-head">
+              <h3>Uploaded files</h3>
+              <label class="file-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input type="text" data-search="section-files-edit" placeholder="Search files…"/>
+              </label>
+            </div>
+            <div id="section-files-edit"></div>
+          </div>
         </div>
       </section>
 
@@ -424,7 +478,16 @@
             </label>
             <p id="geo-msg" style="margin:.5rem 0 0;font-size:.78rem"></p>
           </div>
-          <div class="card2"><h3>Uploaded boundary files</h3><div id="boundary-list"></div></div>
+          <div class="card2">
+            <div class="files-head">
+              <h3>Uploaded boundary files</h3>
+              <label class="file-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input type="text" data-search="boundary-list" placeholder="Search files…"/>
+              </label>
+            </div>
+            <div id="boundary-list"></div>
+          </div>
         </div>
       </section>
 
@@ -623,7 +686,7 @@
       cols: 'MLS Number · Lease Date · Lease Price · SF · Latitude · Longitude',
       hint: 'The rental CSVs exported from HAR.',
       modifies: ['Median monthly rent per area', 'Rent $/Sq.Ft. and rent DOM', 'Real rent figures in the report'] },
-    { id: 'current', label: 'Current Listings', sub: 'All current listings — upload inside a folder' },
+    { id: 'current', label: 'Current Listings', sub: 'All current listings — upload inside a folder', category: 'current', cols: 'MLS Number · Close Price · Latitude · Longitude', hint: 'Active for-sale, for-rent and tax listings. Each kind uploads inside its own folder.', modifies: ['Current Sales and Est. Rentals map layers', 'Months of inventory', 'Tax rate and tax amount per area'] },
     { id: 'current-sales', label: '└ Sales', sub: 'Current for-sale uploads', category: 'current-sale',
       cols: 'MLS Number · Close Price · Latitude · Longitude',
       hint: 'Active for-sale listings — they feed the “Current Sales” map layer.',
@@ -770,17 +833,15 @@
 
       if (state.isAdmin) {
         $('dash-sections').innerHTML = SECTIONS.filter((x) => x.id !== 'dashboard').map((x) => {
-          const count = x.category ? Number((s.filesByCategory || {})[x.category] || 0) : 0;
+          const count = x.category === 'current'
+            ? ['current-sale', 'current-rent', 'current-tax', 'property'].reduce((a, c) => a + Number((s.filesByCategory || {})[c] || 0), 0)
+            : x.category ? Number((s.filesByCategory || {})[x.category] || 0) : 0;
           return `<button class="sec-card" data-go="${x.id}">
             <div class="top"><div class="ic">${CARD_ICON[x.id] || ''}</div><span class="count">${fmt(count)} files</span></div>
             <h3>${x.label.replace(/^└ /, '')}</h3><p>${x.sub}</p></button>`;
         }).join('');
         document.querySelectorAll('#dash-sections [data-go]').forEach((b) => b.addEventListener('click', () => show(b.dataset.go)));
       }
-      $('boundary-list').innerHTML = (s.boundaryFiles || []).map((b) => {
-        const when = b.uploadedAt ? new Date(Number(b.uploadedAt)).toLocaleString() : '—';
-        return `<div class="row"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${b.name}">${b.name}</span><span class="muted">${bytes(b.size)} · ${when}</span></div>`;
-      }).join('') || '<span class="muted" style="font-size:.75rem">No boundary files yet.</span>';
     } catch (err) { console.warn(err); }
   }
 
@@ -860,6 +921,7 @@
     $('upload-msg').textContent = '';
     $('upload-prog').style.width = '0';
     $('drop').classList.remove('on');
+    document.querySelectorAll('[data-search="section-files"],[data-search="section-files-edit"]').forEach((i) => { i.value = ''; });
     loadDbStats(sec.id);
     const cat = sec.category;
     if (cat) {
@@ -867,6 +929,8 @@
       loadFiles(cat, 'section-files-edit');
       loadSectionStats(cat);
     } else {
+      fileCache['section-files'] = [];
+      fileCache['section-files-edit'] = [];
       $('section-files').innerHTML = '<span class="muted" style="font-size:.75rem">Open one of the folders under Current Listings to upload.</span>';
       $('section-files-edit').innerHTML = '';
     }
@@ -903,25 +967,184 @@
     } catch (err) { console.warn(err); }
   }
 
+  // ── uploaded files: the old CMS tree (year folders + Eye/Download/Delete) ──
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+  const ICON_EYE = SVG('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>');
+  const ICON_DOWN = SVG('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>');
+  const ICON_TRASH = SVG('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>');
+  const fileCache = {};
+  const fileCategory = {};
+
+  function fileYear(f) {
+    const y = f && f.year;
+    const n = Number(y);
+    return y !== null && y !== undefined && y !== '' && !isNaN(n) ? String(n) : 'No Year';
+  }
+  function sortYearLabels(a, b) {
+    const na = Number(a), nb = Number(b);
+    const aN = !isNaN(na), bN = !isNaN(nb);
+    if (aN && bN) return na - nb;
+    if (aN) return -1;
+    if (bN) return 1;
+    return a.localeCompare(b);
+  }
+
+  function fileCardHtml(f) {
+    const name = String(f.name || '');
+    const base = name.split('/').pop() || name;
+    const when = f.uploadedAt ? new Date(Number(f.uploadedAt)).toLocaleString() : '';
+    const dl = f.storageUrl || '';
+    return `<div class="file-card">
+      <div class="file-main">
+        <div class="file-name" title="${esc(name)}">${esc(base)}</div>
+        <div class="file-meta">${bytes(f.size)}${when ? ' · ' + esc(when) : ''}</div>
+      </div>
+      <div class="file-actions">
+        <button type="button" data-eye="${esc(f.id)}" title="Preview" aria-label="Preview">${ICON_EYE}</button>
+        <button type="button" data-dl="${esc(f.id)}" data-name="${esc(base)}" title="Download" aria-label="Download"${dl ? '' : ' disabled'}>${ICON_DOWN}</button>
+        <button type="button" class="danger" data-del="${esc(f.id)}" data-path="${esc(f.storagePath || '')}" data-category="${esc(f.category || '')}" title="Delete" aria-label="Delete">${ICON_TRASH}</button>
+      </div>
+    </div>`;
+  }
+
+  const FILE_TYPE_GROUPS = [
+    { match: ['current-sale'], label: 'For Sale' },
+    { match: ['current-rent'], label: 'For Rent' },
+    { match: ['current-tax'], label: 'Taxes' },
+    { match: ['property'], label: 'General' },
+  ];
+
+  function folderHtml(label, count, body) {
+    return `<div class="ftree-folder">
+      <button type="button" class="ftree-folder-head">
+        <span class="caret">▼</span><span class="folder">📁</span>
+        <span class="fname">${esc(label)}</span>
+        <span class="fcount">(${fmt(count)} ${count === 1 ? 'file' : 'files'})</span>
+      </button>
+      <div class="ftree-body">${body}</div>
+    </div>`;
+  }
+
+  function yearFoldersHtml(files) {
+    const groups = {};
+    files.forEach((f) => {
+      const y = fileYear(f);
+      (groups[y] = groups[y] || []).push(f);
+    });
+    const labels = Object.keys(groups);
+    // Boundary / undated uploads have no year — show them as one plain list.
+    if (labels.length === 1 && labels[0] === 'No Year') {
+      return groups['No Year'].map(fileCardHtml).join('');
+    }
+    return labels.sort(sortYearLabels).map((y) => {
+      const list = groups[y].slice().sort((a, b) => Number(b.uploadedAt || 0) - Number(a.uploadedAt || 0));
+      return folderHtml(y, list.length, list.map(fileCardHtml).join(''));
+    }).join('');
+  }
+
+  const CURRENT_CATEGORIES = ['current', 'current-sale', 'current-rent', 'current-tax'];
+  const newestFirst = (a, b) => Number(b.uploadedAt || 0) - Number(a.uploadedAt || 0);
+
+  // "Current Listings" is one page with three upload buckets — same For Sale /
+  // For Rent / Taxes folders the old CMS drew. Current data is only current:
+  // no year folders, just the files (newest first).
+  function typeFoldersHtml(files) {
+    return FILE_TYPE_GROUPS.map((g) => {
+      const list = files.filter((f) => g.match.includes(f.category)).sort(newestFirst);
+      if (!list.length) return '';
+      return folderHtml(g.label, list.length, list.map(fileCardHtml).join(''));
+    }).join('');
+  }
+
+  function fileListHtml(files, splitByType, rootLabel, currentOnly) {
+    let body;
+    if (splitByType) body = typeFoldersHtml(files);
+    else if (currentOnly) body = files.slice().sort(newestFirst).map(fileCardHtml).join('');
+    else body = yearFoldersHtml(files);
+    return rootLabel ? folderHtml(rootLabel, files.length, body) : body;
+  }
+
+  function renderFiles(hostId) {
+    const files = fileCache[hostId] || [];
+    const input = document.querySelector(`[data-search="${hostId}"]`);
+    const q = (input ? input.value : '').trim().toLowerCase();
+    const list = q ? files.filter((f) => String(f.name || '').toLowerCase().includes(q)) : files;
+    const host = $(hostId);
+    if (!list.length) {
+      host.innerHTML = `<span class="muted" style="font-size:.75rem">${
+        files.length ? 'No files match your search.' : 'No files uploaded in this section yet.'
+      }</span>`;
+      return;
+    }
+    const rootLabel = hostId === 'boundary-list'
+      ? ''
+      : String((byId[state.section] && byId[state.section].label) || '').replace(/^└ /, '');
+    const loadedCategory = fileCategory[hostId] || '';
+    host.innerHTML = `<div class="ftree">${fileListHtml(
+      list,
+      loadedCategory === 'current',
+      rootLabel,
+      CURRENT_CATEGORIES.includes(loadedCategory),
+    )}</div>`;
+    host.querySelectorAll('.ftree-folder-head').forEach((h) => h.addEventListener('click', () => {
+      const body = h.nextElementSibling;
+      const open = body.style.display !== 'none';
+      body.style.display = open ? 'none' : '';
+      h.querySelector('.caret').textContent = open ? '▶' : '▼';
+    }));
+    host.querySelectorAll('[data-eye]').forEach((b) => b.addEventListener('click', () => openPreview(b.dataset.eye)));
+    host.querySelectorAll('[data-dl]').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        // Files live gzipped in Storage; the server hands back the plain file.
+        const res = await fetch(`/api/admin/file-download?id=${encodeURIComponent(b.dataset.dl)}`, {
+          headers: state.token ? { Authorization: `Bearer ${state.token}` } : {},
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = b.dataset.name || 'download';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      } catch (e) {
+        alert('Download failed: ' + e.message);
+      }
+      b.disabled = false;
+    }));
+    host.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirm('Delete this file record?')) return;
+      b.disabled = true;
+      try {
+        await api('/api/admin/delete-file', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: b.dataset.del, storagePath: b.dataset.path }),
+        });
+      } catch (e) { console.warn(e); }
+      const cat = fileCategory[hostId] || b.dataset.category;
+      loadFiles(cat, hostId);
+      if (cat && cat !== 'boundary') loadSectionStats(cat);
+    }));
+  }
+
   async function loadFiles(category, hostId) {
     if (!category) return;
     try {
       const { files = [] } = await api(`/api/admin/files?category=${encodeURIComponent(category)}`);
-      $(hostId).innerHTML = files.length ? files.map((f) => `
-        <div class="row"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${f.name}">${f.name}</span>
-        <span class="muted">${bytes(f.size)} ${f.uploadedAt ? '· ' + new Date(Number(f.uploadedAt)).toLocaleDateString() : ''}</span>
-        <button class="icon-btn-eye" data-eye="${f.id}" title="See the data in this file">👁</button>
-        <button class="btn danger" data-del="${f.id}" data-path="${f.storagePath || ''}">Delete</button></div>`).join('')
-        : '<span class="muted" style="font-size:.75rem">No files uploaded in this section yet.</span>';
-      document.querySelectorAll(`#${hostId} [data-eye]`).forEach((b) => b.addEventListener('click', () => openPreview(b.dataset.eye)));
-      document.querySelectorAll(`#${hostId} [data-del]`).forEach((b) => b.addEventListener('click', async () => {
-        if (!confirm('Delete this file record?')) return;
-        b.disabled = true;
-        try { await api('/api/admin/delete-file', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id: b.dataset.del, storagePath: b.dataset.path }) }); } catch (e) { console.warn(e); }
-        loadFiles(category, hostId);
-      }));
+      fileCategory[hostId] = category;
+      fileCache[hostId] = files;
+      renderFiles(hostId);
     } catch (err) { $(hostId).innerHTML = `<span class="err" style="font-size:.75rem">${err.message}</span>`; }
   }
+
+  document.querySelectorAll('[data-search]').forEach((input) => {
+    input.addEventListener('input', () => renderFiles(input.dataset.search));
+  });
 
 
   async function openPreview(id) {
