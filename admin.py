@@ -151,21 +151,41 @@ def dataset_status() -> dict:
     except Exception:  # noqa: BLE001
         files = []
     by_category: dict[str, int] = {}
-    boundaries = []
     for f in files:
         cat = f.get("category") or "unknown"
         by_category[cat] = by_category.get(cat, 0) + 1
-        if cat == "boundary":
-            boundaries.append({
-                "id": f.get("_id"),
-                "name": f.get("name"),
-                "size": f.get("size"),
-                "uploadedAt": f.get("uploadedAt"),
-                "storagePath": f.get("storagePath"),
-                "storageUrl": f.get("storageUrl"),
-                "year": _record_year(f),
-            })
-    boundaries.sort(key=lambda b: -(float(b.get("uploadedAt") or 0)))
+
+    # Area Metrics counts every GeoJSON the CMS can show, including the
+    # Storage-only files whose Firestore record was lost.
+    boundary_rows = _add_orphan_boundaries([
+        {
+            "id": f.get("_id"),
+            "name": f.get("name"),
+            "category": "boundary",
+            "size": f.get("size"),
+            "uploadedAt": f.get("uploadedAt"),
+            "storagePath": f.get("storagePath"),
+            "storageUrl": f.get("storageUrl"),
+            "rowCount": f.get("rowCount"),
+            "year": _record_year(f),
+        }
+        for f in files
+        if (f.get("category") or "") == "boundary"
+    ])
+    if boundary_rows:
+        by_category["boundary"] = len(boundary_rows)
+    boundaries = [
+        {
+            "id": r.get("id"),
+            "name": r.get("name"),
+            "size": r.get("size"),
+            "uploadedAt": r.get("uploadedAt"),
+            "storagePath": r.get("storagePath"),
+            "storageUrl": r.get("storageUrl"),
+            "year": r.get("year"),
+        }
+        for r in boundary_rows[:20]
+    ]
 
     return {
         "total": total,
@@ -335,17 +355,15 @@ def file_preview(doc_id: str, limit: int = 500) -> dict:
     import csv as _csv
     import io as _io
 
-    files = fd._fs_list("cms_files")
-    rec = next((f for f in files if f.get("_id") == doc_id), None)
+    rec = _resolve_file(doc_id)
     if not rec:
         raise HTTPException(status_code=404, detail="File record not found")
     name = rec.get("name") or ""
-    url = rec.get("storageUrl")
-    if not url:
+    if not rec.get("storageUrl") and not rec.get("storagePath"):
         return {"ok": False, "error": "This record has no Storage file."}
 
     try:
-        body = _download_object(url)
+        body = _read_record_bytes(rec)
     except Exception as exc:  # noqa: BLE001
         return {
             "ok": False,
@@ -426,17 +444,91 @@ def file_bytes(doc_id: str) -> tuple[bytes, str]:
     must never open the Storage URL directly: it would save a .gz with a .csv
     name. This returns the plain file the owner uploaded.
     """
-    files = fd._fs_list("cms_files")
-    rec = next((f for f in files if f.get("_id") == doc_id), None)
+    rec = _resolve_file(doc_id)
     if not rec:
         raise HTTPException(status_code=404, detail="File record not found")
-    url = rec.get("storageUrl")
-    if not url:
-        raise HTTPException(status_code=404, detail="This record has no Storage file")
-    return _download_object(url), rec.get("name") or "download"
+    return _read_record_bytes(rec), rec.get("name") or "download"
 
 
 CURRENT_LISTING_CATEGORIES = {"current-sale", "current-rent", "current-tax", "property"}
+
+
+def _storage_objects(prefix: str = "cms_files/") -> list[dict]:
+    """Every object under a Storage prefix (paginated)."""
+    bucket = _storage_bucket()
+    base = (
+        "https://storage.googleapis.com/storage/v1/b/"
+        f"{urllib.parse.quote(bucket, safe='')}/o"
+    )
+    items: list[dict] = []
+    page: str | None = None
+    while True:
+        query = {"prefix": prefix, "maxResults": "1000"}
+        if page:
+            query["pageToken"] = page
+        req = urllib.request.Request(
+            base + "?" + urllib.parse.urlencode(query),
+            headers={"Authorization": f"Bearer {fd.token()}"},
+        )
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = json.loads(r.read())
+        items.extend(data.get("items") or [])
+        page = data.get("nextPageToken")
+        if not page:
+            break
+    return items
+
+
+def _iso_ms(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        from datetime import datetime
+
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return 0
+
+
+def _add_orphan_boundaries(rows: list[dict]) -> list[dict]:
+    """GeoJSON files that exist in Storage but lost their Firestore record.
+
+    The old app left several boundary files in `cms_files/` whose cms_files
+    document was never copied to this project, so the CMS showed only one of
+    them. The map still needs those files, and the owner must be able to see
+    them (Eye / Download / Delete), so they are surfaced from Storage.
+    """
+    known_names = {r.get("name") for r in rows}
+    known_paths = {r.get("storagePath") for r in rows}
+    try:
+        objects = _storage_objects("cms_files/")
+    except Exception as exc:  # noqa: BLE001 - the Firestore list still works
+        print(f"[admin] storage listing failed: {exc}")
+        return rows
+    extra: list[dict] = []
+    for obj in objects:
+        path = obj.get("name") or ""
+        base = path.split("/")[-1]
+        if not base.lower().endswith((".geojson", ".json")):
+            continue
+        # Only real boundary files: `cms_files/<file>` or the uploads folder.
+        # Skip caches/metadata under cms_files/csv/ and cms_files/sql_imports/.
+        if path.count("/") != 1 and not path.startswith("cms_files/boundaries/"):
+            continue
+        if base in known_names or path in known_paths:
+            continue
+        extra.append({
+            "id": f"storage::{path}",
+            "name": base,
+            "category": "boundary",
+            "size": int(obj.get("size") or 0),
+            "uploadedAt": _iso_ms(obj.get("updated")),
+            "storagePath": path,
+            "storageUrl": None,
+            "rowCount": None,
+            "year": None,
+        })
+    return sorted(rows + extra, key=lambda r: -(float(r.get("uploadedAt") or 0)))
 
 
 def list_files(category: str | None = None) -> list[dict]:
@@ -448,7 +540,7 @@ def list_files(category: str | None = None) -> list[dict]:
             cats = CURRENT_LISTING_CATEGORIES
         files = [f for f in files if (f.get("category") or "") in cats]
     files.sort(key=lambda f: -(float(f.get("uploadedAt") or 0)))
-    return [
+    rows = [
         {
             "id": f.get("_id"),
             "name": f.get("name"),
@@ -462,20 +554,76 @@ def list_files(category: str | None = None) -> list[dict]:
         }
         for f in files
     ]
+    if category in ("boundary", "areas"):
+        rows = _add_orphan_boundaries(rows)
+    return rows
+
+
+def _resolve_file(doc_id: str) -> dict | None:
+    """A CMS file record, or a Storage-only object (`storage::<path>`)."""
+    if doc_id.startswith("storage::"):
+        path = doc_id[len("storage::"):]
+        if not path:
+            return None
+        return {"_id": doc_id, "name": path.split("/")[-1], "storagePath": path}
+    files = fd._fs_list("cms_files")
+    return next((f for f in files if f.get("_id") == doc_id), None)
+
+
+def _read_object(object_path: str) -> bytes:
+    """Read a Storage object with the service account (no signed URL needed)."""
+    bucket = _storage_bucket()
+    url = (
+        "https://storage.googleapis.com/storage/v1/b/"
+        f"{urllib.parse.quote(bucket, safe='')}/o/"
+        f"{urllib.parse.quote(object_path, safe='')}?alt=media"
+    )
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {fd.token()}"}
+    )
+    with urllib.request.urlopen(req, timeout=180) as r:
+        buf = r.read()
+    if buf[:2] == b"\x1f\x8b":
+        buf = gzip.decompress(buf)
+    return buf
+
+
+def _read_record_bytes(rec: dict) -> bytes:
+    """Read a CMS record's file, preferring the Storage path (service auth).
+
+    Some migrated records carry a signed URL whose token has expired; the
+    object itself is still there and readable with the service account.
+    """
+    path = rec.get("storagePath")
+    url = rec.get("storageUrl")
+    if path:
+        try:
+            return _read_object(path)
+        except Exception:  # noqa: BLE001 - fall back to the signed URL
+            if not url:
+                raise
+    if url:
+        return _download_object(url)
+    raise HTTPException(status_code=404, detail="This record has no Storage file")
 
 
 def delete_file(doc_id: str, storage_path: str | None = None) -> dict:
-    if not doc_id:
+    # A Storage-only object (orphan boundary file) has no Firestore document.
+    if doc_id.startswith("storage::"):
+        storage_path = doc_id[len("storage::"):]
+        doc_id = ""
+    if not doc_id and not storage_path:
         raise HTTPException(status_code=400, detail="Missing file id")
-    url = (
-        f"https://firestore.googleapis.com/v1/projects/{fd.PROJECT}"
-        f"/databases/(default)/documents/cms_files/{urllib.parse.quote(doc_id, safe='')}"
-    )
-    req = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {fd.token()}"}, method="DELETE"
-    )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        r.read()
+    if doc_id:
+        url = (
+            f"https://firestore.googleapis.com/v1/projects/{fd.PROJECT}"
+            f"/databases/(default)/documents/cms_files/{urllib.parse.quote(doc_id, safe='')}"
+        )
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {fd.token()}"}, method="DELETE"
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            r.read()
 
     if storage_path:
         bucket = _storage_bucket()
@@ -493,7 +641,86 @@ def delete_file(doc_id: str, storage_path: str | None = None) -> dict:
                 r2.read()
         except Exception:  # noqa: BLE001 - the metadata record is already gone
             pass
-    return {"ok": True, "id": doc_id}
+    return {"ok": True, "id": doc_id or storage_path}
+
+
+# ── "Delete All Data" (files + the SQL rows they created) ──────────────────
+# Same behaviour as the old CMS: deleting a section's files must also delete
+# the rows already upserted into Postgres, otherwise the map keeps showing
+# them forever. Scope matches db_stats() so one section never takes another.
+SECTION_FILE_CATEGORIES = {
+    "sales": ["sales"],
+    "rent": ["rent"],
+    "current": sorted(CURRENT_LISTING_CATEGORIES),
+    "current-sales": ["current-sale"],
+    "current-rent": ["current-rent"],
+    "current-tax": ["current-tax"],
+    "tax": ["tax"],
+    "schools": ["school"],
+    "areas": ["boundary"],
+}
+
+TYPE_CONDITION = {
+    "sale": "coalesce(listing_type,'sale') = 'sale'",
+    "rent": "listing_type = 'rent'",
+    "tax": "listing_type = 'tax'",
+}
+
+SECTION_SQL_SCOPE = {
+    "sales": (["sale"], "dated"),
+    "rent": (["rent"], "dated"),
+    # Same scope as the old CMS: Current Listings wipes active sale + rent
+    # rows. Tax rows are shared with the Tax Records section, so they are
+    # never deleted from here.
+    "current": (["sale", "rent"], "undated"),
+    "current-sales": (["sale"], "undated"),
+    "current-rent": (["rent"], "undated"),
+    "current-tax": (["tax"], "any"),
+    "tax": (["tax"], "any"),
+}
+
+
+def _delete_rows_for(section: str) -> int:
+    scope = SECTION_SQL_SCOPE.get(section)
+    if not scope:
+        return 0  # schools / boundaries only have files, not property rows
+    types, date_mode = scope
+    cond = "(" + " OR ".join(TYPE_CONDITION[t] for t in types) + ")"
+    if date_mode == "dated":
+        cond += " AND close_date IS NOT NULL AND close_date <> ''"
+    elif date_mode == "undated":
+        cond += " AND (close_date IS NULL OR close_date = '')"
+    return fd.sql_exec(f"DELETE FROM properties WHERE {cond}")
+
+
+def clear_section(section: str) -> dict:
+    """Delete every file of a CMS section and the rows those files created."""
+    cats = SECTION_FILE_CATEGORIES.get(section)
+    if cats is None:
+        raise HTTPException(status_code=400, detail="Unknown section")
+    # list_files() (not _fs_list) so Storage-only boundary files are included.
+    seen: set[str] = set()
+    doomed: list[dict] = []
+    for cat in cats:
+        for row in list_files(cat):
+            rid = row.get("id")
+            if rid and rid not in seen:
+                seen.add(rid)
+                doomed.append(row)
+    deleted_files = 0
+    for row in doomed:
+        try:
+            delete_file(row.get("id") or "", row.get("storagePath"))
+            deleted_files += 1
+        except Exception:  # noqa: BLE001 - keep deleting the rest
+            pass
+    deleted_rows = _delete_rows_for(section)
+    return {
+        "ok": True,
+        "section": section,
+        "files": deleted_files,
+        "rows": deleted_rows,
+    }
 
 
 def list_collection(name: str) -> list[dict]:
