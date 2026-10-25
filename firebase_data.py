@@ -207,19 +207,21 @@ _SQL_CACHE_TTL = 120.0
 _SQL_CACHE_MAX = 48
 
 
-def sql_rows(sql: str) -> list[dict]:
+def sql_rows(sql: str, use_cache: bool = True) -> list[dict]:
     """Run a SELECT and return its rows as dicts.
 
     Results are memoized for a short window: the map asks for the same
     aggregate on every pan/zoom, and the dataset only changes when the owner
     uploads. The cache is per-instance (Vercel keeps warm instances alive).
+    Pass ``use_cache=False`` for writes-adjacent reads (an upload that must
+    compare against what was committed a second ago).
     """
     # The statement travels inside a GraphQL string literal, which forbids
     # raw newlines — collapse all whitespace first.
     sql = " ".join(sql.split())
     now = time.time()
     hit = _SQL_CACHE.get(sql)
-    if hit and (now - hit[0]) < _SQL_CACHE_TTL:
+    if use_cache and hit and (now - hit[0]) < _SQL_CACHE_TTL:
         return hit[1]
 
     escaped = sql.replace("\\", "\\\\").replace('"', '\\"')
@@ -230,9 +232,10 @@ def sql_rows(sql: str) -> list[dict]:
     )
     data = _gql(query)
     rows = data.get("_executeReturning") or []
-    if len(_SQL_CACHE) > _SQL_CACHE_MAX:
-        _SQL_CACHE.clear()
-    _SQL_CACHE[sql] = (now, rows)
+    if use_cache:
+        if len(_SQL_CACHE) > _SQL_CACHE_MAX:
+            _SQL_CACHE.clear()
+        _SQL_CACHE[sql] = (now, rows)
     return rows
 
 
