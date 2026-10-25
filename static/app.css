@@ -570,6 +570,44 @@ body.ads-top.ads-bottom .map-card { height: calc(100vh - 362px); }
 .report-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
 @media (min-width: 1024px) { .report-grid.two { grid-template-columns: 1fr 1fr; } }
 
+/* ── report boxes ON the map (owner 2026-10-25: "permiteme agregar cajas al
+   mapa") — every report card can be pinned as a draggable window over the
+   map, up to 3 at a time. ───────────────────────────────────────────────── */
+.pin-btn {
+  width: 1.6rem; height: 1.6rem; border-radius: .45rem; flex-shrink: 0;
+  border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.04);
+  color: #9ca3af; display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: background .15s, color .15s, border-color .15s;
+}
+.pin-btn:hover { color: #fff; background: rgba(59,130,246,.25); border-color: rgba(59,130,246,.5); }
+.card.pinned .pin-btn { color: #93c5fd; background: rgba(59,130,246,.25); border-color: rgba(59,130,246,.5); }
+
+.map-windows { position: absolute; inset: 0; pointer-events: none; z-index: 20; }
+.map-window {
+  position: absolute; pointer-events: auto; display: flex; flex-direction: column;
+  max-height: calc(100% - 2rem); max-width: calc(100% - 2rem);
+  background: var(--report); border: 1px solid rgba(255,255,255,.14); border-radius: .75rem;
+  box-shadow: 0 18px 40px rgba(0,0,0,.6); overflow: hidden;
+}
+.map-window-head {
+  display: flex; align-items: center; justify-content: space-between; gap: .5rem;
+  padding: .45rem .55rem .45rem .75rem; cursor: grab; user-select: none;
+  border-bottom: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.03);
+}
+.map-window-head:active { cursor: grabbing; }
+.map-window-title {
+  font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  color: #e5e7eb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.map-window-close {
+  background: none; border: none; color: #9ca3af; cursor: pointer; line-height: 1;
+  font-size: .8rem; padding: .2rem .35rem; border-radius: .35rem; flex-shrink: 0;
+}
+.map-window-close:hover { color: #fff; background: rgba(255,255,255,.1); }
+.map-window-body { overflow: auto; padding: .5rem .65rem .65rem; }
+.map-window-body .card-body { padding: 0; }
+.map-window-body .empty-state { font-size: .72rem; }
+
 .card {
   position: relative; overflow: hidden; border-radius: 1rem;
   background: linear-gradient(to bottom right, var(--card-from), var(--card-to));

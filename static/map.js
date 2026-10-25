@@ -496,6 +496,10 @@
     $('#report-sel').textContent = state.selected.size
       ? `${state.selected.size} area${state.selected.size === 1 ? '' : 's'} selected`
       : 'All visible areas';
+    // Every card gets its "pin to the map" button, and any window already on
+    // the map picks up the fresh numbers from this report.
+    syncPinButtons();
+    refreshMapWindows();
   }
 
   function renderQuickStats(s) {
@@ -1206,6 +1210,149 @@
     });
   }
 
+  // ── report boxes ON the map ───────────────────────────────────────────────
+  // Owner 2026-10-25: "permíteme agregar cajas al mapa". Every report card can
+  // be pinned as a draggable window floating over the map (max 3 at once).
+  // The boxes refresh with the fresh numbers every time a report is generated.
+  const WINDOW_WIDTH = {
+    'Quick Stats': 320,
+    'Market Health': 340,
+    'Sales · Tax · Rent': 400,
+    'Time Series': 400,
+    'Top Areas': 360,
+    'Year Built': 340,
+  };
+  const MAP_WINDOW_LIMIT = 3;
+  const mapWindows = new Map(); // title -> element
+
+  function cardTitle(card) {
+    const t = card.querySelector('.card-title');
+    return t ? t.textContent.trim() : 'Report';
+  }
+
+  function syncPinButtons() {
+    $$('#report .card').forEach((card) => {
+      const head = card.querySelector('.card-head');
+      if (!head || head.querySelector('[data-pin-card]')) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'pin-btn';
+      btn.dataset.pinCard = '1';
+      btn.title = 'Pin this card on the map';
+      btn.setAttribute('aria-label', 'Pin this card on the map');
+      btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleMapWindow(card);
+      });
+      head.appendChild(btn);
+    });
+  }
+
+  function fillWindowBody(win, card) {
+    const body = win.querySelector('.map-window-body');
+    const src = card.querySelector('.card-body');
+    if (body && src) body.innerHTML = src.innerHTML;
+  }
+
+  function toggleMapWindow(card) {
+    const title = cardTitle(card);
+    if (mapWindows.has(title)) { closeMapWindow(title); return; }
+    if (mapWindows.size >= MAP_WINDOW_LIMIT) {
+      toast(`Only ${MAP_WINDOW_LIMIT} boxes on the map — close one first.`);
+      return;
+    }
+    const host = $('.map-host');
+    if (!host) return;
+    let layer = document.getElementById('map-windows');
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.id = 'map-windows';
+      layer.className = 'map-windows';
+      host.appendChild(layer);
+    }
+    const win = document.createElement('div');
+    win.className = 'map-window';
+    win.style.width = `${WINDOW_WIDTH[title] || 340}px`;
+    const i = mapWindows.size;
+    win.style.left = `${14 + i * 22}px`;
+    win.style.top = `${14 + i * 22}px`;
+
+    const head = document.createElement('div');
+    head.className = 'map-window-head';
+    const label = document.createElement('span');
+    label.className = 'map-window-title';
+    label.textContent = title;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'map-window-close';
+    close.setAttribute('aria-label', 'Close');
+    close.textContent = '✕';
+    close.addEventListener('click', (e) => { e.stopPropagation(); closeMapWindow(title); });
+    head.append(label, close);
+
+    const body = document.createElement('div');
+    body.className = 'map-window-body';
+    win.append(head, body);
+    fillWindowBody(win, card);
+    makeWindowDraggable(win, head);
+    layer.appendChild(win);
+    mapWindows.set(title, win);
+    card.classList.add('pinned');
+  }
+
+  function closeMapWindow(title) {
+    const win = mapWindows.get(title);
+    if (win) win.remove();
+    mapWindows.delete(title);
+    $$('#report .card').forEach((c) => {
+      if (cardTitle(c) === title) c.classList.remove('pinned');
+    });
+  }
+
+  function refreshMapWindows() {
+    if (!mapWindows.size) return;
+    $$('#report .card').forEach((card) => {
+      const win = mapWindows.get(cardTitle(card));
+      if (win) fillWindowBody(win, card);
+    });
+  }
+
+  function makeWindowDraggable(win, handle) {
+    let dragging = false, startX = 0, startY = 0, originX = 0, originY = 0;
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      const host = win.parentElement.getBoundingClientRect();
+      const rect = win.getBoundingClientRect();
+      originX = rect.left - host.left;
+      originY = rect.top - host.top;
+      win.style.left = `${originX}px`;
+      win.style.top = `${originY}px`;
+      startX = e.clientX;
+      startY = e.clientY;
+      dragging = true;
+      handle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const host = win.parentElement.getBoundingClientRect();
+      const maxX = Math.max(0, host.width - win.offsetWidth);
+      const maxY = Math.max(0, host.height - win.offsetHeight);
+      const x = Math.min(maxX, Math.max(0, originX + (e.clientX - startX)));
+      const y = Math.min(maxY, Math.max(0, originY + (e.clientY - startY)));
+      win.style.left = `${x}px`;
+      win.style.top = `${y}px`;
+    });
+    const stop = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      try { handle.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+    };
+    handle.addEventListener('pointerup', stop);
+    handle.addEventListener('pointercancel', stop);
+  }
+
   // ── boot ───────────────────────────────────────────────────────────────────
   function boot() {
     initSections();
@@ -1223,6 +1370,7 @@
     initDrawCanvas();
     initChat();
     initAds();
+    syncPinButtons();
     if (window.RESDOGS_ACCOUNT) applyAccount(window.RESDOGS_ACCOUNT);
     state.map.on('load', () => {
       loadBoundary(state.boundary).then(() => loadValues()).catch((e) => {
