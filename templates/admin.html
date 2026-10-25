@@ -220,6 +220,7 @@
   /* ── uploaded-file tree (same shape as the old admin) ─────────────────── */
   .files-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; margin-bottom: .85rem; }
   .files-head h3 { margin: 0; }
+  .files-tools { display: flex; align-items: center; gap: .5rem; flex: 1; justify-content: flex-end; flex-wrap: wrap; }
   .file-search { position: relative; flex: 1; min-width: 11rem; max-width: 18rem; }
   .file-search svg { position: absolute; left: .6rem; top: 50%; transform: translateY(-50%); color: #6b7280; pointer-events: none; }
   .file-search input { padding-left: 2rem; }
@@ -411,10 +412,13 @@
           <div class="card2">
             <div class="files-head">
               <h3>Uploaded files</h3>
-              <label class="file-search">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                <input type="text" data-search="section-files" placeholder="Search files…"/>
-              </label>
+              <div class="files-tools">
+                <label class="file-search">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  <input type="text" data-search="section-files" placeholder="Search files…"/>
+                </label>
+                <button class="btn danger" type="button" data-clear-all title="Delete every uploaded file AND its rows from the database for this section">Delete All Data</button>
+              </div>
             </div>
             <div id="section-files"></div>
           </div>
@@ -428,10 +432,13 @@
           <div class="card2">
             <div class="files-head">
               <h3>Uploaded files</h3>
-              <label class="file-search">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                <input type="text" data-search="section-files-edit" placeholder="Search files…"/>
-              </label>
+              <div class="files-tools">
+                <label class="file-search">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  <input type="text" data-search="section-files-edit" placeholder="Search files…"/>
+                </label>
+                <button class="btn danger" type="button" data-clear-all title="Delete every uploaded file AND its rows from the database for this section">Delete All Data</button>
+              </div>
             </div>
             <div id="section-files-edit"></div>
           </div>
@@ -481,10 +488,13 @@
           <div class="card2">
             <div class="files-head">
               <h3>Uploaded boundary files</h3>
-              <label class="file-search">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                <input type="text" data-search="boundary-list" placeholder="Search files…"/>
-              </label>
+              <div class="files-tools">
+                <label class="file-search">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  <input type="text" data-search="boundary-list" placeholder="Search files…"/>
+                </label>
+                <button class="btn danger" type="button" data-clear-all title="Delete every uploaded boundary file (the map loses its polygons until you upload them again)">Delete All Data</button>
+              </div>
             </div>
             <div id="boundary-list"></div>
           </div>
@@ -649,7 +659,7 @@
   import { getAuth, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 
   const $ = (id) => document.getElementById(id);
-  const state = { token: null, email: null, isAdmin: false, account: null, section: 'dashboard', status: null, files: [], gate: null };
+  const state = { token: null, email: null, isAdmin: false, account: null, section: 'dashboard', status: null, files: [], gate: null, dbTotals: {} };
   const fmt = (n) => Number(n || 0).toLocaleString();
   const bytes = (n) => {
     const v = Number(n || 0);
@@ -911,7 +921,7 @@
   });
 
   // ── data sections ─────────────────────────────────────────────────────────
-  function prepSection(sec) {
+  async function prepSection(sec) {
     $('sec-title-lg').textContent = sec.label.replace(/^└ /, '');
     $('sec-sub-lg').textContent = sec.sub;
     $('sec-title-sm').textContent = sec.label.replace(/^└ /, '');
@@ -922,7 +932,10 @@
     $('upload-prog').style.width = '0';
     $('drop').classList.remove('on');
     document.querySelectorAll('[data-search="section-files"],[data-search="section-files-edit"]').forEach((i) => { i.value = ''; });
-    loadDbStats(sec.id);
+    // Rows first: the "Uploaded here" card must know the database total before
+    // it decides whether "no files" means "nothing uploaded" or "the original
+    // files are gone but the rows are still live".
+    await loadDbStats(sec.id);
     const cat = sec.category;
     if (cat) {
       loadFiles(cat, 'section-files');
@@ -939,13 +952,8 @@
   async function loadDbStats(section) {
     try {
       const s = await api(`/api/admin/db-stats?section=${encodeURIComponent(section)}`);
+      state.dbTotals[section] = Number(s.total || 0);
       $('db-stats-total').textContent = fmt(s.total);
-      // "Uploaded here" counts FILE RECORDS. When the originals were removed
-      // but their rows are live, say so instead of "nothing uploaded".
-      if (($('sec-file-count').textContent || '0') === '0' && s.total > 0) {
-        $('sec-file-meta').textContent =
-          `Original files are no longer in Storage, but ${fmt(s.total)} rows are live in the database.`;
-      }
       $('db-stats-years').innerHTML = (s.byYear || []).length
         ? s.byYear.map((r) => `<tr><td>${r.year || 'undated'}</td><td>${fmt(r.rows)}</td></tr>`).join('')
         : '<tr><td colspan="2" class="muted">No rows in the database for this section yet.</td></tr>';
@@ -958,12 +966,19 @@
       $('sec-file-count').textContent = fmt(files.length);
       const totalBytes = files.reduce((a, f) => a + Number(f.size || 0), 0);
       const last = files[0]?.uploadedAt ? new Date(Number(files[0].uploadedAt)).toLocaleString() : '—';
+      const dbTotal = Number(state.dbTotals[state.section] || 0);
       $('sec-file-meta').innerHTML = files.length
         ? `${bytes(totalBytes)}<br>Last upload <span style="color:#d1d5db">${last}</span>`
-        : 'Nothing uploaded yet in this section.';
+        : dbTotal > 0
+          ? `Original files are no longer in Storage, but <span style="color:#d1d5db">${fmt(dbTotal)} rows</span> are live in the database.`
+          : 'Nothing uploaded yet in this section.';
       $('sec-edits').textContent = '0';
       $('sec-dupes').textContent = '—';
-      $('sec-dupes-desc').textContent = files.length ? 'Duplicate analysis runs on the uploaded rows.' : 'Nothing uploaded yet — no duplicates possible.';
+      $('sec-dupes-desc').textContent = files.length
+        ? 'Duplicate analysis runs on the uploaded rows.'
+        : dbTotal > 0
+          ? 'The original files are gone, so the duplicate scan cannot run — the rows themselves are still live.'
+          : 'Nothing uploaded yet — no duplicates possible.';
     } catch (err) { console.warn(err); }
   }
 
@@ -995,7 +1010,7 @@
     const name = String(f.name || '');
     const base = name.split('/').pop() || name;
     const when = f.uploadedAt ? new Date(Number(f.uploadedAt)).toLocaleString() : '';
-    const dl = f.storageUrl || '';
+    const canDownload = !!(f.storageUrl || f.storagePath);
     return `<div class="file-card">
       <div class="file-main">
         <div class="file-name" title="${esc(name)}">${esc(base)}</div>
@@ -1003,7 +1018,7 @@
       </div>
       <div class="file-actions">
         <button type="button" data-eye="${esc(f.id)}" title="Preview" aria-label="Preview">${ICON_EYE}</button>
-        <button type="button" data-dl="${esc(f.id)}" data-name="${esc(base)}" title="Download" aria-label="Download"${dl ? '' : ' disabled'}>${ICON_DOWN}</button>
+        <button type="button" data-dl="${esc(f.id)}" data-name="${esc(base)}" title="Download" aria-label="Download"${canDownload ? '' : ' disabled'}>${ICON_DOWN}</button>
         <button type="button" class="danger" data-del="${esc(f.id)}" data-path="${esc(f.storagePath || '')}" data-category="${esc(f.category || '')}" title="Delete" aria-label="Delete">${ICON_TRASH}</button>
       </div>
     </div>`;
@@ -1145,6 +1160,37 @@
   document.querySelectorAll('[data-search]').forEach((input) => {
     input.addEventListener('input', () => renderFiles(input.dataset.search));
   });
+
+  // ── "Delete All Data": section files + the rows they created ─────────────
+  async function clearAllData() {
+    const sec = byId[state.section];
+    if (!sec) return;
+    const scope = String(sec.label || '').replace(/^└ /, '');
+    const isAreas = state.section === 'areas';
+    const msg = isAreas
+      ? `Delete ALL ${scope} boundary files?\n\nThe map loses its polygons until you upload them again. This cannot be undone.`
+      : `Delete ALL ${scope} data?\n\nThis deletes every uploaded file AND its rows from the database, so the map stops showing them. This cannot be undone.`;
+    if (!confirm(msg)) return;
+    try {
+      const r = await api('/api/admin/clear-section', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ section: state.section }),
+      });
+      alert(`Deleted ${fmt(r.files)} file(s)` + (r.rows ? ` and ${fmt(r.rows)} row(s) from the database.` : '.'));
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+      return;
+    }
+    if (isAreas) {
+      loadBoundaries();
+    } else {
+      await loadDbStats(state.section);
+      prepSection(byId[state.section]);
+      loadStatus();
+    }
+  }
+  document.querySelectorAll('[data-clear-all]').forEach((b) => b.addEventListener('click', clearAllData));
 
 
   async function openPreview(id) {

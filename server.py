@@ -623,6 +623,14 @@ async def admin_delete_file(request: Request):
     return JSONResponse(admin.delete_file(str(body.get("id") or ""), body.get("storagePath")))
 
 
+@app.post("/api/admin/clear-section")
+async def admin_clear_section(request: Request):
+    """The CMS "Delete All Data": section files + the rows they created."""
+    admin.verify_admin(request.headers.get("authorization"))
+    body = await request.json()
+    return JSONResponse(admin.clear_section(str(body.get("section") or "")))
+
+
 @app.get("/api/admin/collection")
 def admin_collection(request: Request, name: str = "users"):
     admin.verify_admin(request.headers.get("authorization"))
