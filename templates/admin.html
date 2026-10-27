@@ -74,6 +74,24 @@
   .kpi { display: grid; grid-template-columns: repeat(2,1fr); gap: .6rem; margin-bottom: 1rem; }
   @media (min-width: 760px) { .kpi { grid-template-columns: repeat(4,1fr); } }
   .coverage-scroll { max-height: 18rem; overflow: auto; }
+  .gap-details > summary {
+    cursor: pointer; list-style: none; display: flex; align-items: center; gap: .45rem;
+    font-size: .85rem; font-weight: 700; color: #fff; padding: .55rem .7rem;
+    border: 1px solid var(--border); border-radius: .6rem; background: rgba(255,255,255,.03);
+  }
+  .gap-details > summary::-webkit-details-marker { display: none; }
+  .gap-details > summary::before { content: '▸'; color: #60a5fa; transition: transform .15s; }
+  .gap-details[open] > summary::before { transform: rotate(90deg); }
+  .gap-details > summary:hover { border-color: rgba(96,165,250,.45); }
+  .year-tabs { display: flex; flex-wrap: wrap; gap: .35rem; margin: .55rem 0 .35rem; }
+  .year-tab {
+    border: 1px solid var(--border); background: rgba(255,255,255,.04); color: #cbd5e1;
+    border-radius: 9999px; padding: .22rem .65rem; font-size: .72rem; font-weight: 600; cursor: pointer;
+  }
+  .year-tab span { color: #6b7280; margin-left: .2rem; }
+  .year-tab:hover { border-color: rgba(96,165,250,.5); color: #fff; }
+  .year-tab.active { background: rgba(37,99,235,.85); border-color: #2563eb; color: #fff; }
+  .year-tab.active span { color: #dbeafe; }
   table.tbl { width: 100%; border-collapse: collapse; font-size: .78rem; }
   table.tbl th, table.tbl td { padding: .45rem .5rem; border-bottom: 1px solid var(--border); text-align: right; }
   table.tbl th:first-child, table.tbl td:first-child { text-align: left; }
@@ -570,11 +588,11 @@
 
         <div class="card2" id="upload-errors-card" style="margin-bottom:1rem" hidden>
           <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem">
-            <h3 style="margin:0">Upload problems</h3>
+            <h3 style="margin:0">Data not uploaded — <span id="upload-errors-section">this section</span></h3>
             <button class="btn ghost" id="upload-errors-clear" type="button">Clear</button>
           </div>
           <p class="muted" style="font-size:.72rem;margin:.2rem 0 .5rem">
-            These files could not be uploaded. The reason is shown in English, exactly as the server reported it.
+            Exact file names that could not be uploaded, with the reason in English exactly as the server reported it.
           </p>
           <ul id="upload-errors-list" style="margin:0;padding-left:1.1rem;font-size:.75rem;line-height:1.65"></ul>
         </div>
@@ -582,41 +600,39 @@
         <div class="card2" style="margin-bottom:1rem">
           <h3>Missing data for this section</h3>
           <p class="muted" style="font-size:.72rem;margin:.2rem 0 .6rem">
-            Only rows and files of <b id="sec-gap-label">this section</b>. Two lists: names with no polygon
-            (upload the polygon) and polygons with no data (upload the files).
+            Only rows and files of <b id="sec-gap-label">this section</b>.
           </p>
-          <div class="grid2" style="align-items:start">
-            <div>
-              <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
-                <h4 style="margin:0;font-size:.8rem">Rows with NO polygon</h4>
-                <div style="display:flex;gap:.35rem">
-                  <button class="btn ghost" id="sec-missing-refresh" type="button">Refresh</button>
-                  <button class="btn" id="sec-missing-download" type="button">Download</button>
-                </div>
-              </div>
-              <p class="muted" id="sec-missing-summary" style="font-size:.72rem;margin:.25rem 0 .4rem">Loading…</p>
-              <div class="coverage-scroll">
-                <table class="tbl">
-                  <thead><tr><th>Subdivision</th><th>ZIP</th><th>Rows</th><th>Why</th></tr></thead>
-                  <tbody id="sec-missing-body"></tbody>
-                </table>
+
+          <details class="gap-details">
+            <summary>Rows with NO polygon <span id="sec-missing-count" class="muted"></span></summary>
+            <div style="display:flex;justify-content:flex-end;gap:.35rem;margin:.5rem 0">
+              <button class="btn ghost" id="sec-missing-refresh" type="button">Refresh</button>
+              <button class="btn" id="sec-missing-download" type="button">Download</button>
+            </div>
+            <p class="muted" id="sec-missing-summary" style="font-size:.72rem;margin:.25rem 0 .4rem">Loading…</p>
+            <div class="coverage-scroll">
+              <table class="tbl">
+                <thead><tr><th>Subdivision</th><th>ZIP</th><th>Rows</th><th>Why</th></tr></thead>
+                <tbody id="sec-missing-body"></tbody>
+              </table>
+            </div>
+          </details>
+
+          <div style="margin-top:1rem">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+              <h4 style="margin:0;font-size:.8rem">Polygons with NO data — by year</h4>
+              <div style="display:flex;gap:.35rem">
+                <button class="btn ghost" id="sec-nodata-refresh" type="button">Refresh</button>
+                <button class="btn" id="sec-nodata-download" type="button">Download year</button>
               </div>
             </div>
-            <div>
-              <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
-                <h4 style="margin:0;font-size:.8rem">Polygons with NO data in this section</h4>
-                <div style="display:flex;gap:.35rem">
-                  <button class="btn ghost" id="sec-nodata-refresh" type="button">Refresh</button>
-                  <button class="btn" id="sec-nodata-download" type="button">Download</button>
-                </div>
-              </div>
-              <p class="muted" id="sec-nodata-summary" style="font-size:.72rem;margin:.25rem 0 .4rem">Loading…</p>
-              <div class="coverage-scroll">
-                <table class="tbl">
-                  <thead><tr><th>Polygon</th><th>ZIP</th><th>Rows</th></tr></thead>
-                  <tbody id="sec-nodata-body"></tbody>
-                </table>
-              </div>
+            <div class="year-tabs" id="sec-nodata-years"></div>
+            <p class="muted" id="sec-nodata-summary" style="font-size:.72rem;margin:.15rem 0 .4rem">Loading…</p>
+            <div class="coverage-scroll">
+              <table class="tbl">
+                <thead><tr><th>Polygon</th><th>ZIP</th></tr></thead>
+                <tbody id="sec-nodata-body"></tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -1799,8 +1815,41 @@
     const list = document.getElementById('upload-errors-list');
     if (!card || !list) return;
     const items = (state.uploadErrors[section] || []);
-    card.hidden = !items.length;
-    list.innerHTML = items.map((e) => `<li><b>${esc(e.fileName)}</b> — This file could not be uploaded: ${esc(e.message)}${e.detail ? ` <span class="muted">(${esc(e.detail)})</span>` : ''}</li>`).join('');
+    card.hidden = !DATA_SECTIONS.includes(section);
+    const label = document.getElementById('upload-errors-section');
+    if (label) label.textContent = ((byId[section] || {}).label || section).replace(/^└ /, '');
+    list.innerHTML = items.length
+      ? items.map((e) => `<li><b>${esc(e.fileName)}</b> — This file could not be uploaded: ${esc(e.message)}${e.detail ? ` <span class="muted">(${esc(e.detail)})</span>` : ''}</li>`).join('')
+      : '<li class="muted">No failed uploads recorded for this section.</li>';
+  }
+
+  state.gapYears = [];
+  state.gapYear = null;
+
+  function renderGapYear(year) {
+    state.gapYear = year;
+    const entry = (state.gapYears || []).find((y) => y.year === year);
+    const tabs = document.getElementById('sec-nodata-years');
+    if (tabs) {
+      tabs.innerHTML = (state.gapYears || []).map((y) =>
+        `<button class="year-tab${y.year === year ? ' active' : ''}" data-gap-year="${y.year}">${y.year === 0 ? 'Current' : y.year} <span>${fmt(y.total)}</span></button>`
+      ).join('');
+      tabs.querySelectorAll('[data-gap-year]').forEach((b) =>
+        b.addEventListener('click', () => renderGapYear(Number(b.dataset.gapYear))));
+    }
+    const sec = byId[state.section] || {};
+    const summary = document.getElementById('sec-nodata-summary');
+    if (summary) {
+      summary.textContent = entry
+        ? `${fmt(entry.total)} polygons have no ${(sec.label || 'section').replace(/^└ /, '')} data in ${year === 0 ? 'Current' : year}.`
+        : 'No years available for this section.';
+    }
+    const body = document.getElementById('sec-nodata-body');
+    if (body) {
+      body.innerHTML = entry && entry.list.length
+        ? entry.list.map((g) => `<tr><td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td></tr>`).join('')
+        : '<tr><td colspan="2" class="muted">Every polygon has data in this year.</td></tr>';
+    }
   }
 
   async function loadSectionGaps(section) {
@@ -1809,18 +1858,23 @@
     const label = document.getElementById('sec-gap-label');
     if (label) label.textContent = (sec.label || section).replace(/^└ /, '');
     try {
-      const [m, nd] = await Promise.all([
-        api(`/api/admin/missing-subdivisions?limit=200&section=${encodeURIComponent(section)}`),
-        api(`/api/admin/polygons-without-data?limit=200&section=${encodeURIComponent(section)}`),
+      const [m, byYear] = await Promise.all([
+        api(`/api/admin/missing-subdivisions?limit=300&section=${encodeURIComponent(section)}`),
+        api(`/api/admin/polygons-without-data-by-year?limit=300&section=${encodeURIComponent(section)}`),
       ]);
+      const count = document.getElementById('sec-missing-count');
+      if (count) count.textContent = `(${fmt(m.rows)} rows · ${fmt(m.groups)} groups)`;
       const ms = document.getElementById('sec-missing-summary');
       if (ms) ms.textContent = `${fmt(m.rows)} rows in ${fmt(m.groups)} subdivision + ZIP groups have no polygon in this section.`;
       const mb = document.getElementById('sec-missing-body');
       if (mb) mb.innerHTML = (m.list || []).map((g) => `<tr><td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td><td>${fmt(g.rows)}</td><td class="muted">${esc(g.reason)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Every row has a polygon.</td></tr>';
-      const ns = document.getElementById('sec-nodata-summary');
-      if (ns) ns.textContent = `${fmt(nd.polygons)} polygons have no data for this section.`;
-      const nb = document.getElementById('sec-nodata-body');
-      if (nb) nb.innerHTML = (nd.list || []).map((g) => `<tr><td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td><td>${fmt(g.rows)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Every polygon has data.</td></tr>';
+      state.gapYears = byYear.years || [];
+      const keep = state.gapYears.some((y) => y.year === state.gapYear) ? state.gapYear : (state.gapYears.length ? state.gapYears[state.gapYears.length - 1].year : null);
+      if (keep != null) renderGapYear(keep);
+      else {
+        const summary = document.getElementById('sec-nodata-summary');
+        if (summary) summary.textContent = 'No years available for this section.';
+      }
     } catch (err) {
       const ms = document.getElementById('sec-missing-summary');
       if (ms) ms.textContent = String(err.message || err);
@@ -1848,9 +1902,10 @@
       (d.list || []).map((g) => [g.name, g.zip, g.rows, g.reason]));
   });
   document.getElementById('sec-nodata-download')?.addEventListener('click', async () => {
-    const d = await api(`/api/admin/polygons-without-data?all=1&section=${encodeURIComponent(state.section)}`);
-    downloadRows(`polygons_without_data_${state.section}.csv`, 'polygon,zip,rows',
-      (d.list || []).map((g) => [g.name, g.zip, g.rows]));
+    const d = await api(`/api/admin/polygons-without-data-by-year?limit=2000&section=${encodeURIComponent(state.section)}`);
+    const entry = (d.years || []).find((y) => y.year === state.gapYear);
+    downloadRows(`polygons_without_data_${state.section}_${state.gapYear}.csv`, 'polygon,zip',
+      ((entry && entry.list) || []).map((g) => [g.name, g.zip]));
   });
   document.getElementById('upload-errors-clear')?.addEventListener('click', () => {
     state.uploadErrors[state.section] = [];
