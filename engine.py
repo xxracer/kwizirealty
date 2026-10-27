@@ -718,7 +718,10 @@ def _aggregate_impl(metric: dict, boundary: str, filters: dict, period: str) -> 
     col = _group_col(boundary)
     sql = (
         f"SELECT {col} AS poly_name, "
-        f"count({expr})::int AS n, "
+        # Sample count = every row in the polygon (same as the original
+        # analytics app). Counting only non-null metric values made areas
+        # show 218 rows where the reference shows 221.
+        f"count(*)::int AS n, "
         f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {expr}) AS med, "
         f"avg({expr}) AS avg_v, "
         f"min({expr}) AS min_v, max({expr}) AS max_v, "
@@ -1021,6 +1024,103 @@ def time_series(metric_key: str, filters: dict, period: str, boundary: str,
         {"period": str(r.get("yr")), "value": _num(r.get("med")), "count": int(r.get("n") or 0)}
         for r in rows
     ]
+
+
+def monthly_by_year(metric_key: str, filters: dict, boundary: str,
+                    selected_names: list[str] | None = None) -> list[dict]:
+    """Monthly counts + medians across ALL uploaded years (forecast card).
+
+    Deliberately ignores the selected period: the 5-year forecast needs the
+    full uploaded history, exactly like the original app's bar chart.
+    """
+    metric = METRIC_BY_KEY.get(metric_key)
+    if not metric:
+        return []
+    where, _ = _filter_sql(filters)
+    kind = _kind_clause(metric)
+    if kind:
+        where += f" AND {kind}"
+    col = _group_col(boundary)
+    if selected_names:
+        where += " AND " + col + " IN (" + ", ".join(
+            _sql_escape(fd.clean_boundary_name(n)) for n in selected_names
+        ) + ")"
+    expr = _metric_expr(metric)
+    sql = (
+        "SELECT extract(year from to_timestamp(close_date_ts / 1000.0))::int AS y, "
+        "extract(month from to_timestamp(close_date_ts / 1000.0))::int AS m, "
+        f"count(*)::int AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY {expr}) AS med "
+        f"FROM properties WHERE {where} AND close_date_ts > 0 AND {expr} IS NOT NULL "
+        "GROUP BY 1, 2 ORDER BY 1, 2"
+    )
+    return [
+        {"year": int(r.get("y") or 0), "month": int(r.get("m") or 0),
+         "count": int(r.get("n") or 0), "value": _num(r.get("med"))}
+        for r in fd.sql_rows(sql)
+        if int(r.get("y") or 0) > 0
+    ]
+
+
+def build_forecast(series: list[dict]) -> dict | None:
+    """Weighted least-squares trend over the uploaded periods.
+
+    Port of the old app's buildForecast(): recency-weighted (0.9^age) and
+    sample-weighted (sqrt(n)) regression. It only FITS the uploaded periods —
+    no months/years are invented (owner decision 2026-09-24); the 3/5-year
+    numbers are the trend evaluated 3 and 5 periods past the last real one.
+    """
+    pts = [p for p in (series or []) if p.get("value") is not None]
+    if len(pts) < 2:
+        return None
+    import math
+
+    x = list(range(len(pts)))
+    y = [float(p["value"]) for p in pts]
+    counts = [max(1, int(p.get("count") or 0)) for p in pts]
+    last = x[-1]
+    weights = [(0.9 ** (last - i)) * math.sqrt(counts[i]) for i in x]
+    wsum = sum(weights)
+    if wsum <= 0:
+        return None
+    mean_x = sum(weights[i] * x[i] for i in x) / wsum
+    mean_y = sum(weights[i] * y[i] for i in x) / wsum
+    sxx = sum(weights[i] * x[i] * x[i] for i in x) - wsum * mean_x * mean_x
+    sxy = sum(weights[i] * x[i] * y[i] for i in x) - wsum * mean_x * mean_y
+    slope = (sxy / sxx) if sxx else 0.0
+    intercept = mean_y - slope * mean_x
+    if not (math.isfinite(slope) and math.isfinite(intercept)):
+        return None
+
+    fitted = [slope * xi + intercept for xi in x]
+    ss_res = sum(weights[i] * (y[i] - fitted[i]) ** 2 for i in x)
+    ss_tot = sum(weights[i] * (y[i] - mean_y) ** 2 for i in x)
+    r2 = (1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+    sigma = math.sqrt(ss_res / wsum) if wsum > 0 else 0.0
+
+    def half(xi: float) -> float:
+        return 1.96 * sigma * math.sqrt(max(0.0, 1 + 1 / wsum + ((xi - mean_x) ** 2) / (sxx or 1)))
+
+    lower = [max(0.0, fitted[i] - half(x[i])) for i in x]
+    upper = [fitted[i] + half(x[i]) for i in x]
+    baseline = slope * last + intercept
+    pct = (slope / baseline * 100.0) if baseline else 0.0
+
+    return {
+        "periods": [str(p.get("period") or "") for p in pts],
+        "actual": y,
+        "counts": counts,
+        "fitted": fitted,
+        "lower": lower,
+        "upper": upper,
+        "slope": slope,
+        "delta": slope,
+        "pct": pct,
+        "r2": r2,
+        "baseline": baseline,
+        "forecast3yr": baseline + slope * 3,
+        "forecast5yr": baseline + slope * 5,
+        "count": len(pts),
+    }
 
 
 def year_built_histogram(filters: dict, period: str, boundary: str,

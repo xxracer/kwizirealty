@@ -186,6 +186,10 @@ def map_rows(
 ) -> list[dict]:
     rent = section in RENT_SECTIONS
     tax = section in TAX_SECTIONS
+    # OWNER RULE (2026-10-27): each year and "Current" are separate buckets.
+    # A row that cannot be dated belongs to the FILE's year (historical) —
+    # never to year 0, which is reserved for the Current listings bucket.
+    current = section in ("current-rent", "current-sales", "current-tax")
     listing = "rent" if rent else "tax" if tax else "sale"
     out = []
 
@@ -216,7 +220,7 @@ def map_rows(
             zip_raw = str(row.get("Postal Code") or row.get("Zip") or "").strip()
             out.append({
                 "mls_number": mls,
-                "dataset_year": int(tax_year) if tax_year else default_year,
+                "dataset_year": 0 if current else (int(tax_year) if tax_year else default_year),
                 "address": str(row.get("Address") or "").strip(),
                 "city": str(row.get("City Name") or "").strip(),
                 "zip": zip_raw,
@@ -255,7 +259,9 @@ def map_rows(
         if not ppsf and sqft:
             ppsf = close_price / sqft
 
-        year = close["year"] if rent else (close["year"] or default_year)
+        # Historical files always stay in THEIR year bucket; only the Current
+        # listings use year 0, so the two can never mix.
+        year = 0 if current else (close["year"] or default_year)
         zip_raw = str(row.get("Zip") or "").strip()
 
         out.append({

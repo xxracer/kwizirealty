@@ -663,6 +663,8 @@ body.ads-top.ads-bottom .map-card { height: calc(100vh - 362px); }
 
 .bar-chart { display: flex; flex-direction: column; gap: .5rem; }
 .bar-row { display: grid; grid-template-columns: 1fr auto; gap: .5rem; align-items: center; }
+.bar-row.clickable { cursor: pointer; border-radius: .4rem; padding: .15rem .25rem; margin: -.15rem -.25rem; transition: background .15s; }
+.bar-row.clickable:hover { background: rgba(59,130,246,.12); }
 .bar-name { font-size: .75rem; color: #d1d5db; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-track { grid-column: 1 / -1; height: .375rem; background: rgba(255,255,255,.05); border-radius: 9999px; overflow: hidden; }
 .bar-fill { height: 100%; border-radius: 9999px; }
@@ -700,3 +702,96 @@ body.ads-top.ads-bottom .map-card { height: calc(100vh - 362px); }
   .header, .summary, .sidebar, .map-card, .sidebar-toggle { display: none !important; }
   .report-root { background: #fff !important; }
 }
+
+/* ── Forecast legend, collapsible cards, guided tour ─────────────────────── */
+.fc-legend { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .6rem; }
+.fc-chip {
+  display: inline-flex; align-items: center; gap: .28rem; font-size: .65rem;
+  padding: .12rem .45rem; border-radius: 9999px; border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.04); color: #d1d5db; cursor: pointer;
+}
+.fc-chip:hover { border-color: rgba(96,165,250,.6); color: #fff; }
+.fc-chip.off { opacity: .35; }
+.fc-dot { width: .45rem; height: .45rem; border-radius: 9999px; display: inline-block; }
+
+.card-head { cursor: pointer; }
+.card.collapsed .card-body { display: none; }
+
+.tour-body { padding: 1rem 1.25rem; }
+.tour-body h3 { margin: 0 0 .4rem; font-size: 1rem; }
+.tour-body p { margin: 0; font-size: .82rem; line-height: 1.6; color: #d1d5db; }
+.tour-step { font-size: .7rem; color: #6b7280; font-weight: 700; }
+.tour-focus { outline: 3px solid #60a5fa; outline-offset: 4px; border-radius: .75rem; position: relative; z-index: 1001; }
+
+/* Modal overlay (the tour; the same pattern the CMS uses) */
+.umodal {
+  position: fixed; inset: 0; z-index: 10001; background: rgba(17,19,26,.9);
+  backdrop-filter: blur(4px); display: flex; align-items: center;
+  justify-content: center; padding: 1rem;
+}
+.umodal.hidden { display: none; }
+.modal-close { background: none; border: none; color: #9ca3af; font-size: 1rem; cursor: pointer; }
+.modal-close:hover { color: #fff; }
+
+.fc-tip {
+  position: absolute; pointer-events: none; z-index: 6; white-space: nowrap;
+  background: rgba(10,12,16,.96); border: 1px solid rgba(96,165,250,.55);
+  border-radius: .5rem; padding: .4rem .55rem; font-size: .72rem; color: #e5e7eb;
+  box-shadow: 0 10px 24px rgba(0,0,0,.55);
+}
+.fc-bar { cursor: crosshair; }
+.fc-bar:hover { stroke: #fff; stroke-width: 1; }
+
+/* Guided tour — bottom sheet with a progress bar and a soft spotlight. */
+.tour-focus { outline: none !important; box-shadow: 0 0 0 3px rgba(96,165,250,.95), 0 0 0 9999px rgba(8,10,14,.55); border-radius: .75rem; position: relative; z-index: 1001; }
+
+
+/* Interactive cards */
+.tile.clickable, .subpanel.clickable { cursor: pointer; transition: background .15s, border-color .15s; }
+.tile.clickable:hover { background: rgba(96,165,250,.12); border-color: rgba(96,165,250,.4); }
+.subpanel.clickable { border-radius: .6rem; }
+.subpanel.clickable:hover { background: rgba(96,165,250,.09); }
+
+/* Forecast: compact chart + date list */
+.fc-chart svg { max-height: 260px; }
+.fc-table { width: 100%; border-collapse: collapse; margin-top: .7rem; font-size: .75rem; }
+.fc-table th { text-align: left; color: #9ca3af; font-weight: 700; padding: .35rem .5rem; border-bottom: 1px solid rgba(255,255,255,.1); }
+.fc-table td { padding: .32rem .5rem; color: #e5e7eb; border-bottom: 1px solid rgba(255,255,255,.05); }
+.fc-table tr.fc-row { cursor: pointer; }
+.fc-table tr.fc-row:hover { background: rgba(96,165,250,.1); }
+
+/* Tour — centered card like new kwizi */
+.umodal.tour { align-items: flex-start; justify-content: flex-start; background: transparent; backdrop-filter: none; }
+.tour-dim { position: absolute; inset: 0; background: rgba(8,10,14,.62); }
+.tour-dim[hidden] { display: none; }
+.tour-card {
+  position: absolute; width: 26rem; max-width: calc(100vw - 2rem); border-radius: 1rem;
+  background: var(--surface); border: 1px solid rgba(255,255,255,.1);
+  box-shadow: 0 30px 70px rgba(0,0,0,.65); padding: 1.4rem 1.4rem 1rem;
+}
+.tour-top { display: flex; gap: .85rem; align-items: flex-start; margin-bottom: .8rem; }
+.tour-icon {
+  width: 2.8rem; height: 2.8rem; border-radius: .7rem; flex-shrink: 0;
+  background: rgba(96,165,250,.12); display: flex; align-items: center;
+  justify-content: center; font-size: 1.15rem; color: #93c5fd;
+}
+.tour-kicker { font-size: .65rem; font-weight: 800; letter-spacing: .08em; color: #60a5fa; text-transform: uppercase; margin: 0 0 .3rem; }
+.tour-body { padding: 0; }
+.tour-body h3 { font-size: 1.05rem; margin: 0; }
+.tour-body p { margin: .6rem 0 0; font-size: .85rem; color: #cbd5e1; line-height: 1.6; }
+.tour-dots { display: flex; gap: .3rem; margin: 1rem 0 .9rem; }
+.tour-dot { width: .42rem; height: .42rem; border-radius: 9999px; background: rgba(255,255,255,.18); }
+.tour-dot.on { background: #60a5fa; }
+.tour-actions { display: flex; gap: .5rem; justify-content: flex-end; }
+
+
+/* Tour buttons — clean, like the reference app */
+.tour-actions .btn {
+  border-radius: .6rem; padding: .5rem .95rem; font-size: .8rem; font-weight: 600;
+  border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06);
+  color: #e5e7eb; cursor: pointer; transition: background .15s, border-color .15s;
+}
+.tour-actions .btn:hover { background: rgba(255,255,255,.13); }
+.tour-actions .btn.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.tour-actions .btn.primary:hover { background: #1d4ed8; }
+.tour-actions .btn[hidden] { display: none; }

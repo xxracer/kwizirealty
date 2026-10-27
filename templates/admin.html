@@ -73,6 +73,7 @@
   .card2 h3 { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: #e5e7eb; margin: 0 0 .8rem; }
   .kpi { display: grid; grid-template-columns: repeat(2,1fr); gap: .6rem; margin-bottom: 1rem; }
   @media (min-width: 760px) { .kpi { grid-template-columns: repeat(4,1fr); } }
+  .coverage-scroll { max-height: 18rem; overflow: auto; }
   table.tbl { width: 100%; border-collapse: collapse; font-size: .78rem; }
   table.tbl th, table.tbl td { padding: .45rem .5rem; border-bottom: 1px solid var(--border); text-align: right; }
   table.tbl th:first-child, table.tbl td:first-child { text-align: left; }
@@ -392,8 +393,90 @@
 
         <div class="grid3" id="dash-sections"></div>
 
+        <div class="card2" style="margin-top:1rem">
+          <h3>Coverage gaps — what to upload next</h3>
+          <p class="muted" style="font-size:.72rem;margin:.2rem 0 .7rem">
+            Two complementary lists. Upload the <b>polygon</b> for the first one; upload the <b>data</b> for the second one.
+            Both lists refresh automatically after every upload and after “Re-run exact match”.
+          </p>
+          <div class="grid2" style="align-items:start">
+            <div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+                <h4 style="margin:0;font-size:.82rem">Subdivisions in the data with NO polygon</h4>
+                <div style="display:flex;gap:.35rem;flex-wrap:wrap">
+                  <button class="btn ghost" id="missing-exact" type="button">Re-run exact match</button>
+                  <button class="btn ghost" id="missing-refresh" type="button">Refresh</button>
+                  <button class="btn" id="missing-download" type="button">Download list</button>
+                </div>
+              </div>
+              <p class="muted" style="font-size:.7rem;margin:.15rem 0 .35rem">These names appear in the uploaded rows but no polygon carries them → upload the polygon in <b>Area Metrics</b>.</p>
+              <p class="muted" id="missing-summary" style="font-size:.72rem;margin:.25rem 0 .4rem">Loading…</p>
+              <div class="coverage-scroll">
+                <table class="tbl">
+                  <thead><tr><th>Subdivision</th><th>ZIP</th><th>Rows</th><th>Why</th></tr></thead>
+                  <tbody id="missing-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+                <h4 style="margin:0;font-size:.82rem">Polygons with NO data</h4>
+                <div style="display:flex;gap:.35rem;flex-wrap:wrap">
+                  <button class="btn ghost" id="nodata-refresh" type="button">Refresh</button>
+                  <button class="btn" id="nodata-download" type="button">Download list</button>
+                </div>
+              </div>
+              <p class="muted" style="font-size:.7rem;margin:.15rem 0 .35rem">These polygons exist in the boundary file but no uploaded data falls inside them → upload the CSVs that cover them.</p>
+              <p class="muted" id="nodata-summary" style="font-size:.72rem;margin:.25rem 0 .4rem">Loading…</p>
+              <div class="coverage-scroll">
+                <table class="tbl">
+                  <thead><tr><th>Polygon</th><th>ZIP</th><th>Rows</th></tr></thead>
+                  <tbody id="nodata-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="card2" style="margin-top:1rem"><h3>Rows by dataset year</h3>
           <table class="tbl"><thead><tr><th>Year</th><th>Rows</th><th>Committed</th><th>Pending</th></tr></thead><tbody id="years-body"></tbody></table>
+          <div class="alert blue" style="margin-top:.9rem">
+            <div class="alert-main">
+              <div class="alert-icon" style="font-size:1.05rem;font-weight:700">i</div>
+              <div>
+                <div class="alert-title">What &ldquo;Current (no date)&rdquo; means</div>
+                <div class="alert-desc">
+                  The <b>9,832 &ldquo;undated&rdquo; rental rows are the three Current Rent files</b>
+                  (3,320 + 2,447 + 4,065 = 9,832). They are active rentals, so they have no lease
+                  date yet. <b>No historical rent file contributes a single row to year 0.</b>
+                  <br><br>
+                  <b>Why you see that number when you click the row:</b>
+                  <br>1. The Year column shows <code>dataset_year</code>. An active rental has no
+                  lease date, so its year is 0 &mdash; displayed as &ldquo;Current (no date)&rdquo;.
+                  <br>2. The old Rent section counted <i>every</i> rent row, including Current, so
+                  those 9,832 rows appeared inside Rent. The rows were always fine; the bucket
+                  they were counted in was misleading.
+                  <br><br>
+                  <b>How it is fixed &mdash; step by step:</b>
+                  <br>1. The importer now files every row under the year of the file it came from.
+                  Only Current files use year 0, so a row without a date can never fall into
+                  2025 or 2026 by accident.
+                  <br>2. The <b>Rent</b> section now counts only <code>dataset_year &gt; 0</code>:
+                  2021&ndash;2026, with no &ldquo;undated&rdquo; row.
+                  <br>3. <b>Current Listings &rarr; Rent</b> counts <code>dataset_year = 0</code>:
+                  the 9,832 active rentals, labelled &ldquo;Current (no date)&rdquo;.
+                  <br>4. <b>Restart the app</b> so the new code and labels load.
+                  <br>5. When you re-upload the Current files they will always land in the Current
+                  bucket &mdash; never in 2025/2026.
+                  <br><br>
+                  <b>Do those rows still show on the map?</b> <b>Yes.</b> Current rentals are part of
+                  the map dataset and are counted whenever the period is <b>&ldquo;All data&rdquo;</b>.
+                  They are not counted inside a specific calendar year (2025, 2026, &hellip;) because
+                  they have no year. Nothing was deleted or hidden.
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="card2"><h3>Polygon assignment</h3>
@@ -407,6 +490,9 @@
           </div>
           <div class="prog"><div id="assign-prog"></div></div>
           <p id="assign-msg" style="margin:.4rem 0 0;font-size:.75rem"></p>
+          <p class="muted" style="font-size:.72rem;line-height:1.55;margin:.5rem 0 0">
+            Coverage gaps are listed at the top of the Dashboard in <b>“Coverage gaps — what to upload next”</b>.
+          </p>
         </div>
 
         <div class="card2"><h3>Pending upload sessions</h3><div id="pending-body"></div></div>
@@ -463,6 +549,76 @@
             <span class="muted" style="font-size:.8rem">rows imported and live on the map</span>
           </div>
           <table class="tbl" style="margin-top:.6rem"><thead><tr><th>Year</th><th>Rows</th></tr></thead><tbody id="db-stats-years"></tbody></table>
+          <div class="alert blue" style="margin-top:.9rem">
+            <div class="alert-main">
+              <div class="alert-icon" style="font-size:1.05rem;font-weight:700">i</div>
+              <div>
+                <div class="alert-title">Years and Current are separate buckets</div>
+                <div class="alert-desc">
+                  Every row is counted in the year of the file it came from. Year 0 is reserved for
+                  <b>Current</b> listings. The 9,832 rental rows without a lease date are exactly the
+                  three Current Rent files (3,320 + 2,447 + 4,065); no historical rent file puts a
+                  row in year 0.
+                  <br><br>
+                  The map still shows them: they count under <b>&ldquo;All data&rdquo;</b>, not inside a
+                  single calendar year, because they have no year. Nothing was deleted.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card2" id="upload-errors-card" style="margin-bottom:1rem" hidden>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem">
+            <h3 style="margin:0">Upload problems</h3>
+            <button class="btn ghost" id="upload-errors-clear" type="button">Clear</button>
+          </div>
+          <p class="muted" style="font-size:.72rem;margin:.2rem 0 .5rem">
+            These files could not be uploaded. The reason is shown in English, exactly as the server reported it.
+          </p>
+          <ul id="upload-errors-list" style="margin:0;padding-left:1.1rem;font-size:.75rem;line-height:1.65"></ul>
+        </div>
+
+        <div class="card2" style="margin-bottom:1rem">
+          <h3>Missing data for this section</h3>
+          <p class="muted" style="font-size:.72rem;margin:.2rem 0 .6rem">
+            Only rows and files of <b id="sec-gap-label">this section</b>. Two lists: names with no polygon
+            (upload the polygon) and polygons with no data (upload the files).
+          </p>
+          <div class="grid2" style="align-items:start">
+            <div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+                <h4 style="margin:0;font-size:.8rem">Rows with NO polygon</h4>
+                <div style="display:flex;gap:.35rem">
+                  <button class="btn ghost" id="sec-missing-refresh" type="button">Refresh</button>
+                  <button class="btn" id="sec-missing-download" type="button">Download</button>
+                </div>
+              </div>
+              <p class="muted" id="sec-missing-summary" style="font-size:.72rem;margin:.25rem 0 .4rem">Loading…</p>
+              <div class="coverage-scroll">
+                <table class="tbl">
+                  <thead><tr><th>Subdivision</th><th>ZIP</th><th>Rows</th><th>Why</th></tr></thead>
+                  <tbody id="sec-missing-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+                <h4 style="margin:0;font-size:.8rem">Polygons with NO data in this section</h4>
+                <div style="display:flex;gap:.35rem">
+                  <button class="btn ghost" id="sec-nodata-refresh" type="button">Refresh</button>
+                  <button class="btn" id="sec-nodata-download" type="button">Download</button>
+                </div>
+              </div>
+              <p class="muted" id="sec-nodata-summary" style="font-size:.72rem;margin:.25rem 0 .4rem">Loading…</p>
+              <div class="coverage-scroll">
+                <table class="tbl">
+                  <thead><tr><th>Polygon</th><th>ZIP</th><th>Rows</th></tr></thead>
+                  <tbody id="sec-nodata-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div id="upload-pane" class="grid-upload">
@@ -877,7 +1033,7 @@
     state.account = account;
     buildNav(isAdmin);
     await loadGate();
-    if (isAdmin) { await loadStatus(); show('dashboard'); }
+    if (isAdmin) { await loadStatus(); loadMissing(); loadNoData(); show('dashboard'); }
     else { show('users'); }
   });
   $('signout').addEventListener('click', () => signOut(auth));
@@ -906,6 +1062,7 @@
     const sec = byId[id] || byId.dashboard;
     $('cms-section-title').textContent = sec.label.replace(/^└ /, '');
     $('cms-section-sub').textContent = sec.sub;
+    if (DATA_SECTIONS.includes(id)) { loadSectionGaps(id); renderUploadErrors(id); }
     if (id === 'dashboard') { $('view-dashboard').classList.remove('hidden'); loadStatus(); loadPending(); }
     else if (id === 'areas') { $('view-areas').classList.remove('hidden'); loadBoundaries(); syncTargetLabel(); }
     else if (id === 'ads') { $('view-ads').classList.remove('hidden'); loadAds(); paintSizeBox(); }
@@ -944,7 +1101,7 @@
         ? 'These rows are already in the database but the map cannot show them until they are confirmed. Click “Confirm all now”.'
         : 'If the map still shows 0 properties after uploading files, click here to force-confirm any rows waiting in SQL.';
 
-      $('years-body').innerHTML = (s.byYear || []).map((r) => `<tr><td>${r.year || 'undated'}</td><td>${fmt(r.rows)}</td><td>${fmt(r.committed)}</td><td>${fmt(r.pending)}</td></tr>`).join('');
+      $('years-body').innerHTML = (s.byYear || []).map((r) => `<tr><td>${r.year || 'Current (no date)'}</td><td>${fmt(r.rows)}</td><td>${fmt(r.committed)}</td><td>${fmt(r.pending)}</td></tr>`).join('');
       $('coverage-body').innerHTML = (s.coverage || []).map((c) => {
         const pct = c.withCoords ? Math.round((c.assigned / c.withCoords) * 100) : 0;
         return `<div><div style="display:flex;justify-content:space-between;font-size:.72rem;color:#d1d5db"><span>${c.label}</span><span>${fmt(c.assigned)} / ${fmt(c.withCoords)} (${pct}%)</span></div><div class="prog"><div style="width:${pct}%"></div></div></div>`;
@@ -1064,7 +1221,7 @@
       state.dbTotals[section] = Number(s.total || 0);
       $('db-stats-total').textContent = fmt(s.total);
       $('db-stats-years').innerHTML = (s.byYear || []).length
-        ? s.byYear.map((r) => `<tr><td>${r.year || 'undated'}</td><td>${fmt(r.rows)}</td></tr>`).join('')
+        ? s.byYear.map((r) => `<tr><td>${r.year || 'Current (no date)'}</td><td>${fmt(r.rows)}</td></tr>`).join('')
         : '<tr><td colspan="2" class="muted">No rows in the database for this section yet.</td></tr>';
     } catch (err) { console.warn(err); }
   }
@@ -1463,8 +1620,11 @@
         fd.append('file', f);
         const out = await api('/api/admin/upload-data', { method: 'POST', body: fd });
         report.push({ ...out, fileName: out.file || f.name });
+        if (out && out.ok === false) recordUploadError(sec.id, out.file || f.name, out.error || 'The file could not be imported', out.detail || '');
       } catch (err) {
-        report.push({ fileName: f.name, error: String(err.message || err), parsed: 0, imported: 0, skipped: 0 });
+        const message = String(err.message || err);
+        report.push({ fileName: f.name, error: message, parsed: 0, imported: 0, skipped: 0 });
+        recordUploadError(sec.id, f.name, message, '');
       }
       const pct = Math.round(((i + 1) / files.length) * 100);
       $('upload-prog').style.width = `${pct}%`;
@@ -1480,6 +1640,7 @@
       : `${fmt(okCount)} of ${fmt(report.length)} file(s) published — live on the map.`;
     showReport(report);
     loadFiles(sec.category, 'section-files');
+    loadSectionGaps(sec.id);
     loadFiles(sec.category, 'section-files-edit');
     loadSectionStats(sec.category);
     loadStatus(); loadPending();
@@ -1520,6 +1681,183 @@
 
   $('assign-run').addEventListener('click', () => runAssignment($('assign-class').value));
   $('reassign-poly').addEventListener('click', () => runAssignment('subdivisions'));
+  fetch('/api/zip-fallback').then((r) => r.json()).then((d) => {
+    const rows = Number(d.rows || 0);
+    const polys = Object.keys(d.byPolygon || {}).length;
+    if ($('zipfb-rows')) $('zipfb-rows').textContent = rows.toLocaleString();
+    if ($('zipfb-polys')) $('zipfb-polys').textContent = polys.toLocaleString();
+  }).catch(() => {});
+  async function loadMissing(limit = 300) {
+    try {
+      const d = await api(`/api/admin/missing-subdivisions?limit=${limit}`);
+      const summary = document.getElementById('missing-summary');
+      if (summary) {
+        summary.textContent = `${fmt(d.rows)} rows in ${fmt(d.groups)} subdivision + ZIP groups are not on the map yet. ` +
+          `Those subdivisions do not exist in the uploaded boundary file.`;
+      }
+      const body = document.getElementById('missing-body');
+      if (body) {
+        body.innerHTML = (d.list || []).map((g) => `<tr>
+          <td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td><td>${fmt(g.rows)}</td>
+          <td class="muted">${esc(g.reason)}</td></tr>`).join('') ||
+          '<tr><td colspan="4" class="muted">Nothing missing — every row is placed.</td></tr>';
+      }
+    } catch (err) {
+      const summary = document.getElementById('missing-summary');
+      if (summary) summary.textContent = String(err.message || err);
+    }
+  }
+
+  document.getElementById('missing-refresh')?.addEventListener('click', () => loadMissing());
+  document.getElementById('missing-exact')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const out = await api('/api/admin/apply-exact-names', { method: 'POST' });
+      await loadStatus();
+      await loadMissing();
+      await loadNoData();
+      btn.textContent = `Placed ${fmt(out.placed || 0)} rows`;
+      setTimeout(() => { btn.textContent = 'Re-run exact match'; }, 4000);
+    } catch (err) {
+      btn.textContent = 'Re-run exact match';
+      alert(String(err.message || err));
+    } finally { btn.disabled = false; }
+  });
+  document.getElementById('missing-download')?.addEventListener('click', async () => {
+    try {
+      const d = await api('/api/admin/missing-subdivisions?all=1');
+      const lines = ['subdivision,zip,rows,reason'];
+      for (const g of d.list || []) {
+        lines.push([g.name, g.zip, g.rows, g.reason]
+          .map((v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`).join(','));
+      }
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'missing_subdivisions.csv';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    } catch (err) { alert(String(err.message || err)); }
+  });
+
+  async function loadNoData(limit = 500) {
+    try {
+      const d = await api(`/api/admin/polygons-without-data?limit=${limit}`);
+      const summary = document.getElementById('nodata-summary');
+      if (summary) summary.textContent = `${fmt(d.polygons)} polygons have no data yet. Upload the data that covers these areas.`;
+      const body = document.getElementById('nodata-body');
+      if (body) {
+        body.innerHTML = (d.list || []).map((g) => `<tr>
+          <td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td><td>${fmt(g.rows)}</td></tr>`).join('') ||
+          '<tr><td colspan="3" class="muted">Every polygon has data.</td></tr>';
+      }
+    } catch (err) {
+      const summary = document.getElementById('nodata-summary');
+      if (summary) summary.textContent = String(err.message || err);
+    }
+  }
+
+  document.getElementById('nodata-refresh')?.addEventListener('click', () => loadNoData());
+  document.getElementById('nodata-download')?.addEventListener('click', async () => {
+    try {
+      const d = await api('/api/admin/polygons-without-data?all=1');
+      const lines = ['polygon,zip,rows'];
+      for (const g of d.list || []) {
+        lines.push([g.name, g.zip, g.rows]
+          .map((v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`).join(','));
+      }
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'polygons_without_data.csv';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    } catch (err) { alert(String(err.message || err)); }
+  });
+
+  // ── per-section coverage gaps + persistent upload problems ────────────────
+  const DATA_SECTIONS = ['sales', 'rent', 'tax', 'current', 'current-sales', 'current-rent', 'current-tax'];
+  state.uploadErrors = {};
+  try { state.uploadErrors = JSON.parse(localStorage.getItem('resdogs_upload_errors') || '{}') || {}; } catch (e) { state.uploadErrors = {}; }
+
+  function saveUploadErrors() {
+    try { localStorage.setItem('resdogs_upload_errors', JSON.stringify(state.uploadErrors)); } catch (e) { /* ignore */ }
+  }
+
+  function recordUploadError(section, fileName, message, detail) {
+    if (!section || !DATA_SECTIONS.includes(section)) return;
+    const list = state.uploadErrors[section] || [];
+    list.unshift({ fileName: fileName || '(unknown file)', message: String(message || 'Unknown error'), detail: detail ? String(detail) : '', at: Date.now() });
+    state.uploadErrors[section] = list.slice(0, 20);
+    saveUploadErrors();
+    if (state.section === section) renderUploadErrors(section);
+  }
+
+  function renderUploadErrors(section) {
+    const card = document.getElementById('upload-errors-card');
+    const list = document.getElementById('upload-errors-list');
+    if (!card || !list) return;
+    const items = (state.uploadErrors[section] || []);
+    card.hidden = !items.length;
+    list.innerHTML = items.map((e) => `<li><b>${esc(e.fileName)}</b> — This file could not be uploaded: ${esc(e.message)}${e.detail ? ` <span class="muted">(${esc(e.detail)})</span>` : ''}</li>`).join('');
+  }
+
+  async function loadSectionGaps(section) {
+    if (!DATA_SECTIONS.includes(section)) return;
+    const sec = byId[section] || {};
+    const label = document.getElementById('sec-gap-label');
+    if (label) label.textContent = (sec.label || section).replace(/^└ /, '');
+    try {
+      const [m, nd] = await Promise.all([
+        api(`/api/admin/missing-subdivisions?limit=200&section=${encodeURIComponent(section)}`),
+        api(`/api/admin/polygons-without-data?limit=200&section=${encodeURIComponent(section)}`),
+      ]);
+      const ms = document.getElementById('sec-missing-summary');
+      if (ms) ms.textContent = `${fmt(m.rows)} rows in ${fmt(m.groups)} subdivision + ZIP groups have no polygon in this section.`;
+      const mb = document.getElementById('sec-missing-body');
+      if (mb) mb.innerHTML = (m.list || []).map((g) => `<tr><td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td><td>${fmt(g.rows)}</td><td class="muted">${esc(g.reason)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Every row has a polygon.</td></tr>';
+      const ns = document.getElementById('sec-nodata-summary');
+      if (ns) ns.textContent = `${fmt(nd.polygons)} polygons have no data for this section.`;
+      const nb = document.getElementById('sec-nodata-body');
+      if (nb) nb.innerHTML = (nd.list || []).map((g) => `<tr><td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td><td>${fmt(g.rows)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Every polygon has data.</td></tr>';
+    } catch (err) {
+      const ms = document.getElementById('sec-missing-summary');
+      if (ms) ms.textContent = String(err.message || err);
+    }
+  }
+
+  function downloadRows(filename, header, rows) {
+    const lines = [header];
+    for (const row of rows) {
+      lines.push(row.map((v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`).join(','));
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  document.getElementById('sec-missing-refresh')?.addEventListener('click', () => loadSectionGaps(state.section));
+  document.getElementById('sec-nodata-refresh')?.addEventListener('click', () => loadSectionGaps(state.section));
+  document.getElementById('sec-missing-download')?.addEventListener('click', async () => {
+    const d = await api(`/api/admin/missing-subdivisions?all=1&section=${encodeURIComponent(state.section)}`);
+    downloadRows(`missing_subdivisions_${state.section}.csv`, 'subdivision,zip,rows,reason',
+      (d.list || []).map((g) => [g.name, g.zip, g.rows, g.reason]));
+  });
+  document.getElementById('sec-nodata-download')?.addEventListener('click', async () => {
+    const d = await api(`/api/admin/polygons-without-data?all=1&section=${encodeURIComponent(state.section)}`);
+    downloadRows(`polygons_without_data_${state.section}.csv`, 'polygon,zip,rows',
+      (d.list || []).map((g) => [g.name, g.zip, g.rows]));
+  });
+  document.getElementById('upload-errors-clear')?.addEventListener('click', () => {
+    state.uploadErrors[state.section] = [];
+    saveUploadErrors();
+    renderUploadErrors(state.section);
+  });
+
   async function runAssignment(cls) {
     const btn = $('assign-run'); btn.disabled = true;
     $('assign-msg').className = 'warn'; $('assign-msg').textContent = 'Assigning…';
@@ -1536,6 +1874,8 @@
       $('assign-prog').style.width = '100%';
       $('assign-msg').className = 'ok'; $('assign-msg').textContent = `Done — ${fmt(total)} rows assigned.`;
       loadStatus();
+      loadMissing();
+      loadNoData();
     } catch (err) { $('assign-msg').className = 'err'; $('assign-msg').textContent = String(err.message || err); }
     finally { btn.disabled = false; }
   }

@@ -690,10 +690,13 @@ def _delete_rows_for(section: str) -> int:
         return 0  # schools / boundaries only have files, not property rows
     types, date_mode = scope
     cond = "(" + " OR ".join(TYPE_CONDITION[t] for t in types) + ")"
+    # The bucket axis is dataset_year: > 0 = historical, 0 = Current. Using the
+    # year (not the close_date text) keeps the delete aligned with the stats
+    # even for rows whose date could not be parsed.
     if date_mode == "dated":
-        cond += " AND close_date IS NOT NULL AND close_date <> ''"
+        cond += " AND dataset_year > 0"
     elif date_mode == "undated":
-        cond += " AND (close_date IS NULL OR close_date = '')"
+        cond += " AND dataset_year = 0"
     return fd.sql_exec(f"DELETE FROM properties WHERE {cond}")
 
 
@@ -830,16 +833,23 @@ def db_stats(section: str) -> dict:
     deletes them), but their rows stay in Postgres — this is what the CMS
     shows so the owner can see the data is loaded.
     """
-    if section in ("rent", "current-rent"):
-        cond = "listing_type = 'rent'"
-    elif section in ("tax", "current-tax"):
+    # OWNER RULE (2026-10-27): the year buckets are dataset_year; year 0 is the
+    # Current bucket. The Rent section must NEVER include the Current Rent rows
+    # (that is what made "undated 9,832" look like bad rent data).
+    if section == "rent":
+        cond = "listing_type = 'rent' AND dataset_year > 0"
+    elif section == "current-rent":
+        cond = "listing_type = 'rent' AND dataset_year = 0"
+    elif section == "current-tax":
+        cond = "listing_type = 'tax' AND dataset_year = 0"
+    elif section == "tax":
         cond = "listing_type = 'tax'"
     elif section == "current-sales":
-        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND (close_date IS NULL OR close_date = '')"
+        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND dataset_year = 0"
     elif section == "current":
-        cond = "close_date IS NULL OR close_date = ''"
+        cond = "dataset_year = 0"
     else:
-        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND close_date IS NOT NULL AND close_date <> ''"
+        cond = "coalesce(listing_type,'sale') NOT IN ('rent','tax') AND dataset_year > 0"
 
     rows = fd.sql_rows(
         "SELECT dataset_year AS yr, count(*)::int AS n FROM properties "
@@ -851,6 +861,186 @@ def db_stats(section: str) -> dict:
     ]
     return {"section": section, "total": sum(y["rows"] for y in by_year), "byYear": by_year}
 
+
+
+# ── missing subdivisions (exact name+ZIP coverage) ───────────────────────────
+#
+# The map can only colour a subdivision polygon that EXISTS in the uploaded
+# boundary file. This reports, grouped by CSV subdivision + ZIP, every row that
+# is still unplaced, so the owner knows exactly which polygons to upload.
+# It also re-runs the exact normalized name+ZIP match (the "automatic" part):
+# polygon names often carry the ZIP in parentheses and the CSV does not.
+
+
+def _section_condition(section: str) -> str:
+    """SQL condition that scopes a coverage list to one CMS section."""
+    return {
+        "sales": "listing_type = 'sale' AND dataset_year > 0",
+        "rent": "listing_type = 'rent' AND dataset_year > 0",
+        "tax": "listing_type = 'tax'",
+        "current-sales": "listing_type = 'sale' AND dataset_year = 0",
+        "current-rent": "listing_type = 'rent' AND dataset_year = 0",
+        "current-tax": "listing_type = 'tax' AND dataset_year = 0",
+        "current": "dataset_year = 0",
+    }.get(section or "", "1=1")
+
+
+def _norm_subdivision(text: str) -> str:
+    s = fd.clean_boundary_name(text)
+    s = re.sub(r"\(.*?\)", " ", s)
+    s = re.sub(r"\b\d{5}\b", " ", s)
+    s = s.replace("&", " AND ")
+    s = re.sub(r"[^A-Z0-9 ]", " ", s)
+    s = re.sub(r"\bSEC(TION)?\s*0*\d+\b", " ", s)
+    s = re.sub(r"\b(PHASE|PH)\s*0*\d+\b", " ", s)
+    s = re.sub(r"\b(U\s*/\s*R|UNRESTRICTED)\b", " ", s)
+    s = re.sub(r"\bNO\.?\s*0*\d+\b", " ", s)
+    s = re.sub(r"\b[ABC]\b$", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _subdivision_index():
+    tree, geoms, names, fids, bases = engine._get_index("subdivisions")
+    by_norm: dict[str, list[str]] = {}
+    for n in names:
+        by_norm.setdefault(_norm_subdivision(n), []).append(n)
+    return by_norm
+
+
+def _subdivision_candidates(by_norm: dict, text: str):
+    key = _norm_subdivision(text)
+    if not key:
+        return []
+    cands = list(by_norm.get(key, []))
+    if not cands:
+        for k, names in by_norm.items():
+            if k and (key.startswith(k + " ") or k.startswith(key + " ")):
+                cands.extend(names)
+    return sorted(set(cands))
+
+
+def _match_subdivision(by_norm: dict, text: str, zip_code: str):
+    cands = _subdivision_candidates(by_norm, text)
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    z = str(zip_code or "").strip()
+    if z:
+        zipped = [n for n in cands if f"({z})" in n]
+        if len(zipped) == 1:
+            return zipped[0]
+    return None
+
+
+def apply_exact_names() -> dict:
+    """Place every unplaced row whose CSV subdivision matches a polygon name
+    under the normalized name+ZIP bridge. No proximity, no invented areas."""
+    by_norm = _subdivision_index()
+    rows = fd.sql_rows(
+        "SELECT coalesce(subdivisions,'') AS s, coalesce(zipcodes,'') AS z, count(*)::int AS n "
+        "FROM properties WHERE upload_session_id IS NULL AND coalesce(poly_id_subdivisions,'')='' "
+        "GROUP BY 1,2 ORDER BY 3 DESC",
+        use_cache=False,
+    )
+    placed = 0
+    groups = 0
+    for r in rows:
+        target = _match_subdivision(by_norm, r["s"], r["z"])
+        if not target:
+            continue
+        placed += fd.sql_exec(
+            "UPDATE properties SET poly_id_subdivisions = " + fd.sql_literal(target)
+            + " WHERE upload_session_id IS NULL AND coalesce(poly_id_subdivisions,'')=''"
+            + " AND coalesce(subdivisions,'') = " + fd.sql_literal(r["s"])
+            + " AND coalesce(zipcodes,'') = " + fd.sql_literal(r["z"])
+        )
+        groups += 1
+    return {"placed": placed, "groups": groups}
+
+
+def missing_subdivisions(limit: int | None = 300, section: str = "") -> dict:
+    """Unplaced rows grouped by (subdivision, ZIP), with the reason."""
+    by_norm = _subdivision_index()
+    cond = _section_condition(section)
+    rows = fd.sql_rows(
+        "SELECT coalesce(subdivisions,'') AS s, coalesce(zipcodes,'') AS z, count(*)::int AS n "
+        "FROM properties WHERE upload_session_id IS NULL AND coalesce(poly_id_subdivisions,'')='' "
+        f"AND ({cond}) GROUP BY 1,2 ORDER BY 3 DESC",
+        use_cache=False,
+    )
+    groups = []
+    total_rows = 0
+    for r in rows:
+        name = str(r["s"] or "").strip()
+        zip_code = str(r["z"] or "").strip()
+        count = int(r["n"] or 0)
+        total_rows += count
+        if not name:
+            reason = "No subdivision name in the row"
+            match = None
+            candidates = 0
+        else:
+            match = _match_subdivision(by_norm, name, zip_code)
+            candidates = len(_subdivision_candidates(by_norm, name))
+            if match:
+                reason = "Name matches a polygon — press Re-run exact match"
+            elif candidates > 1:
+                reason = f"Ambiguous: {candidates} polygons share this name"
+            else:
+                reason = "No polygon with this name"
+        groups.append({
+            "name": name or "(no subdivision name)",
+            "zip": zip_code,
+            "rows": count,
+            "reason": reason,
+            "match": match,
+            "candidates": candidates,
+        })
+    total = {
+        "rows": total_rows,
+        "groups": len(groups),
+        "generatedAt": int(time.time() * 1000),
+        "list": groups if limit is None else groups[:limit],
+    }
+    return total
+
+
+def polygons_without_data(limit: int | None = 500, threshold: int = 0, section: str = "") -> dict:
+    """Polygons that exist in the boundary file but have no rows (or ≤ threshold).
+
+    The opposite list of `missing_subdivisions`: these are areas the map CAN
+    draw but has nothing to colour, because no uploaded CSV covers them.
+    """
+    fc = fd.fetch_boundary_geojson("subdivisions")
+    feats = fc.get("features") or []
+    cond = _section_condition(section)
+    rows = fd.sql_rows(
+        "SELECT poly_id_subdivisions AS p, count(*)::int AS n FROM properties "
+        "WHERE upload_session_id IS NULL AND coalesce(poly_id_subdivisions,'')<>'' "
+        f"AND ({cond}) GROUP BY 1",
+        use_cache=False,
+    )
+    counts = {fd.clean_boundary_name(r["p"]): int(r["n"] or 0) for r in rows}
+    out = []
+    seen = set()
+    for feat in feats:
+        props = feat.get("properties") or {}
+        raw = props.get("Name") or props.get("NAME") or props.get("name") or ""
+        name = fd.clean_boundary_name(raw)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        n = counts.get(name, 0)
+        if n > threshold:
+            continue
+        zip_code = props.get("Zip_Code") or props.get("ZIP") or props.get("Zip") or ""
+        out.append({"name": raw.strip(), "zip": str(zip_code).strip(), "rows": n})
+    out.sort(key=lambda g: (g["name"], g["zip"]))
+    total = {"polygons": len(out), "rows": sum(g["rows"] for g in out), "threshold": threshold,
+             "generatedAt": int(time.time() * 1000),
+             "list": out if limit is None else out[:limit]}
+    return total
 
 def coverage_for(cls: str) -> dict:
     col = POLY_COLUMN.get(cls)

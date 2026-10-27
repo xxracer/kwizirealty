@@ -34,6 +34,7 @@
     vmax: 1,
     tool: 'select',
     reportOpen: false,
+    zipFallback: {},   // polygon name -> rows placed by proximity
     map: null,
     loadedBoundary: null,
   };
@@ -200,10 +201,12 @@
     const rec = state.metricValues[i];
     if (!rec) return;
     const metricLabel = (B.metrics.find((m) => m.key === state.metric) || {}).label || state.metric;
+    const approx = state.zipFallback[rec.name] || state.zipFallback[String(rec.name || '').toUpperCase().replace(/\s+/g, ' ').trim()];
     const html =
       '<b class="pop-name">' + (rec.label || rec.name || '') + '</b>' +
       (rec.value == null ? '' : '<span class="pop-val">' + metricLabel + ': ' + formatValue(state.metric, rec.value) + '</span><br>') +
-      '<span class="pop-meta">' + Number(rec.count || 0).toLocaleString() + ' properties</span>';
+      '<span class="pop-meta">' + Number(rec.count || 0).toLocaleString() + ' properties</span>' +
+      (approx ? '<br><span class="pop-meta" style="color:#fbbf24">incl. ' + Number(approx).toLocaleString() + ' placed by proximity (approximate)</span>' : '');
     popup().setLngLat(e.lngLat).setHTML(html).addTo(state.map);
     state.map.getCanvas().style.cursor = 'pointer';
   }
@@ -329,13 +332,39 @@
     $('#sum-areas').textContent = painted.toLocaleString();
   }
 
+  /** Period text with the EXACT range for rolling windows. The original
+   *  analytics app shows "Sep 30, 2025 – Sep 30, 2026"; without the dates
+   *  "Last 12 months" was being mistaken for "Calendar 2025". */
+  function periodLabel(key) {
+    const p = B.periods.find((x) => x.key === key) || B.periods[0];
+    if (!p) return '';
+    if (!B.referenceDate) return p.label;
+    const ref = new Date(`${B.referenceDate}T00:00:00`);
+    if (isNaN(ref.getTime())) return p.label;
+    const start = new Date(ref);
+    if (/^r?[1-5]y$/.test(key)) {
+      const n = Number(key.replace(/\D/g, ''));
+      start.setFullYear(start.getFullYear() - n);
+    } else if (key === '6m') {
+      start.setMonth(start.getMonth() - 6);
+    } else if (key === '30d') {
+      start.setDate(start.getDate() - 30);
+    } else if (key === '90d') {
+      start.setDate(start.getDate() - 90);
+    } else {
+      return p.label;
+    }
+    const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    return `${p.label.replace(' (rolling)', '')} (${fmt(start)} – ${fmt(ref)})`;
+  }
+
   function updateSummary() {
     const b = B.boundaries.find((x) => x.key === state.boundary) || B.boundaries[0];
     const m = B.metrics.find((x) => x.key === state.metric) || B.metrics[0];
     const p = B.periods.find((x) => x.key === state.period) || B.periods[0];
     $('#sum-boundary').textContent = b.name;
     $('#sum-metric').textContent = m.label;
-    $('#sum-period').textContent = p.label;
+    $('#sum-period').textContent = periodLabel(state.period);
     const schools = []
       .concat(state.applied.schoolDistricts || [])
       .concat(state.applied.elementary || [])
@@ -347,12 +376,44 @@
     $('#sum-selected').textContent = String(state.selected.size);
     // Scale bar
     if (state.scaleOn) {
-      const lo = state.autoScale ? state.vmin : (state.customMin ?? state.vmin);
-      const hi = state.autoScale ? state.vmax : (state.customMax ?? state.vmax);
+      const { lo, hi } = scaleValues();
       const stops = currentStops();
       $('#scale-bar').style.background = `linear-gradient(to right, ${stops.map((s) => s[1]).join(', ')})`;
       $('#scale-min-label').textContent = formatValue(state.metric, lo);
       $('#scale-max-label').textContent = formatValue(state.metric, hi);
+      setScaleHandlePositions();
+    }
+  }
+
+  /** Current Min/Max of the colour scale (custom when Auto scale is off). */
+  function scaleValues() {
+    return {
+      lo: state.autoScale ? state.vmin : (state.customMin ?? state.vmin),
+      hi: state.autoScale ? state.vmax : (state.customMax ?? state.vmax),
+    };
+  }
+
+  /** Put the two handles and the dimmed margins where the current range is. */
+  function setScaleHandlePositions() {
+    const minH = $('#scale-handle-min');
+    const maxH = $('#scale-handle-max');
+    if (!minH || !maxH) return;
+    const span = (state.vmax - state.vmin) || 1;
+    const { lo, hi } = scaleValues();
+    const pct = (v) => Math.max(0, Math.min(100, ((v - state.vmin) / span) * 100));
+    const pLo = pct(lo);
+    const pHi = pct(hi);
+    minH.style.left = `${pLo}%`;
+    maxH.style.left = `${pHi}%`;
+    const dimL = $('#scale-dim-l');
+    const dimR = $('#scale-dim-r');
+    if (dimL) {
+      dimL.hidden = pLo <= 0.01;
+      dimL.style.width = `${pLo}%`;
+    }
+    if (dimR) {
+      dimR.hidden = pHi >= 99.99;
+      dimR.style.width = `${100 - pHi}%`;
     }
   }
 
@@ -492,6 +553,7 @@
     renderTimeSeries(data.timeSeries);
     renderTopAreas(data.topAreas);
     renderYearBuilt(data.yearBuilt);
+    renderForecast(data.forecast, data.monthly);
     $('#report-rows').textContent = `${Number(data.stats.count || 0).toLocaleString()} rows`;
     $('#report-sel').textContent = state.selected.size
       ? `${state.selected.size} area${state.selected.size === 1 ? '' : 's'} selected`
@@ -502,16 +564,26 @@
     refreshMapWindows();
   }
 
+  /** Cards are interactive: clicking a stat colours the map by that metric. */
+  function setMetric(key) {
+    if (!key || !B.metrics.some((m) => m.key === key)) return;
+    state.metric = key;
+    const lab = $('#metric-label');
+    if (lab) lab.textContent = (B.metrics.find((m) => m.key === key) || {}).label || key;
+    refreshAll();
+  }
+
   function renderQuickStats(s) {
     const tiles = [
-      { k: 'Properties', v: compact(s.count), c: '#fff' },
-      { k: 'Avg Price', v: money(s.avgSale), c: '#2c7be5' },
-      { k: '$/SqFt', v: money(s.avgSqft), c: '#00d4ff' },
-      { k: 'Avg DOM', v: `${Math.round(s.avgDom || 0)}d`, c: '#a855f7' },
+      { k: 'Properties', v: compact(s.count), c: '#fff', metric: null, hint: 'Rows in this selection' },
+      { k: 'Avg Price', v: money(s.avgSale), c: '#2c7be5', metric: 'Close Price', hint: 'Click: colour the map by Sales Price' },
+      { k: '$/SqFt', v: money(s.avgSqft), c: '#00d4ff', metric: 'Price per Sqft', hint: 'Click: colour the map by Sale Price / Sq.Ft.' },
+      { k: 'Avg DOM', v: `${Math.round(s.avgDom || 0)}d`, c: '#a855f7', metric: 'Days on Market', hint: 'Click: colour the map by Sale Days on Market' },
     ];
     $('#quick-stats').innerHTML =
-      tiles.map((t) => `<div class="tile"><span class="k">${t.k}</span><span class="v" style="color:${t.c}">${t.v}</span></div>`).join('') +
-      `<div class="tile wide"><span class="k">Total Volume</span><span class="v">${money(s.totalVolume)}</span></div>`;
+      tiles.map((t) => `<div class="tile${t.metric ? ' clickable' : ''}" ${t.metric ? `data-metric="${t.metric}"` : ''} title="${t.hint}"><span class="k">${t.k}</span><span class="v" style="color:${t.c}">${t.v}</span></div>`).join('') +
+      `<div class="tile wide" title="Sum of the closed sale prices in this selection"><span class="k">Total Volume</span><span class="v">${money(s.totalVolume)}</span></div>`;
+    $$('#quick-stats .tile[data-metric]').forEach((el) => el.addEventListener('click', () => setMetric(el.dataset.metric)));
   }
 
   function renderMarketHealth(h) {
@@ -546,7 +618,7 @@
 
   function renderSalesTaxRent(s) {
     const sales = `
-      <div class="subpanel">
+      <div class="subpanel clickable" data-metric="Close Price" title="Click: colour the map by Sales Price">
         <div class="h" style="color:#60a5fa">Sales</div>
         <div style="display:flex;flex-direction:column;gap:.375rem">
           <div class="subrow"><span class="k">Properties</span><span class="v">${compact(s.count)}</span></div>
@@ -557,7 +629,7 @@
         </div>
       </div>`;
     const tax = s.taxCoverage > 0 ? `
-      <div class="subpanel">
+      <div class="subpanel clickable" data-metric="Last Year Tax Rate" title="Click: colour the map by Last Year Tax Rate">
         <div class="h" style="color:#fbbf24">Tax</div>
         <div style="display:flex;flex-direction:column;gap:.375rem">
           <div class="subrow"><span class="k">Avg Annual Tax</span><span class="v">${money(s.avgTaxAmount)}/yr</span></div>
@@ -566,12 +638,12 @@
           <div class="subrow"><span class="k">Properties with Tax</span><span class="v">${compact(Math.round(s.taxCoverage * s.count))}</span></div>
         </div>
       </div>` : `
-      <div class="subpanel">
+      <div class="subpanel clickable" data-metric="Last Year Tax Rate" title="Click: colour the map by Last Year Tax Rate">
         <div class="h" style="color:#fbbf24">Tax</div>
         <div class="empty">No tax records in this selection yet.</div>
       </div>`;
     const rent = (s.rentCount > 0 && (s.medianRent || 0) > 0) ? `
-      <div class="subpanel">
+      <div class="subpanel clickable" data-metric="Est. Rental Price" title="Click: colour the map by Rental Price">
         <div class="h" style="color:#fb923c">Rent (real)</div>
         <div style="display:flex;flex-direction:column;gap:.375rem">
           <div class="subrow"><span class="k">Median Monthly Rent</span><span class="v">${money(s.medianRent)}/mo</span></div>
@@ -588,7 +660,8 @@
       <div class="report-grid" style="grid-template-columns:repeat(3,1fr)">
         ${sales}${tax}${rent}
       </div>
-      <div class="footnote">Rent values are REAL rental medians — never estimates. Tax figures are merged by MLS number.</div>`;
+      <div class="footnote">Rent values are REAL rental medians — never estimates. Tax figures are merged by MLS number. Click a panel to colour the map by that metric.</div>`;
+    $$('#sales-tax-rent .subpanel[data-metric]').forEach((el) => el.addEventListener('click', () => setMetric(el.dataset.metric)));
   }
 
   function renderTimeSeries(series) {
@@ -616,9 +689,24 @@
         ${[0.25, 0.5, 0.75].map((f) => `<line x1="${pad}" x2="${W - pad}" y1="${(H - pad) - f * (H - pad * 2)}" y2="${(H - pad) - f * (H - pad * 2)}" stroke="#ffffff10" stroke-dasharray="3 3"/>`).join('')}
         <path d="${area}" fill="url(#tsGrad)"/>
         <path d="${path}" fill="none" stroke="#2c7be5" stroke-width="2"/>
-        ${pts.map((p) => `<circle cx="${p[0]}" cy="${p[1]}" r="2.5" fill="#2c7be5"/>`).join('')}
+        ${pts.map((p) => `<circle class="ts-dot" data-period="${p[2].period}" data-value="${p[2].value}" data-count="${Number(p[2].count || 0)}" cx="${p[0]}" cy="${p[1]}" r="4" fill="#2c7be5" style="cursor:pointer"><title>${p[2].period}: ${formatValue(state.metric, p[2].value)}${p[2].count ? ` · ${Number(p[2].count).toLocaleString()} properties` : ''}</title></circle>`).join('')}
         ${pts.map((p) => `<text x="${p[0]}" y="${H - 1}" fill="#6b7280" font-size="9" text-anchor="middle">${p[2].period}</text>`).join('')}
-      </svg>`;
+      </svg>
+      <div class="fc-tip" hidden></div>`;
+    host.style.position = 'relative';
+    const tip = host.querySelector('.fc-tip');
+    host.querySelectorAll('.ts-dot').forEach((dot) => {
+      dot.addEventListener('mousemove', (ev) => {
+        const r = host.getBoundingClientRect();
+        tip.innerHTML = `<b>${dot.dataset.period}</b><br>${formatValue(state.metric, Number(dot.dataset.value))}` +
+          (Number(dot.dataset.count) ? `<br>${Number(dot.dataset.count).toLocaleString()} properties` : '');
+        tip.hidden = false;
+        tip.style.left = `${Math.min(r.width - 150, ev.clientX - r.left + 12)}px`;
+        tip.style.top = `${ev.clientY - r.top + 12}px`;
+      });
+      dot.addEventListener('mouseleave', () => { tip.hidden = true; });
+      dot.addEventListener('click', () => applyYearPeriod(Number(dot.dataset.period)));
+    });
   }
 
   function renderTopAreas(areas) {
@@ -626,11 +714,28 @@
     if (!areas || !areas.length) { host.innerHTML = '<div class="empty-state">No areas with data for this selection.</div>'; return; }
     const max = Math.max(...areas.map((a) => a.value || 0)) || 1;
     host.innerHTML = '<div class="bar-chart">' + areas.map((a) => `
-      <div class="bar-row">
+      <div class="bar-row clickable" data-area="${String(a.name || '').replace(/"/g, '&quot;')}" title="${a.label}: ${formatValue(state.metric, a.value)} · ${Number(a.count || 0).toLocaleString()} properties — click to select it on the map">
         <span class="bar-name" title="${a.label}">${a.label}</span>
         <span class="bar-val">${formatValue(state.metric, a.value)}</span>
         <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, ((a.value || 0) / max) * 100)}%;background:#2c7be5"></div></div>
       </div>`).join('') + '</div>';
+    // Interactive: clicking a bar selects that area on the map (same as
+    // clicking its polygon), so the report follows the selection.
+    host.querySelectorAll('[data-area]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const name = row.dataset.area;
+        const hit = state.metricValues.find((v) => v.name === name || v.label === name);
+        if (!hit) return;
+        if (state.multiSelect) {
+          if (state.selected.has(hit.i)) state.selected.delete(hit.i);
+          else state.selected.add(hit.i);
+        } else {
+          state.selected = new Set([hit.i]);
+        }
+        syncSelection();
+        if (state.reportOpen) renderReport();
+      });
+    });
   }
 
   function renderYearBuilt(buckets) {
@@ -639,11 +744,100 @@
     if (!total) { host.innerHTML = '<div class="empty-state">No year-built data for this selection.</div>'; return; }
     const colors = ['#2c7be5', '#00d4ff', '#7c3aed', '#f59e0b', '#10b981'];
     host.innerHTML = '<div class="bar-chart">' + buckets.map((b, i) => `
-      <div class="bar-row">
+      <div class="bar-row" title="${b.bucket}: ${b.count.toLocaleString()} properties (${(100 * b.count / total).toFixed(1)}%)">
         <span class="bar-name">${b.bucket}</span>
         <span class="bar-val">${b.count.toLocaleString()}</span>
         <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, (b.count / total) * 100)}%;background:${colors[i] || colors[0]}"></div></div>
       </div>`).join('') + '</div>';
+  }
+
+  /** 5-Year Forecast — the old app's card, fitted on the uploaded periods. */
+  const FC_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const FC_COLORS = ['#2c7be5','#f59e0b','#10b981','#fb923c','#a855f7','#eab308','#0ea5e9','#f472b6','#84cc16','#ec4899','#8b5cf6','#facc15'];
+  let fcHiddenMonths = new Set();
+
+  function monthlyChartSvg(monthly) {
+    const years = Array.from(new Set(monthly.map((d) => d.year))).sort();
+    if (!years.length) return '<div class="empty-state">No monthly data for this selection.</div>';
+    const W = 1200, H = 230, pl = 46, pr = 12, pt = 12, pb = 26;
+    const plotW = W - pl - pr, plotH = H - pt - pb;
+    const visible = monthly.filter((d) => !fcHiddenMonths.has(d.month));
+    const max = Math.max(...visible.map((d) => d.count), 1);
+    const gw = plotW / years.length;
+    const bw = Math.max(2, (gw * 0.88) / 12);
+    const yFor = (v) => pt + plotH - (v / max) * plotH;
+    const grid = [0, 0.25, 0.5, 0.75, 1].map((f) =>
+      `<line x1="${pl}" x2="${W - pr}" y1="${yFor(max * f).toFixed(1)}" y2="${yFor(max * f).toFixed(1)}" stroke="#ffffff14"/>` +
+      `<text x="${pl - 6}" y="${(yFor(max * f) + 3).toFixed(1)}" fill="#6b7280" font-size="10" text-anchor="end">${Math.round(max * f)}</text>`
+    ).join('');
+    const bars = visible.map((d) => {
+      const gi = years.indexOf(d.year), mi = d.month - 1;
+      const x = pl + gi * gw + gw * 0.06 + mi * bw;
+      const h = Math.max(1, (d.count / max) * plotH);
+      return `<rect class="fc-bar" data-y="${d.year}" data-m="${d.month}" data-n="${d.count}" data-v="${d.value == null ? '' : d.value}" x="${x.toFixed(1)}" y="${(pt + plotH - h).toFixed(1)}" width="${(bw * 0.92).toFixed(1)}" height="${h.toFixed(1)}" fill="${FC_COLORS[mi]}" rx="1"/>`;
+    }).join('');
+    const labels = years.map((yr, i) => `<text class="fc-year" data-year="${yr}" x="${(pl + i * gw + gw / 2).toFixed(1)}" y="${H - 4}" fill="#9ca3af" font-size="11" text-anchor="middle" style="cursor:pointer">${yr}</text>`).join('');
+    return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${grid}${bars}${labels}</svg>`;
+  }
+
+  function renderForecast(f, monthly) {
+    const host = $('#forecast');
+    if (!monthly || !monthly.length) {
+      host.innerHTML = '<div class="empty-state">No monthly data for this selection.</div>';
+      return;
+    }
+    const legend = FC_MONTHS.map((m, i) =>
+      `<button type="button" class="fc-chip${fcHiddenMonths.has(i + 1) ? ' off' : ''}" data-month="${i + 1}"><span class="fc-dot" style="background:${FC_COLORS[i]}"></span>${m}</button>`
+    ).join('');
+    host.innerHTML = `
+      <div class="fc-legend">${legend}</div>
+      <div class="fc-chart" style="position:relative;margin-top:.6rem">
+        ${monthlyChartSvg(monthly)}
+        <div class="fc-tip" hidden></div>
+      </div>
+      <table class="fc-table">
+        <thead><tr><th>Year</th><th>Properties</th><th>Median</th></tr></thead>
+        <tbody>
+          ${(f && f.periods ? f.periods : []).map((p, i) => `<tr class="fc-row" data-year="${p}">
+            <td>${p}</td><td>${Number((f.counts || [])[i] || 0).toLocaleString()}</td>
+            <td>${f.actual[i] == null ? '—' : formatValue(state.metric, f.actual[i])}</td></tr>`).join('')}
+        </tbody>
+      </table>
+      <div class="footnote">Properties closed per month and year (real uploaded data). Hover a bar for its numbers; click a month to show/hide it; click a year (bar chart or list) to filter the report.</div>`;
+    host.querySelectorAll('.fc-row').forEach((row) => row.addEventListener('click', () => applyYearPeriod(Number(row.dataset.year))));
+    host.querySelectorAll('[data-month]').forEach((b) => b.addEventListener('click', () => {
+      const m = Number(b.dataset.month);
+      if (fcHiddenMonths.has(m)) fcHiddenMonths.delete(m); else fcHiddenMonths.add(m);
+      renderForecast(f, monthly);
+    }));
+    const tip = host.querySelector('.fc-tip');
+    const box = host.querySelector('.fc-chart');
+    host.querySelectorAll('.fc-bar').forEach((bar) => {
+      bar.addEventListener('mousemove', (ev) => {
+        const r = box.getBoundingClientRect();
+        const m = Number(bar.dataset.m), n = Number(bar.dataset.n);
+        const v = bar.dataset.v ? Number(bar.dataset.v) : null;
+        tip.innerHTML = `<b>${FC_MONTHS[m - 1]} ${bar.dataset.y}</b><br>${n.toLocaleString()} properties` +
+          (v != null ? `<br>median ${formatValue(state.metric, v)}` : '');
+        tip.hidden = false;
+        tip.style.left = `${Math.min(r.width - 150, ev.clientX - r.left + 12)}px`;
+        tip.style.top = `${ev.clientY - r.top + 12}px`;
+      });
+      bar.addEventListener('mouseleave', () => { tip.hidden = true; });
+    });
+    host.querySelectorAll('.fc-year').forEach((el) => el.addEventListener('click', () => {
+      applyYearPeriod(Number(el.dataset.year));
+    }));
+  }
+
+  /** Clicking a year in the Forecast bars filters the report to that year. */
+  function applyYearPeriod(year) {
+    const back = new Date().getFullYear() - year;
+    const key = back >= 1 && back <= 5 ? `${back}y` : 'all';
+    state.period = key; state.draft.period = key; state.applied.period = key;
+    const lab = $('#period-label');
+    if (lab) lab.textContent = periodLabel(key);
+    refreshAll();
   }
 
   // ── UI wiring ─────────────────────────────────────────────────────────────
@@ -727,7 +921,7 @@
           state.period = b.dataset.period;
           state.draft.period = state.period;
           state.applied.period = state.period;
-          $('#period-label').textContent = b.textContent;
+          $('#period-label').textContent = periodLabel(b.dataset.period);
         }
         panel.querySelectorAll('.select-opt').forEach((x) => x.classList.toggle('active', x === b));
         panel.hidden = true;
@@ -816,12 +1010,71 @@
     });
     $('#auto-scale').addEventListener('change', (e) => {
       state.autoScale = e.target.checked;
+      // Coming back to Auto drops any custom range.
+      if (state.autoScale) { state.customMin = null; state.customMax = null; }
       updateSummary(); paint();
     });
     $('#reverse-colors').addEventListener('click', () => {
       state.reverse = !state.reverse;
       paint(); updateSummary();
     });
+    initScaleDrag();
+  }
+
+  /** Drag the Min/Max handles on the colour bar (owner 2026-10-27: "I cannot
+   *  manipulate the color bar scale"). Dragging while Auto scale is on turns
+   *  Auto off and starts from the current data range. */
+  function initScaleDrag() {
+    const bar = $('#scale-bar');
+    if (!bar) return;
+    const handles = [
+      { el: $('#scale-handle-min'), which: 'min' },
+      { el: $('#scale-handle-max'), which: 'max' },
+    ];
+    handles.forEach(({ el, which }) => {
+      if (!el) return;
+      el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (state.autoScale) {
+          state.customMin = state.vmin;
+          state.customMax = state.vmax;
+          state.autoScale = false;
+          const auto = $('#auto-scale');
+          if (auto) auto.checked = false;
+        }
+        state.customMin = state.customMin ?? state.vmin;
+        state.customMax = state.customMax ?? state.vmax;
+        el.classList.add('active');
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+
+        const onMove = (ev) => {
+          const rect = bar.getBoundingClientRect();
+          const ratio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / Math.max(1, rect.width)));
+          const span = (state.vmax - state.vmin) || 1;
+          const value = state.vmin + ratio * span;
+          if (which === 'min') {
+            state.customMin = Math.min(value, state.customMax);
+            if (state.customMax <= state.customMin) state.customMax = Math.min(state.vmax, state.customMin + span * 0.01);
+          } else {
+            state.customMax = Math.max(value, state.customMin);
+            if (state.customMin >= state.customMax) state.customMin = Math.max(state.vmin, state.customMax - span * 0.01);
+          }
+          updateSummary();
+          paint();
+        };
+        const onUp = () => {
+          el.classList.remove('active');
+          el.removeEventListener('pointermove', onMove);
+          el.removeEventListener('pointerup', onUp);
+          el.removeEventListener('pointercancel', onUp);
+        };
+        el.addEventListener('pointermove', onMove);
+        el.addEventListener('pointerup', onUp);
+        el.addEventListener('pointercancel', onUp);
+      });
+    });
+    setScaleHandlePositions();
   }
 
   function initMapTools() {
@@ -1221,6 +1474,7 @@
     'Time Series': 400,
     'Top Areas': 360,
     'Year Built': 340,
+    '5-Year Forecast': 400,
   };
   const MAP_WINDOW_LIMIT = 3;
   const mapWindows = new Map(); // title -> element
@@ -1246,111 +1500,128 @@
         toggleMapWindow(card);
       });
       head.appendChild(btn);
+      if (!head.dataset.collapseWired) {
+        head.dataset.collapseWired = '1';
+        head.addEventListener('click', (e) => {
+          if (e.target.closest('button')) return;
+          card.classList.toggle('collapsed');
+        });
+      }
     });
   }
 
-  function fillWindowBody(win, card) {
-    const body = win.querySelector('.map-window-body');
-    const src = card.querySelector('.card-body');
-    if (body && src) body.innerHTML = src.innerHTML;
-  }
+  // ── guided tour (mirrors new kwizi's TourModal) ───────────────────────────
+  const TOUR_STEPS = [
+    { title: 'Welcome to Kwizi Market Explorer', icon: '🧭', placement: 'center', text: 'Explore the Houston real-estate market with interactive maps, local insights and detailed area reports.' },
+    { sel: '.header', title: 'Top bar', icon: '🗺️', placement: 'bottom', text: 'Start this guided tour, save your session or manage your account from here.' },
+    { sel: '.summary', title: 'Live summary', icon: '📋', placement: 'bottom', text: 'See the active boundary, metric, time period, school filters and counts at a glance.' },
+    { sel: '[data-section="boundary"]', title: 'Pick a boundary', icon: '📐', placement: 'right', text: 'Switch between Subdivisions, ZIP codes, school districts and more. The map repaints immediately.' },
+    { sel: '[data-section="metric"]', title: 'Choose a metric', icon: '📊', placement: 'right', text: 'Colour the map by sales price, rental price, price per sq.ft., days on market, tax rate and more.' },
+    { sel: '[data-section="period"]', title: 'Close period', icon: '📅', placement: 'right', text: 'Rolling windows (Last 12 months, 3 years, 5 years) are anchored to the last close date in the data; the calendar options select one exact year.' },
+    { sel: '[data-section="search"]', title: 'Search areas', icon: '🔍', placement: 'right', text: 'Type an area name, address or ZIP to find and select matching polygons.' },
+    { sel: '[data-section="advanced"]', title: 'Advanced filters', icon: '⚙️', placement: 'right', text: 'Square footage, lot size, year built, DOM, list-to-sale, property type, cities and schools.' },
+    { sel: '.map-tools', title: 'Map tools', icon: '🖱️', placement: 'left', text: 'Select individual areas, draw a box or a lasso. Every area inside is selected automatically.' },
+    { sel: '#map', title: 'Select on the map', icon: '🎯', placement: 'center', text: 'Click any polygon to select it. With Multi-select on you can add or remove areas one by one.' },
+    { sel: '#tool-report', title: 'Generate the report', icon: '📈', placement: 'left', text: 'After selecting areas, press Generate Report. The report opens below the map with Quick Stats, Market Health, Sales · Tax · Rent, Time Series, Forecast, Top Areas and Year Built.' },
+    { title: 'You are ready', icon: '✅', placement: 'center', text: 'Every card is interactive: hover the charts, click a stat to recolour the map, collapse a card from its header, or pin it as a draggable box on the map. Press Tour any time to see this again.' },
+  ];
+  let tourIdx = 0;
 
-  function toggleMapWindow(card) {
-    const title = cardTitle(card);
-    if (mapWindows.has(title)) { closeMapWindow(title); return; }
-    if (mapWindows.size >= MAP_WINDOW_LIMIT) {
-      toast(`Only ${MAP_WINDOW_LIMIT} boxes on the map — close one first.`);
-      return;
+  function tourTarget(step) {
+    if (!step || !step.sel) return null;
+    const list = String(step.sel).split(',').map((x) => x.trim());
+    for (const sel of list) {
+      const el = document.querySelector(sel);
+      if (el && el.offsetParent !== null) return el;
     }
-    const host = $('.map-host');
-    if (!host) return;
-    let layer = document.getElementById('map-windows');
-    if (!layer) {
-      layer = document.createElement('div');
-      layer.id = 'map-windows';
-      layer.className = 'map-windows';
-      host.appendChild(layer);
+    return null;
+  }
+
+  function placeTourCardFor(step, el) {
+    const card = document.getElementById('tour-card');
+    if (!card) return;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const cw = card.offsetWidth, ch = card.offsetHeight;
+    let x = (vw - cw) / 2, y = (vh - ch) / 2;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      const gap = 14;
+      const right = r.right + gap, left = r.left - cw - gap;
+      const below = r.bottom + gap, above = r.top - ch - gap;
+      const fitsRight = right + cw <= vw - 12, fitsLeft = left >= 12;
+      const fitsBelow = below + ch <= vh - 12, fitsAbove = above >= 12;
+      if (step.placement === 'right' && fitsRight) { x = right; y = r.top; }
+      else if (step.placement === 'left' && fitsLeft) { x = left; y = r.top; }
+      else if (step.placement === 'bottom' && fitsBelow) { x = r.left; y = below; }
+      else if (step.placement === 'top' && fitsAbove) { x = r.left; y = above; }
+      else if (fitsRight) { x = right; y = r.top; }
+      else if (fitsLeft) { x = left; y = r.top; }
+      else if (fitsBelow) { x = r.left; y = below; }
+      else { x = r.left; y = Math.max(12, above); }
     }
-    const win = document.createElement('div');
-    win.className = 'map-window';
-    win.style.width = `${WINDOW_WIDTH[title] || 340}px`;
-    const i = mapWindows.size;
-    win.style.left = `${14 + i * 22}px`;
-    win.style.top = `${14 + i * 22}px`;
-
-    const head = document.createElement('div');
-    head.className = 'map-window-head';
-    const label = document.createElement('span');
-    label.className = 'map-window-title';
-    label.textContent = title;
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.className = 'map-window-close';
-    close.setAttribute('aria-label', 'Close');
-    close.textContent = '✕';
-    close.addEventListener('click', (e) => { e.stopPropagation(); closeMapWindow(title); });
-    head.append(label, close);
-
-    const body = document.createElement('div');
-    body.className = 'map-window-body';
-    win.append(head, body);
-    fillWindowBody(win, card);
-    makeWindowDraggable(win, head);
-    layer.appendChild(win);
-    mapWindows.set(title, win);
-    card.classList.add('pinned');
+    x = Math.max(12, Math.min(x, vw - cw - 12));
+    y = Math.max(12, Math.min(y, vh - ch - 12));
+    card.style.left = x + 'px';
+    card.style.top = y + 'px';
   }
 
-  function closeMapWindow(title) {
-    const win = mapWindows.get(title);
-    if (win) win.remove();
-    mapWindows.delete(title);
-    $$('#report .card').forEach((c) => {
-      if (cardTitle(c) === title) c.classList.remove('pinned');
-    });
+  function showTourStep() {
+    document.querySelectorAll('.tour-focus').forEach((el) => el.classList.remove('tour-focus'));
+    let guard = 0;
+    while (tourIdx < TOUR_STEPS.length && TOUR_STEPS[tourIdx].sel && !tourTarget(TOUR_STEPS[tourIdx]) && guard++ < TOUR_STEPS.length) tourIdx++;
+    const modal = document.getElementById('tour-modal');
+    if (!modal) return;
+    if (tourIdx >= TOUR_STEPS.length) { closeTour(); return; }
+    const step = TOUR_STEPS[tourIdx];
+    const el = tourTarget(step);
+    const dim = document.getElementById('tour-dim');
+    if (dim) dim.hidden = !!el;
+    if (el) {
+      el.classList.add('tour-focus');
+      el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+    }
+    document.getElementById('tour-title').textContent = step.title;
+    document.getElementById('tour-text').textContent = step.text;
+    document.getElementById('tour-icon').textContent = step.icon || '✦';
+    document.getElementById('tour-step').textContent = 'STEP ' + (tourIdx + 1) + ' OF ' + TOUR_STEPS.length;
+    const dots = document.getElementById('tour-dots');
+    if (dots) dots.innerHTML = TOUR_STEPS.map((_, i) => '<span class="tour-dot' + (i === tourIdx ? ' on' : '') + '"></span>').join('');
+    const next = document.getElementById('tour-next');
+    if (next) next.textContent = tourIdx === TOUR_STEPS.length - 1 ? 'Finish' : 'Next';
+    const prev = document.getElementById('tour-prev');
+    if (prev) prev.hidden = tourIdx === 0;
+    modal.classList.remove('hidden');
+    requestAnimationFrame(() => placeTourCardFor(step, el));
   }
 
-  function refreshMapWindows() {
-    if (!mapWindows.size) return;
-    $$('#report .card').forEach((card) => {
-      const win = mapWindows.get(cardTitle(card));
-      if (win) fillWindowBody(win, card);
-    });
+  function closeTour() {
+    document.querySelectorAll('.tour-focus').forEach((el) => el.classList.remove('tour-focus'));
+    const modal = document.getElementById('tour-modal');
+    if (modal) modal.classList.add('hidden');
   }
 
-  function makeWindowDraggable(win, handle) {
-    let dragging = false, startX = 0, startY = 0, originX = 0, originY = 0;
-    handle.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('button')) return;
-      const host = win.parentElement.getBoundingClientRect();
-      const rect = win.getBoundingClientRect();
-      originX = rect.left - host.left;
-      originY = rect.top - host.top;
-      win.style.left = `${originX}px`;
-      win.style.top = `${originY}px`;
-      startX = e.clientX;
-      startY = e.clientY;
-      dragging = true;
-      handle.setPointerCapture(e.pointerId);
-      e.preventDefault();
+  function initTour() {
+    const btn = document.getElementById('btn-tour');
+    if (!btn) return;
+    btn.addEventListener('click', () => { tourIdx = 0; showTourStep(); });
+    document.getElementById('tour-next')?.addEventListener('click', () => {
+      if (tourIdx >= TOUR_STEPS.length - 1) { closeTour(); return; }
+      tourIdx++;
+      showTourStep();
     });
-    handle.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const host = win.parentElement.getBoundingClientRect();
-      const maxX = Math.max(0, host.width - win.offsetWidth);
-      const maxY = Math.max(0, host.height - win.offsetHeight);
-      const x = Math.min(maxX, Math.max(0, originX + (e.clientX - startX)));
-      const y = Math.min(maxY, Math.max(0, originY + (e.clientY - startY)));
-      win.style.left = `${x}px`;
-      win.style.top = `${y}px`;
+    document.getElementById('tour-prev')?.addEventListener('click', () => { tourIdx = Math.max(0, tourIdx - 1); showTourStep(); });
+    document.getElementById('tour-skip')?.addEventListener('click', closeTour);
+    document.getElementById('tour-close')?.addEventListener('click', closeTour);
+    document.getElementById('tour-modal')?.addEventListener('click', (e) => {
+      if (e.target === document.getElementById('tour-modal') || e.target === document.getElementById('tour-dim')) closeTour();
     });
-    const stop = (e) => {
-      if (!dragging) return;
-      dragging = false;
-      try { handle.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
-    };
-    handle.addEventListener('pointerup', stop);
-    handle.addEventListener('pointercancel', stop);
+    window.addEventListener('resize', () => {
+      const modal = document.getElementById('tour-modal');
+      if (modal && !modal.classList.contains('hidden')) {
+        const step = TOUR_STEPS[tourIdx] || {};
+        placeTourCardFor(step, tourTarget(step));
+      }
+    });
   }
 
   // ── boot ───────────────────────────────────────────────────────────────────
@@ -1371,6 +1642,13 @@
     initChat();
     initAds();
     syncPinButtons();
+    initTour();
+    // Proximity manifest (kept for compatibility; rows = 0 after the exact-only
+    // placement change, so the tooltip no longer shows an approximation note).
+    fetch('/api/zip-fallback')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && d.byPolygon) state.zipFallback = d.byPolygon; })
+      .catch(() => {});
     if (window.RESDOGS_ACCOUNT) applyAccount(window.RESDOGS_ACCOUNT);
     state.map.on('load', () => {
       loadBoundary(state.boundary).then(() => loadValues()).catch((e) => {
