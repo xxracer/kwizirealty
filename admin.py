@@ -1006,6 +1006,48 @@ def missing_subdivisions(limit: int | None = 300, section: str = "") -> dict:
     return total
 
 
+
+def polygons_without_data_by_year(limit: int = 300, section: str = "") -> dict:
+    """Polygons with no rows FOR EACH dataset year of a section.
+
+    The map is a per-year dataset, so "no data" is a per-year fact: a polygon
+    can have sales in 2024 and none in 2026. Returns one entry per year with
+    the exact polygon names + ZIPs still missing that year.
+    """
+    fc = fd.fetch_boundary_geojson("subdivisions")
+    polys = []
+    seen = set()
+    for feat in fc.get("features") or []:
+        props = feat.get("properties") or {}
+        raw = props.get("Name") or props.get("NAME") or props.get("name") or ""
+        clean = fd.clean_boundary_name(raw)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        z = props.get("Zip_Code") or props.get("ZIP") or props.get("Zip") or ""
+        polys.append({"clean": clean, "name": raw.strip(), "zip": str(z).strip()})
+
+    cond = _section_condition(section)
+    years = [
+        int(r["y"]) for r in fd.sql_rows(
+            "SELECT dataset_year AS y FROM properties WHERE upload_session_id IS NULL "
+            f"AND ({cond}) GROUP BY 1 ORDER BY 1",
+            use_cache=False,
+        )
+    ]
+    out = []
+    for year in years:
+        rows = fd.sql_rows(
+            "SELECT poly_id_subdivisions AS p, count(*)::int AS n FROM properties "
+            "WHERE upload_session_id IS NULL AND coalesce(poly_id_subdivisions,'')<>'' "
+            f"AND ({cond}) AND dataset_year = {int(year)} GROUP BY 1",
+            use_cache=False,
+        )
+        present = {fd.clean_boundary_name(r["p"]) for r in rows}
+        missing = [{"name": g["name"], "zip": g["zip"], "rows": 0} for g in polys if g["clean"] not in present]
+        out.append({"year": year, "total": len(missing), "list": missing[:limit]})
+    return {"years": out, "generatedAt": int(time.time() * 1000)}
+
 def polygons_without_data(limit: int | None = 500, threshold: int = 0, section: str = "") -> dict:
     """Polygons that exist in the boundary file but have no rows (or ≤ threshold).
 

@@ -557,6 +557,13 @@ def admin_polygons_without_data(request: Request, limit: int = 500, all: int = 0
     ))
 
 
+@app.get("/api/admin/polygons-without-data-by-year")
+def admin_polygons_without_data_by_year(request: Request, section: str = "", limit: int = 300):
+    """Polygons with no rows, split by dataset year (the map is per year)."""
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.polygons_without_data_by_year(max(1, min(limit, 2000)), section))
+
+
 @app.post("/api/admin/apply-exact-names")
 def admin_apply_exact_names(request: Request):
     """Automatic pass: place unplaced rows whose CSV subdivision matches a
