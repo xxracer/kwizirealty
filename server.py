@@ -122,6 +122,10 @@ def map_page(request: Request):
         "defaultPeriod": DEFAULT_PERIOD,
         "palette": FIXED_PALETTE,
         "defaultFilters": DEFAULT_FILTERS,
+        # Rolling windows are anchored on the dataset's last close date — the
+        # same anchor the original analytics app uses. The UI shows the exact
+        # range so "Last 12 months" can never be confused with "Calendar 2025".
+        "referenceDate": engine.reference_date().strftime("%Y-%m-%d"),
     }
     return templates.TemplateResponse(
         request=request,
@@ -282,15 +286,22 @@ def api_report(
     # card set arrives in ~one query's time, not four.
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         f_stats = pool.submit(engine.area_stats, filters, period, names or None, boundary)
         f_series = pool.submit(engine.time_series, metric, filters, period, boundary, names or None)
         f_years = pool.submit(engine.year_built_histogram, filters, period, boundary, names or None)
         f_health = pool.submit(engine.market_health, filters, period, boundary, names or None)
+        # The forecast always uses the FULL uploaded history (a 5-year trend
+        # cannot be fitted on a single month), and the grouped bars show every
+        # month of every uploaded year.
+        f_series_all = pool.submit(engine.time_series, metric, filters, 'all', boundary, names or None)
+        f_monthly = pool.submit(engine.monthly_by_year, metric, filters, boundary, names or None)
         stats = f_stats.result()
         series = f_series.result()
         years = f_years.result()
         health = f_health.result()
+        series_all = f_series_all.result()
+        monthly = f_monthly.result()
 
     # Top areas: the polygons with the highest values in this selection.
     values = engine.aggregate_by_name(metric, boundary, filters, period)
@@ -307,6 +318,8 @@ def api_report(
         "stats": stats,
         "marketHealth": health,
         "timeSeries": series,
+        "forecast": engine.build_forecast(series_all),
+        "monthly": monthly,
         "yearBuilt": years,
         "topAreas": [
             {"name": t["name"], "label": fd.expand_boundary_name(t["name"]),
@@ -431,6 +444,38 @@ def api_distinct(column: str = "property_type"):
     return JSONResponse({"values": engine.distinct_values(column)})
 
 
+_zip_fallback_cache = {"at": 0.0, "data": None}
+
+
+@app.get("/api/zip-fallback")
+def api_zip_fallback():
+    """Rows that were placed by proximity (approximate ZIP fallback).
+
+    The table cannot carry a provenance column (the app's DB role is not the
+    table owner), so the manifest lives in Firestore `cms_meta/zip_fallback`.
+    The map tooltip marks the affected polygons with it.
+    """
+    import time as _time
+
+    if _zip_fallback_cache["data"] is not None and _time.time() - _zip_fallback_cache["at"] < 600:
+        return JSONResponse(_zip_fallback_cache["data"])
+    data = {"rows": 0, "byPolygon": {}, "method": "nearest polygon within 1.5 km"}
+    try:
+        for doc in fd._fs_list("cms_meta"):
+            if str(doc.get("_id")) == "zip_fallback":
+                data = {
+                    "rows": int(doc.get("rows") or 0),
+                    "byPolygon": doc.get("byPolygon") or {},
+                    "method": doc.get("method") or data["method"],
+                }
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    _zip_fallback_cache["at"] = _time.time()
+    _zip_fallback_cache["data"] = data
+    return JSONResponse(data)
+
+
 @app.get("/api/status")
 def api_status():
     st = engine.dataset_status()
@@ -486,7 +531,38 @@ async def admin_upload_boundary(request: Request):
     if len(content) > 200 * 1024 * 1024:
         return JSONResponse({"error": "File too large (200 MB max)"}, status_code=400)
     result = admin.upload_boundary(cls, admin.BOUNDARY_FILE_NAME.get(cls, upload.filename), content)
+    # AUTOMATIC: a new subdivision boundary immediately re-runs the exact
+    # name+ZIP match, so the rows it covers are placed without another click.
+    if cls == "subdivisions":
+        try:
+            result["exactMatch"] = admin.apply_exact_names()
+        except Exception as exc:  # noqa: BLE001 - the upload itself succeeded
+            result["exactMatchError"] = str(exc)
     return JSONResponse(result)
+
+
+@app.get("/api/admin/missing-subdivisions")
+def admin_missing_subdivisions(request: Request, limit: int = 300, all: int = 0, section: str = ""):
+    """Unplaced rows by subdivision + ZIP — the exact polygons still missing."""
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.missing_subdivisions(None if all else max(1, min(limit, 5000)), section))
+
+
+@app.get("/api/admin/polygons-without-data")
+def admin_polygons_without_data(request: Request, limit: int = 500, all: int = 0, threshold: int = 0, section: str = ""):
+    """Polygons that exist in the boundary but have no rows — upload the CSVs."""
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.polygons_without_data(
+        None if all else max(1, min(limit, 5000)), max(0, min(threshold, 100)), section
+    ))
+
+
+@app.post("/api/admin/apply-exact-names")
+def admin_apply_exact_names(request: Request):
+    """Automatic pass: place unplaced rows whose CSV subdivision matches a
+    polygon under the normalized name+ZIP bridge (no proximity)."""
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.apply_exact_names())
 
 
 @app.post("/api/admin/assign")

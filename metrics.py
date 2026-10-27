@@ -10,7 +10,7 @@ Source of truth (read-only, never modified by this port):
 Everything here is pure data / pure functions: no I/O, no framework.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # ── METRICS (verbatim from new kwizi/src/lib/metrics.ts) ──────────────────────
 #
@@ -84,69 +84,92 @@ BOUNDARY_GEOM = {
 #   1y..5y → that exact calendar year, N years back
 #   30d/90d/6m → rolling close-date windows
 def period_labels(now_year: int | None = None) -> list[dict]:
-    y = now_year or datetime.now().year
+    """Exactly the original app's Close Period list (same labels and order).
+
+    The rolling windows are anchored on the dataset's last close date, not on
+    today: the reference shows "Mar 30, 2026 – Sep 30, 2026" for "Last 6 months"
+    because its data ends on Sep 30, 2026.
+    """
     return [
-        # The original app opens on a ROLLING five-year window; keeping it as
-        # the default makes the first view match analytics.kwizirealty.com.
-        {"key": "r5y", "label": "Last 5 years"},
-        {"key": "r3y", "label": "Last 3 years"},
-        {"key": "r1y", "label": "Last 1 year"},
-        {"key": "all", "label": "All data (2021–2026)"},
         {"key": "30d", "label": "Last 30 days"},
         {"key": "90d", "label": "Last 90 days"},
         {"key": "6m", "label": "Last 6 months"},
-        {"key": "ytd", "label": f"This year ({y})"},
-        {"key": "1y", "label": f"Last year ({y - 1})"},
-        {"key": "2y", "label": f"2 years ago ({y - 2})"},
-        {"key": "3y", "label": f"3 years ago ({y - 3})"},
-        {"key": "4y", "label": f"4 years ago ({y - 4})"},
-        {"key": "5y", "label": f"5 years ago ({y - 5})"},
+        {"key": "ytd", "label": "Year-to-Date"},
+        {"key": "1y", "label": "1 year"},
+        {"key": "3y", "label": "3 years"},
+        {"key": "5y", "label": "5 years"},
+        {"key": "all", "label": "All data"},
     ]
 
 
 PERIODS = period_labels()
 PERIOD_BY_KEY = {p["key"]: p for p in PERIODS}
-DEFAULT_PERIOD = "r5y"
+DEFAULT_PERIOD = "5y"
 
 # Market Health's own period selector (verbatim from ReportCards.tsx).
 PERIOD_SHORT = ["All data", "30d", "90d", "6mo", "YTD", "1y", "3y", "5y"]
 PERIOD_SHORT_KEYS = ["all", "30d", "90d", "6m", "ytd", "1y", "3y", "5y"]
 
 
+
+
+def _days_in_month(year: int, month: int) -> int:
+    import calendar as _calendar
+
+    return _calendar.monthrange(year, month)[1]
+
+
 def period_window(period: str, reference: datetime | None = None) -> dict:
     """The (start_ts, end_ts, dataset_year_min, dataset_year_max) window for a
-    period key. Ported from engineCore.ts `periodWindow`."""
+    period key. Ported from engineCore.ts `periodWindow`.
+
+    Timestamps are the UTC midnight of a close date, so the window is compared
+    in UTC: an anchor date is included END TO END (the original app's
+    "Sep 30, 2025 – Sep 30, 2026" includes both days). Using the machine's
+    local timezone here silently dropped the first day of every rolling window.
+    """
     ref = reference or datetime.now()
-    end_ts = int(ref.timestamp() * 1000)
     year = ref.year
+
+    def utc_ms(dt: datetime) -> int:
+        return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+    def end_of_day(dt: datetime) -> int:
+        return utc_ms(dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)) - 1
+
+    end_ts = end_of_day(ref)
     if period == "all":
         return {"startTs": None, "endTs": None, "datasetYearMin": None, "datasetYearMax": None}
     if period == "30d":
         start = ref - timedelta(days=30)
-        return {"startTs": int(start.timestamp() * 1000), "endTs": end_ts,
+        return {"startTs": utc_ms(start), "endTs": end_ts,
                 "datasetYearMin": None, "datasetYearMax": None}
     if period == "90d":
         start = ref - timedelta(days=90)
-        return {"startTs": int(start.timestamp() * 1000), "endTs": end_ts,
+        return {"startTs": utc_ms(start), "endTs": end_ts,
                 "datasetYearMin": None, "datasetYearMax": None}
     if period == "6m":
-        start = ref - timedelta(days=180)
-        return {"startTs": int(start.timestamp() * 1000), "endTs": end_ts,
+        # SIX CALENDAR MONTHS, not 180 days: the reference's "Last 6 months"
+        # on Sep 30, 2026 starts on Mar 30, 2026.
+        year2, month2 = ref.year, ref.month - 6
+        while month2 <= 0:
+            month2 += 12
+            year2 -= 1
+        day2 = min(ref.day, _days_in_month(year2, month2))
+        start = ref.replace(year=year2, month=month2, day=day2)
+        return {"startTs": utc_ms(start), "endTs": end_ts,
                 "datasetYearMin": None, "datasetYearMax": None}
     if period == "ytd":
         return {"startTs": None, "endTs": None, "datasetYearMin": year, "datasetYearMax": year}
-    if period in ("1y", "2y", "3y", "4y", "5y"):
-        y = year - int(period[:-1])
-        return {"startTs": None, "endTs": None, "datasetYearMin": y, "datasetYearMax": y}
-    if period in ("r1y", "r3y", "r5y"):
-        # Rolling window ending at the dataset's last close date — the exact
-        # semantics of the original app's "1 year / 3 years / 5 years".
-        years = int(period[1])
+    if period in ("1y", "2y", "3y", "4y", "5y", "r1y", "r2y", "r3y", "r4y", "r5y"):
+        # Rolling calendar years back from the dataset's last close date — the
+        # original app's "1 year / 3 years / 5 years".
+        years = int(period[1] if period.startswith("r") else period[0])
         try:
             start = ref.replace(year=ref.year - years)
         except ValueError:  # Feb 29
             start = ref.replace(year=ref.year - years, day=28)
-        return {"startTs": int(start.timestamp() * 1000), "endTs": end_ts,
+        return {"startTs": utc_ms(start), "endTs": end_ts,
                 "datasetYearMin": None, "datasetYearMax": None}
     return {"startTs": None, "endTs": None, "datasetYearMin": None, "datasetYearMax": None}
 

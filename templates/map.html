@@ -519,6 +519,16 @@
               </div>
             </div>
 
+            <div class="card accent" style="color:#a78bfa">
+              <div class="card-head">
+                <div style="display:flex;align-items:center;gap:.5rem">
+                  <div class="card-icon" style="color:#a78bfa"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 7-8.5 8.5-5-5L2 17"/><path d="M16 7h6v6"/></svg></div>
+                  <h3 class="card-title">5-Year Forecast</h3>
+                </div>
+              </div>
+              <div class="card-body" id="forecast"></div>
+            </div>
+
             <div class="card accent" style="color:#22d3ee">
               <div class="card-head">
                 <div style="display:flex;align-items:center;gap:.5rem">
@@ -532,6 +542,28 @@
         </div>
       </div>
     </main>
+  </div>
+</div>
+
+<!-- ── guided tour ────────────────────────────────────────────────────────── -->
+<div id="tour-modal" class="umodal tour hidden">
+  <div class="tour-dim" id="tour-dim"></div>
+  <div class="tour-card" id="tour-card">
+    <button class="modal-close" id="tour-close" aria-label="Close" style="position:absolute;top:.8rem;right:.8rem">✕</button>
+    <div class="tour-top">
+      <div class="tour-icon" id="tour-icon">✦</div>
+      <div>
+        <p class="tour-kicker" id="tour-step">STEP 1 OF 7</p>
+        <h3 id="tour-title"></h3>
+      </div>
+    </div>
+    <div class="tour-body"><p id="tour-text"></p></div>
+    <div class="tour-dots" id="tour-dots"></div>
+    <div class="tour-actions">
+      <button class="btn ghost" id="tour-skip" type="button">Skip</button>
+      <button class="btn ghost" id="tour-prev" type="button">Back</button>
+      <button class="btn primary" id="tour-next" type="button">Next</button>
+    </div>
   </div>
 </div>
 
