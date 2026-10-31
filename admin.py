@@ -1007,6 +1007,63 @@ def missing_subdivisions(limit: int | None = 300, section: str = "") -> dict:
 
 
 
+
+def _boundary_polygons() -> list[dict]:
+    """Every subdivision polygon with its clean key, display name and ZIP."""
+    fc = fd.fetch_boundary_geojson("subdivisions")
+    out, seen = [], set()
+    for feat in fc.get("features") or []:
+        props = feat.get("properties") or {}
+        raw = props.get("Name") or props.get("NAME") or props.get("name") or ""
+        clean = fd.clean_boundary_name(raw)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        z = props.get("Zip_Code") or props.get("ZIP") or props.get("Zip") or ""
+        out.append({"clean": clean, "name": raw.strip(), "zip": str(z).strip()})
+    return out
+
+
+def _present_polys(section: str, year: int, month: int | None = None) -> set[str]:
+    cond = _section_condition(section)
+    month_sql = ""
+    if month is not None:
+        month_sql = (
+            " AND extract(month from to_timestamp(close_date_ts / 1000.0))::int = "
+            + str(int(month))
+        )
+    rows = fd.sql_rows(
+        "SELECT poly_id_subdivisions AS p FROM properties "
+        "WHERE upload_session_id IS NULL AND coalesce(poly_id_subdivisions,'')<>'' "
+        f"AND ({cond}) AND dataset_year = {int(year)}" + month_sql + " GROUP BY 1",
+        use_cache=False,
+    )
+    return {fd.clean_boundary_name(r["p"]) for r in rows}
+
+
+def polygons_without_data_month_counts(section: str, year: int) -> dict:
+    """Per month of one year: how many polygons have no rows that month."""
+    polys = _boundary_polygons()
+    all_clean = {g["clean"] for g in polys}
+    months = []
+    for m in range(1, 13):
+        present = _present_polys(section, year, m) & all_clean
+        months.append({
+            "month": m,
+            "total": len(all_clean) - len(present),
+            "hasData": bool(present),
+        })
+    return {"year": int(year), "polygons": len(all_clean), "months": months}
+
+
+def polygons_without_data_month(section: str, year: int, month: int, limit: int = 300) -> dict:
+    """Exact polygons with no rows in ONE month (name + ZIP)."""
+    polys = _boundary_polygons()
+    all_clean = {g["clean"] for g in polys}
+    present = _present_polys(section, year, month) & all_clean
+    missing = [{"name": g["name"], "zip": g["zip"], "rows": 0} for g in polys if g["clean"] not in present]
+    return {"year": int(year), "month": int(month), "total": len(missing), "list": missing[:limit]}
+
 def polygons_without_data_by_year(limit: int = 300, section: str = "") -> dict:
     """Polygons with no rows FOR EACH dataset year of a section.
 

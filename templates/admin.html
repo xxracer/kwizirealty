@@ -92,6 +92,10 @@
   .year-tab:hover { border-color: rgba(96,165,250,.5); color: #fff; }
   .year-tab.active { background: rgba(37,99,235,.85); border-color: #2563eb; color: #fff; }
   .year-tab.active span { color: #dbeafe; }
+  .month-tabs { margin-top: .15rem; }
+  .month-tab { font-size: .68rem; padding: .18rem .55rem; }
+  .month-tab.nodata { opacity: .45; }
+  .month-tab.nodata.active { opacity: 1; }
   table.tbl { width: 100%; border-collapse: collapse; font-size: .78rem; }
   table.tbl th, table.tbl td { padding: .45rem .5rem; border-bottom: 1px solid var(--border); text-align: right; }
   table.tbl th:first-child, table.tbl td:first-child { text-align: left; }
@@ -627,6 +631,7 @@
               </div>
             </div>
             <div class="year-tabs" id="sec-nodata-years"></div>
+            <div class="year-tabs month-tabs" id="sec-nodata-months"></div>
             <p class="muted" id="sec-nodata-summary" style="font-size:.72rem;margin:.15rem 0 .4rem">Loading…</p>
             <div class="coverage-scroll">
               <table class="tbl">
@@ -1826,9 +1831,13 @@
   state.gapYears = [];
   state.gapYear = null;
 
-  function renderGapYear(year) {
+  const GAP_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  state.gapMonth = null;
+  state.gapMonths = {};
+
+  async function renderGapYear(year) {
     state.gapYear = year;
-    const entry = (state.gapYears || []).find((y) => y.year === year);
+    state.gapMonth = null;
     const tabs = document.getElementById('sec-nodata-years');
     if (tabs) {
       tabs.innerHTML = (state.gapYears || []).map((y) =>
@@ -1837,18 +1846,59 @@
       tabs.querySelectorAll('[data-gap-year]').forEach((b) =>
         b.addEventListener('click', () => renderGapYear(Number(b.dataset.gapYear))));
     }
-    const sec = byId[state.section] || {};
-    const summary = document.getElementById('sec-nodata-summary');
-    if (summary) {
-      summary.textContent = entry
-        ? `${fmt(entry.total)} polygons have no ${(sec.label || 'section').replace(/^└ /, '')} data in ${year === 0 ? 'Current' : year}.`
-        : 'No years available for this section.';
+    let counts = state.gapMonths[year];
+    if (!counts) {
+      counts = await api(`/api/admin/polygons-without-data-month-counts?section=${encodeURIComponent(state.section)}&year=${year}`);
+      state.gapMonths[year] = counts;
     }
+    const months = (counts && counts.months) || [];
+    const monthTabs = document.getElementById('sec-nodata-months');
+    if (monthTabs) {
+      monthTabs.innerHTML = months.map((m) =>
+        `<button class="year-tab month-tab${m.hasData ? '' : ' nodata'}" data-gap-month="${m.month}">${GAP_MONTHS[m.month - 1]} <span>${fmt(m.total)}</span></button>`
+      ).join('');
+      monthTabs.querySelectorAll('[data-gap-month]').forEach((b) =>
+        b.addEventListener('click', () => renderGapMonth(year, Number(b.dataset.gapMonth))));
+    }
+    const withData = months.filter((m) => m.hasData);
+    const now = new Date();
+    let pick = withData.length ? withData[withData.length - 1].month : (months[0] ? months[0].month : 1);
+    if (year === now.getFullYear()) {
+      const current = months.find((m) => m.month === now.getMonth() + 1 && m.hasData);
+      if (current) pick = current.month;
+    }
+    await renderGapMonth(year, pick);
+  }
+
+  async function renderGapMonth(year, month) {
+    state.gapMonth = month;
+    document.querySelectorAll('#sec-nodata-months .month-tab').forEach((b) => {
+      b.classList.toggle('active', Number(b.dataset.gapMonth) === month);
+    });
+    const sec = byId[state.section] || {};
+    const label = (sec.label || 'section').replace(/^└ /, '');
+    const summary = document.getElementById('sec-nodata-summary');
     const body = document.getElementById('sec-nodata-body');
-    if (body) {
-      body.innerHTML = entry && entry.list.length
-        ? entry.list.map((g) => `<tr><td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td></tr>`).join('')
-        : '<tr><td colspan="2" class="muted">Every polygon has data in this year.</td></tr>';
+    const meta = (((state.gapMonths[year] || {}).months) || []).find((m) => m.month === month);
+    if (meta && !meta.hasData) {
+      if (summary) summary.textContent = `No data uploaded for ${GAP_MONTHS[month - 1]} ${year} yet — every polygon is missing.`;
+      if (body) body.innerHTML = '<tr><td colspan="2" class="muted">Upload the files for this month.</td></tr>';
+      return;
+    }
+    try {
+      const d = await api(`/api/admin/polygons-without-data-month?limit=300&section=${encodeURIComponent(state.section)}&year=${year}&month=${month}`);
+      if (summary) {
+        summary.textContent = d.total
+          ? `${fmt(d.total)} polygons have no ${label} data in ${GAP_MONTHS[month - 1]} ${year}.`
+          : `${GAP_MONTHS[month - 1]} ${year} is complete — every polygon has data.`;
+      }
+      if (body) {
+        body.innerHTML = d.list && d.list.length
+          ? d.list.map((g) => `<tr><td>${esc(g.name)}</td><td>${esc(g.zip || '—')}</td></tr>`).join('')
+          : '<tr><td colspan="2" class="muted">Every polygon has data in this month.</td></tr>';
+      }
+    } catch (err) {
+      if (summary) summary.textContent = String(err.message || err);
     }
   }
 
@@ -1902,10 +1952,9 @@
       (d.list || []).map((g) => [g.name, g.zip, g.rows, g.reason]));
   });
   document.getElementById('sec-nodata-download')?.addEventListener('click', async () => {
-    const d = await api(`/api/admin/polygons-without-data-by-year?limit=2000&section=${encodeURIComponent(state.section)}`);
-    const entry = (d.years || []).find((y) => y.year === state.gapYear);
-    downloadRows(`polygons_without_data_${state.section}_${state.gapYear}.csv`, 'polygon,zip',
-      ((entry && entry.list) || []).map((g) => [g.name, g.zip]));
+    const d = await api(`/api/admin/polygons-without-data-month?limit=3000&section=${encodeURIComponent(state.section)}&year=${state.gapYear}&month=${state.gapMonth}`);
+    downloadRows(`polygons_without_data_${state.section}_${state.gapYear}_${GAP_MONTHS[(state.gapMonth || 1) - 1]}.csv`, 'polygon,zip',
+      (d.list || []).map((g) => [g.name, g.zip]));
   });
   document.getElementById('upload-errors-clear')?.addEventListener('click', () => {
     state.uploadErrors[state.section] = [];
