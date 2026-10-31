@@ -1342,8 +1342,33 @@
     }
     return labels.sort(sortYearLabels).map((y) => {
       const list = groups[y].slice().sort((a, b) => Number(b.uploadedAt || 0) - Number(a.uploadedAt || 0));
-      return folderHtml(y, list.length, list.map(fileCardHtml).join(''));
+      return folderHtml(y, list.length, monthFoldersHtml(list));
     }).join('');
+  }
+
+  const TREE_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  function fileMonths(f) {
+    // The file's real data months (stored at upload); older files fall back to
+    // the month they were uploaded in.
+    if (Array.isArray(f.months) && f.months.length) {
+      return f.months.map(Number).filter((n) => n >= 1 && n <= 12);
+    }
+    const t = Number(f.uploadedAt || 0);
+    return t ? [new Date(t).getMonth() + 1] : [];
+  }
+  function monthFoldersHtml(list) {
+    const groups = {};
+    list.forEach((f) => {
+      const ms = fileMonths(f);
+      (ms.length ? ms : ['?']).forEach((m) => { (groups[m] = groups[m] || []).push(f); });
+    });
+    return Object.keys(groups)
+      .sort((a, b) => (a === '?' ? 99 : Number(a)) - (b === '?' ? 99 : Number(b)))
+      .map((m) => {
+        const files2 = groups[m].slice().sort((a, b) => Number(b.uploadedAt || 0) - Number(a.uploadedAt || 0));
+        const label = m === '?' ? 'No month' : TREE_MONTHS[Number(m) - 1];
+        return folderHtml(label, files2.length, files2.map(fileCardHtml).join(''));
+      }).join('');
   }
 
   const CURRENT_CATEGORIES = ['current', 'current-sale', 'current-rent', 'current-tax'];

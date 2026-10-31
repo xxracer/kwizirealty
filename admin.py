@@ -168,6 +168,7 @@ def dataset_status() -> dict:
             "storageUrl": f.get("storageUrl"),
             "rowCount": f.get("rowCount"),
             "year": _record_year(f),
+            "months": f.get("months") or [],
         }
         for f in files
         if (f.get("category") or "") == "boundary"
@@ -275,6 +276,12 @@ def _write_firestore_file(record: dict, category: str = "boundary") -> None:
             fields["year"] = {"integerValue": str(int(record["year"]))}
         except (TypeError, ValueError):
             pass
+    # Months covered by the file (from the lease/close dates). The CMS groups
+    # uploads by year AND month; a file covering Jul–Sep appears in all three.
+    if record.get("months") is not None:
+        fields["months"] = {"arrayValue": {"values": [
+            {"integerValue": str(int(m))} for m in record["months"] if 1 <= int(m) <= 12
+        ]}}
     body = json.dumps({"fields": fields}).encode()
     req = urllib.request.Request(
         url,
@@ -551,6 +558,7 @@ def list_files(category: str | None = None) -> list[dict]:
             "storageUrl": f.get("storageUrl"),
             "rowCount": f.get("rowCount"),
             "year": _record_year(f),
+            "months": f.get("months") or [],
         }
         for f in files
     ]

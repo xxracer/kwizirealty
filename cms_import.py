@@ -462,6 +462,10 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
     object_path = f"cms_files/{category}/{filename}"
     _upload_object(object_path, gz, "application/gzip")
     url = _set_download_token(object_path)
+    months = sorted({
+        datetime.fromtimestamp(int(r["close_date_ts"]) / 1000, tz=timezone.utc).month
+        for r in mapped if r.get("close_date_ts")
+    })
     _write_firestore_file({
         "id": f"{category}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
         "name": filename,
@@ -470,6 +474,7 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
         "storageUrl": url,
         "storagePath": object_path,
         "year": default_year,
+        "months": months,
     }, category=category)
 
     return {
