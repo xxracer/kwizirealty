@@ -564,6 +564,18 @@ def admin_polygons_without_data_by_year(request: Request, section: str = "", lim
     return JSONResponse(admin.polygons_without_data_by_year(max(1, min(limit, 2000)), section))
 
 
+@app.get("/api/admin/polygons-without-data-month-counts")
+def admin_gap_month_counts(request: Request, section: str = "", year: int = 0):
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.polygons_without_data_month_counts(section, year))
+
+
+@app.get("/api/admin/polygons-without-data-month")
+def admin_gap_month(request: Request, section: str = "", year: int = 0, month: int = 0, limit: int = 300):
+    admin.verify_admin(request.headers.get("authorization"))
+    return JSONResponse(admin.polygons_without_data_month(section, year, month, max(1, min(limit, 3000))))
+
+
 @app.post("/api/admin/apply-exact-names")
 def admin_apply_exact_names(request: Request):
     """Automatic pass: place unplaced rows whose CSV subdivision matches a
@@ -620,6 +632,21 @@ async def admin_upload_data(request: Request):
         try:
             result["committed"] = cms_import.commit_session(result["sessionId"])
             result["published"] = True
+            # AUTOMATIC POLYGON ASSIGNMENT — a published row without a polygon
+            # is invisible on the map for every period. This is exactly what hid
+            # the July–September rentals from 30d/90d (2026-10-30 incident).
+            try:
+                assigned = 0
+                for _ in range(6):
+                    chunk = admin.assign_chunk("subdivisions", None, 15000)
+                    assigned += int(chunk.get("assigned") or 0)
+                    if chunk.get("done") or chunk.get("error"):
+                        break
+                result["assignedRows"] = assigned
+            except Exception as exc:  # noqa: BLE001 - the upload itself succeeded
+                result["assignError"] = str(exc)[:200]
+            engine._agg_cache.clear()
+            engine._ref_date["value"] = None
         except Exception as exc:  # noqa: BLE001
             result["published"] = False
             result["commitError"] = str(exc)[:200]
