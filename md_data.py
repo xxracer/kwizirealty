@@ -12,8 +12,21 @@ import datetime as _dt
 import decimal
 import os
 import re
+import tempfile
 import threading
 import time
+
+# Vercel has no HOME. DuckDB reads HOME when the module / MotherDuck extension
+# loads, so it MUST be set BEFORE `import duckdb`.
+_HOME = (
+    os.environ.get("HOME")
+    or os.environ.get("USERPROFILE")
+    or tempfile.gettempdir()
+    or "/tmp"
+)
+if not os.path.isdir(_HOME):
+    _HOME = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+os.environ["HOME"] = _HOME
 
 import duckdb
 
@@ -60,30 +73,43 @@ def _connection():
             raise RuntimeError(
                 "MotherDuck is not configured: set MOTHERDUCK_TOKEN and MOTHERDUCK_DATABASE."
             )
-        # Vercel (and some containers) have no HOME. DuckDB needs a writable
-        # home/extension/temp directory for the MotherDuck extension.
+        # Vercel (and some containers) have no HOME. DuckDB reads the HOME
+        # environment variable directly when it loads the MotherDuck extension,
+        # so set it BEFORE connecting (the connect(config=...) is not enough).
         import tempfile
 
         home = (
             os.environ.get("HOME")
             or os.environ.get("USERPROFILE")
             or tempfile.gettempdir()
+            or "/tmp"
         )
+        if not os.path.isdir(home):
+            home = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+        os.environ["HOME"] = home
+        os.environ.setdefault("XDG_CACHE_HOME", os.path.join(home, ".cache"))
         ext_dir = os.path.join(home, ".duckdb", "extensions")
         try:
             os.makedirs(ext_dir, exist_ok=True)
         except OSError:
-            home = tempfile.gettempdir()
+            home = tempfile.gettempdir() or "/tmp"
+            os.environ["HOME"] = home
             ext_dir = os.path.join(home, ".duckdb", "extensions")
             os.makedirs(ext_dir, exist_ok=True)
-        con = duckdb.connect(
-            f"md:{db}?motherduck_token={token}",
-            config={
-                "home_directory": home,
-                "extension_directory": ext_dir,
-                "temp_directory": tempfile.gettempdir(),
-            },
-        )
+        cfg = {
+            "home_directory": home,
+            "extension_directory": ext_dir,
+            "temp_directory": tempfile.gettempdir() or "/tmp",
+        }
+        conn_str = f"md:{db}?motherduck_token={token}"
+        try:
+            con = duckdb.connect(conn_str, config=cfg)
+        except Exception as exc:  # noqa: BLE001 - retry once with HOME fixed
+            if "home directory" in str(exc).lower():
+                os.environ["HOME"] = home
+                con = duckdb.connect(conn_str, config=cfg)
+            else:
+                raise
         _local.con = con
     return con
 

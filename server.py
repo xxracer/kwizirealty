@@ -47,6 +47,14 @@ from metrics import (
     format_metric_value,
 )
 
+# Vercel has no HOME. Set it before anything can load DuckDB / MotherDuck.
+if not os.environ.get("HOME"):
+    import tempfile as _tempfile_home
+
+    os.environ["HOME"] = (
+        os.environ.get("USERPROFILE") or _tempfile_home.gettempdir() or "/tmp"
+    )
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = FastAPI(title="RESDOGS", docs_url=None, redoc_url=None)
