@@ -46,7 +46,10 @@ def _env(name, default=None):
 
 PROJECT = _env("NEXT_PUBLIC_FIREBASE_PROJECT_ID") or "resdogs-4c0ff"
 LOCATION = _env("NEXT_PUBLIC_DATACONNECT_LOCATION") or "us-east4"
-SERVICE = _env("DATACONNECT_SERVICE_ID") or "resdogs-4c0ff-service"
+# Firebase SQL (Cloud SQL / Data Connect) was disabled by the owner on
+# 2026-11-02. No hardcoded service fallback: without the env key every SQL
+# call fails loudly instead of silently billing Firebase again.
+SERVICE = _env("DATACONNECT_SERVICE_ID") or ""
 DC_URL = (
     f"https://firebasedataconnect.googleapis.com/v1/projects/{PROJECT}"
     f"/locations/{LOCATION}/services/{SERVICE}:executeGraphql"
@@ -126,6 +129,18 @@ def _gql(query: str, variables=None, retry=True):
     connection) while a query is in flight. Without a retry the map/report
     shows an empty result; with it the request simply succeeds a moment later.
     """
+
+    if _env("ALLOW_FIREBASE_SQL") != "1":
+        raise RuntimeError(
+            "Firebase SQL is PERMANENTLY disabled (Cloud SQL / Data Connect stopped "
+            "2026-11-02). The SQL backend is MotherDuck. Set ALLOW_FIREBASE_SQL=1 only "
+            "if you deliberately want to re-enable the old backend."
+        )
+    if not SERVICE:
+        raise RuntimeError(
+            "Firebase SQL is disabled (Cloud SQL / Data Connect stopped 2026-11-02). "
+            "The SQL backend is MotherDuck; configure it before using the map or CMS."
+        )
     body = json.dumps({"query": query, **({"variables": variables} if variables else {})}).encode()
     last_error = None
     for attempt in range(4):
@@ -169,8 +184,17 @@ def _gql(query: str, variables=None, retry=True):
 # returns the rows. That is how the per-polygon aggregates are computed:
 # the database does the GROUP BY, Python only shapes the answer.
 
+def motherduck_enabled() -> bool:
+    """True when the SQL backend is MotherDuck (the default since 2026-11-02)."""
+    return bool(_env("MOTHERDUCK_TOKEN"))
+
+
 def sql_literal(value) -> str:
     """A value rendered as a SQL literal (safe for the embedded statement)."""
+    if motherduck_enabled():
+        import md_data
+
+        return md_data.sql_literal(value)
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -187,6 +211,10 @@ def sql_exec(sql: str) -> int:
     mid-flight (WinError 10053 / RemoteDisconnected) and the statement is
     idempotent for our use (explicit UPDATE by key).
     """
+    if motherduck_enabled():
+        import md_data
+
+        return md_data.sql_exec(sql)
     sql = " ".join(sql.split())
     escaped = sql.replace("\\", "\\\\").replace('"', '\\"')
     query = 'mutation Exec { _execute(sql: "' + escaped + '") }'
@@ -216,6 +244,10 @@ def sql_rows(sql: str, use_cache: bool = True) -> list[dict]:
     Pass ``use_cache=False`` for writes-adjacent reads (an upload that must
     compare against what was committed a second ago).
     """
+    if motherduck_enabled():
+        import md_data
+
+        return md_data.sql_rows(sql, use_cache)
     # The statement travels inside a GraphQL string literal, which forbids
     # raw newlines — collapse all whitespace first.
     sql = " ".join(sql.split())

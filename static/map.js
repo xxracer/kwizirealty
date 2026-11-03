@@ -51,9 +51,8 @@
     const n = Number(v);
     const f = METRIC_FMT[metric] || 'number';
     if (f === 'money') {
-      if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-      if (Math.abs(n) >= 1e3) return '$' + (n / 1e3).toFixed(0) + 'K';
-      return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+      // OWNER (2026-11-03): exact amounts, never K/M — "$360,000", not "$360K".
+      return '$' + Math.round(n).toLocaleString('en-US');
     }
     if (f === 'money2') return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
     if (f === 'pct') return n.toFixed(0) + '%';
@@ -76,7 +75,7 @@
     return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
   const money = (n) => (n === null || n === undefined ? '—' : '$' + Math.round(n).toLocaleString());
-  const compact = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString(undefined, { notation: 'compact', maximumFractionDigits: 1 }));
+  const compact = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US'));
 
   // ── colour ramp (the owner's rule: solid blue until Scale Range is on) ────
   function hexToRgb(h) {
@@ -982,7 +981,7 @@
   }
 
   function fmtRange(rc, n) {
-    if (rc.fmt === 'money') return n >= 1e6 ? '$' + (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? '$' + (n / 1e3).toFixed(0) + 'K' : '$' + n;
+    if (rc.fmt === 'money') return '$' + Math.round(n).toLocaleString('en-US');
     if (rc.fmt === 'sqft') return n >= 1000 ? (n / 1000).toFixed(0) + 'k' : String(n);
     if (rc.fmt === 'days') return n + 'd';
     if (rc.fmt === 'pct') return n + '%';
