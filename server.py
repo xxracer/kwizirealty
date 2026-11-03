@@ -447,6 +447,44 @@ def api_distinct(column: str = "property_type"):
 _zip_fallback_cache = {"at": 0.0, "data": None}
 
 
+@app.get("/api/diag")
+def api_diag():
+    """Temporary, read-only deployment diagnostic (no secrets in the response).
+
+    Tells exactly which piece is failing on Vercel: the duckdb library, the
+    MotherDuck token, the connection, or the properties table.
+    """
+    import os as _os
+
+    out = {
+        "python": _os.sys.version.split()[0] if hasattr(_os, "sys") else "",
+        "duckdb": False,
+        "duckdb_version": None,
+        "motherduck_token_present": bool(_os.environ.get("MOTHERDUCK_TOKEN")),
+        "motherduck_token_length": len(_os.environ.get("MOTHERDUCK_TOKEN") or ""),
+        "motherduck_database": _os.environ.get("MOTHERDUCK_DATABASE") or "(unset)",
+        "allow_firebase_sql": _os.environ.get("ALLOW_FIREBASE_SQL") or "(unset)",
+    }
+    try:
+        import duckdb as _duckdb
+        out["duckdb"] = True
+        out["duckdb_version"] = _duckdb.__version__
+    except Exception as exc:  # noqa: BLE001
+        out["duckdb_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+        return JSONResponse(out)
+    try:
+        import md_data
+        out["dotenv_file_present"] = _os.path.exists(getattr(md_data, "_ENV_FILE", ""))
+        out["effective_token_present"] = bool(md_data._env("MOTHERDUCK_TOKEN"))
+        out["effective_database"] = md_data._env("MOTHERDUCK_DATABASE") or "(unset)"
+        con = md_data._connection()
+        out["connected"] = True
+        out["properties_rows"] = int(con.execute("select count(*) from properties").fetchone()[0])
+    except Exception as exc:  # noqa: BLE001
+        out["connect_error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+    return JSONResponse(out)
+
+
 @app.get("/api/zip-fallback")
 def api_zip_fallback():
     """Rows that were placed by proximity (approximate ZIP fallback).
