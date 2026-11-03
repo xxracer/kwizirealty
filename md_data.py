@@ -60,7 +60,30 @@ def _connection():
             raise RuntimeError(
                 "MotherDuck is not configured: set MOTHERDUCK_TOKEN and MOTHERDUCK_DATABASE."
             )
-        con = duckdb.connect(f"md:{db}?motherduck_token={token}")
+        # Vercel (and some containers) have no HOME. DuckDB needs a writable
+        # home/extension/temp directory for the MotherDuck extension.
+        import tempfile
+
+        home = (
+            os.environ.get("HOME")
+            or os.environ.get("USERPROFILE")
+            or tempfile.gettempdir()
+        )
+        ext_dir = os.path.join(home, ".duckdb", "extensions")
+        try:
+            os.makedirs(ext_dir, exist_ok=True)
+        except OSError:
+            home = tempfile.gettempdir()
+            ext_dir = os.path.join(home, ".duckdb", "extensions")
+            os.makedirs(ext_dir, exist_ok=True)
+        con = duckdb.connect(
+            f"md:{db}?motherduck_token={token}",
+            config={
+                "home_directory": home,
+                "extension_directory": ext_dir,
+                "temp_directory": tempfile.gettempdir(),
+            },
+        )
         _local.con = con
     return con
 
