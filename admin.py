@@ -764,7 +764,7 @@ def assign_chunk(cls: str, after: dict | None, limit: int = 15000) -> dict:
 
     where = [
         "upload_session_id IS NULL",
-        f"{col} IS NULL",
+        f"coalesce({col}, '') = ''",
         "lat IS NOT NULL", "lng IS NOT NULL", "lat <> 0", "lng <> 0",
     ]
     if after:
