@@ -488,8 +488,20 @@ def api_diag():
         con = md_data._connection()
         out["connected"] = True
         out["properties_rows"] = int(con.execute("select count(*) from properties").fetchone()[0])
+        try:
+            out["geo_files_boundaries"] = int(
+                con.execute("select count(*) from geo_files").fetchone()[0]
+            )
+        except Exception as exc:  # noqa: BLE001
+            out["geo_files_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
     except Exception as exc:  # noqa: BLE001
         out["connect_error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+    try:
+        import engine as _engine
+
+        out["subdivisions_features"] = len(_engine.boundary_features("subdivisions"))
+    except Exception as exc:  # noqa: BLE001
+        out["boundary_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
     return JSONResponse(out)
 
 
