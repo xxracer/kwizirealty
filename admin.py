@@ -309,26 +309,47 @@ def upload_boundary(cls: str, filename: str, content: bytes) -> dict:
     if not parsed["features"]:
         raise HTTPException(status_code=400, detail="The boundary file has 0 areas")
 
+    # PRIMARY STORE: MotherDuck `geo_files` (no Firebase Storage needed).
+    geo_warning = ""
+    try:
+        import md_data
+
+        con = md_data._connection()
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS geo_files ("
+            "boundary VARCHAR PRIMARY KEY, content VARCHAR, updated_at TIMESTAMP)"
+        )
+        con.execute("DELETE FROM geo_files WHERE boundary = ?", [cls])
+        con.execute(
+            "INSERT INTO geo_files (boundary, content, updated_at) VALUES (?, ?, now())",
+            [cls, json.dumps(parsed, separators=(",", ":"))],
+        )
+    except Exception as exc:  # noqa: BLE001
+        geo_warning = f"Could not store the boundary in MotherDuck: {str(exc)[:200]}"
+
     gz = gzip.compress(content)
     object_path = f"cms_files/boundaries/{filename}"
-    _upload_object(object_path, gz, "application/gzip")
-    storage_url = _set_download_token(object_path)
-
-    record = {
-        "id": f"boundary-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
-        "name": filename,
-        "size": len(gz),
-        "uploadedAt": int(time.time() * 1000),
-        "storageUrl": storage_url,
-        "storagePath": object_path,
-    }
-    _write_firestore_file(record)
+    storage_url = ""
+    storage_warning = ""
+    try:
+        _upload_object(object_path, gz, "application/gzip")
+        storage_url = _set_download_token(object_path)
+        _write_firestore_file({
+            "id": f"boundary-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
+            "name": filename,
+            "size": len(gz),
+            "uploadedAt": int(time.time() * 1000),
+            "storageUrl": storage_url,
+            "storagePath": object_path,
+        })
+    except Exception as exc:  # noqa: BLE001 - the MD copy is the source of truth
+        storage_warning = (
+            "The boundary is live from MotherDuck, but the Firebase Storage "
+            f"copy failed: {str(exc)[:200]}"
+        )
 
     # The map must see the new geometry on the next request.
-    with engine._geom_lock:
-        engine._geom_cache.pop(cls, None)
-        engine._geojson_cache.pop(cls, None)
-    engine._index_cache.pop(cls, None)
+    engine.invalidate_boundary(cls)
 
     return {
         "ok": True,
@@ -337,6 +358,8 @@ def upload_boundary(cls: str, filename: str, content: bytes) -> dict:
         "features": len(parsed["features"]),
         "bytes": len(gz),
         "storageUrl": storage_url,
+        "storageWarning": storage_warning,
+        "motherduckWarning": geo_warning,
     }
 
 
@@ -1018,9 +1041,8 @@ def missing_subdivisions(limit: int | None = 300, section: str = "") -> dict:
 
 def _boundary_polygons() -> list[dict]:
     """Every subdivision polygon with its clean key, display name and ZIP."""
-    fc = fd.fetch_boundary_geojson("subdivisions")
     out, seen = [], set()
-    for feat in fc.get("features") or []:
+    for feat in engine.boundary_features("subdivisions"):
         props = feat.get("properties") or {}
         raw = props.get("Name") or props.get("NAME") or props.get("name") or ""
         clean = fd.clean_boundary_name(raw)
@@ -1079,10 +1101,9 @@ def polygons_without_data_by_year(limit: int = 300, section: str = "") -> dict:
     can have sales in 2024 and none in 2026. Returns one entry per year with
     the exact polygon names + ZIPs still missing that year.
     """
-    fc = fd.fetch_boundary_geojson("subdivisions")
     polys = []
     seen = set()
-    for feat in fc.get("features") or []:
+    for feat in engine.boundary_features("subdivisions"):
         props = feat.get("properties") or {}
         raw = props.get("Name") or props.get("NAME") or props.get("name") or ""
         clean = fd.clean_boundary_name(raw)
@@ -1119,8 +1140,7 @@ def polygons_without_data(limit: int | None = 500, threshold: int = 0, section: 
     The opposite list of `missing_subdivisions`: these are areas the map CAN
     draw but has nothing to colour, because no uploaded CSV covers them.
     """
-    fc = fd.fetch_boundary_geojson("subdivisions")
-    feats = fc.get("features") or []
+    feats = engine.boundary_features("subdivisions")
     cond = _section_condition(section)
     rows = fd.sql_rows(
         "SELECT poly_id_subdivisions AS p, count(*)::int AS n FROM properties "

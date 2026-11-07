@@ -460,22 +460,32 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
     category = SECTION_CATEGORY.get(section, section)
     gz = gzip.compress(content)
     object_path = f"cms_files/{category}/{filename}"
-    _upload_object(object_path, gz, "application/gzip")
-    url = _set_download_token(object_path)
     months = sorted({
         datetime.fromtimestamp(int(r["close_date_ts"]) / 1000, tz=timezone.utc).month
         for r in mapped if r.get("close_date_ts")
     })
-    _write_firestore_file({
-        "id": f"{category}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
-        "name": filename,
-        "size": len(gz),
-        "uploadedAt": int(time.time() * 1000),
-        "storageUrl": url,
-        "storagePath": object_path,
-        "year": default_year,
-        "months": months,
-    }, category=category)
+    # The rows are already in MotherDuck. Firebase Storage can be unavailable
+    # (e.g. 402 Payment Required while billing is suspended) — the DATA must
+    # not be lost because the file copy failed, so warn and keep going.
+    storage_warning = ""
+    try:
+        _upload_object(object_path, gz, "application/gzip")
+        url = _set_download_token(object_path)
+        _write_firestore_file({
+            "id": f"{category}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}",
+            "name": filename,
+            "size": len(gz),
+            "uploadedAt": int(time.time() * 1000),
+            "storageUrl": url,
+            "storagePath": object_path,
+            "year": default_year,
+            "months": months,
+        }, category=category)
+    except Exception as exc:  # noqa: BLE001 - data is already published
+        storage_warning = (
+            "The data was published to MotherDuck, but the file could not be "
+            f"stored in Firebase Storage: {str(exc)[:200]}"
+        )
 
     return {
         "ok": True,
@@ -496,6 +506,7 @@ def stage_import(section: str, filename: str, content: bytes) -> dict:
         "duplicateRows": duplicate_rows,
         "effect": effect,
         "headers": headers,
+        "storageWarning": storage_warning,
     }
 
 

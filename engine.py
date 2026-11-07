@@ -229,6 +229,73 @@ def _download(url: str, dest: str) -> str:
     return dest
 
 
+def _features_from_motherduck(boundary: str) -> list[dict]:
+    """Boundary polygons stored in MotherDuck `geo_files` (no Firebase needed)."""
+    try:
+        import md_data
+
+        con = md_data._connection()
+        row = con.execute(
+            "SELECT content FROM geo_files WHERE boundary = ?", [boundary]
+        ).fetchone()
+        if row and row[0]:
+            import json
+
+            fc = json.loads(row[0])
+            return fc.get("features") or []
+    except Exception as exc:  # noqa: BLE001
+        print(f"[engine] MotherDuck boundary {boundary} unavailable: {exc}")
+    return []
+
+
+def invalidate_boundary(boundary: str) -> None:
+    """Drop the cached geometry after an admin upload."""
+    with _geom_lock:
+        _geom_cache.pop(boundary, None)
+        _geojson_cache.pop(boundary, None)
+    with _index_lock:
+        _index_cache.pop(boundary, None)
+
+
+_BUNDLED_FILES = {
+    "subdivisions": "subdivisions",
+    "neighborhoods": "neighborhoods",
+    "elementary": "elementary",
+    "highschools": "highschools",
+    "middle": "middle",
+    "zipcodes": "zipcodes",
+}
+
+
+def _features_from_bundled(boundary: str) -> list[dict]:
+    """Polygons shipped WITH the app (static/geojson/*.geojson.gz).
+
+    This is the source that cannot fail because of Firebase billing (402) or
+    network problems: the file travels with the deployment.
+    """
+    name = _BUNDLED_FILES.get(boundary)
+    if not name:
+        return []
+    import gzip
+    import json
+
+    base = os.path.join(BASE_DIR, "static", "geojson", name)
+    for path in (base + ".geojson.gz", base + ".geojson"):
+        if not os.path.exists(path):
+            continue
+        try:
+            data = open(path, "rb").read()
+            if path.endswith(".gz"):
+                data = gzip.decompress(data)
+            fc = json.loads(data.decode("utf-8"))
+            feats = fc.get("features") or []
+            if feats:
+                return feats
+        except Exception as exc:  # noqa: BLE001
+            print(f"[engine] bundled {boundary} unreadable: {exc}")
+    return []
+
+
 def boundary_features(boundary: str) -> list[dict]:
     """The polygons for a boundary class, as GeoJSON features.
 
@@ -250,6 +317,10 @@ def boundary_features(boundary: str) -> list[dict]:
     except Exception as exc:  # noqa: BLE001 - fall back to R2
         print(f"[engine] CMS boundary for {boundary} unavailable: {exc}")
 
+    if not features:
+        features = _features_from_motherduck(boundary)
+    if not features:
+        features = _features_from_bundled(boundary)
     if not features:
         features = _features_from_r2(boundary)
 

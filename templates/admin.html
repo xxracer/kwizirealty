@@ -1605,6 +1605,7 @@
       <div class="rp-detail hidden" id="rp-detail-${idx}">
         ${failed ? '' : `<p><span class="rp-label">What this document uploaded:</span> ${fmt(rows)} rows${skipped ? ` · ${fmt(skipped)} skipped` : ''}${r.year ? ` · Year ${r.year}` : ''}</p>`}
         ${failed ? '' : `<p><span class="rp-label" style="color:#6ee7b7">New:</span> ${fmt(newRows)} rows did not exist in the database yet and were added.</p>`}
+        ${r.storageWarning ? `<p class="rp-skipped">${esc(r.storageWarning)}</p>` : ''}
         ${failed ? '' : `<p><span class="rp-label" style="color:#fcd34d">Already in the database:</span> ${fmt(updatedRows)} rows had the same MLS + year and were refreshed in place.</p>`}
         ${duplicateRows ? `<p class="rp-skipped">Duplicates: ${fmt(duplicateRows)} rows repeated an MLS + year inside this file; the upsert collapsed them.</p>` : ''}
         ${reasons ? `<p class="rp-skipped">Skipped rows: ${esc(reasons)}.</p>` : ''}
